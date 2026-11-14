@@ -294,6 +294,7 @@ impl SessionConfiguration {
             .map(|config| config.permission_profile.clone())
             .unwrap_or_else(|| self.permission_profile_state.snapshot());
         ThreadConfigSnapshot {
+            request_country: self.step_settings.request_country.clone(),
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.step_settings.service_tier.clone(),
@@ -752,6 +753,7 @@ impl Session {
             request_kind,
         );
         ExecutionMetadata::from_settings(&step_context.settings).apply_to(&mut responses_metadata);
+        responses_metadata.request_country = step_context.settings.request_country().clone();
         responses_metadata.guardian_recorded_items = self.parent_observer_event_tx.get().is_some();
         if responses_metadata.subagent_header.as_deref()
             == Some(crate::guardian::GUARDIAN_REVIEWER_NAME)
@@ -788,11 +790,11 @@ impl Session {
     // request remains turn-backed; local compaction does not have a finalized request inventory.
     pub(crate) async fn compaction_responses_metadata(
         &self,
-        turn_context: &TurnContext,
+        step_context: &StepContext,
         compaction_metadata: CompactionTurnMetadata,
     ) -> CodexResponsesMetadata {
         self.compaction_responses_metadata_for_window(
-            turn_context,
+            step_context,
             compaction_metadata,
             self.current_window().await,
         )
@@ -800,15 +802,17 @@ impl Session {
 
     pub(crate) fn compaction_responses_metadata_for_window(
         &self,
-        turn_context: &TurnContext,
+        step_context: &StepContext,
         compaction_metadata: CompactionTurnMetadata,
         (window_id, window_number, context_window_id): (String, u64, ContextWindowId),
     ) -> CodexResponsesMetadata {
-        let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
+        let turn_context = &step_context.turn;
+        let mut responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
             self.installation_id.clone(),
             window_id,
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         );
+        responses_metadata.request_country = step_context.settings.request_country().clone();
         self.with_window_and_fork_metadata(
             turn_context,
             responses_metadata,

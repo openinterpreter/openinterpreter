@@ -111,6 +111,7 @@ impl PreparedGuardianContext {
             .model_client
             .responses_websocket_enabled();
         let options = crate::StartThreadOptions {
+            request_country: self.context.request_country.clone(),
             prompt_cache_key: self.parent.services.model_client.prompt_cache_key_policy(),
             history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Paginated),
             internal_parent: Some(crate::thread_manager::InternalSessionParent {

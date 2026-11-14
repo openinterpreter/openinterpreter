@@ -67,6 +67,7 @@ async fn prepare_spawn_inputs(
     }
     let exec_policy = inherited_exec_policy_for_parent(parent, &config).await;
     let mut thread_options = StartThreadOptions {
+        request_country: options.request_country,
         session_source: Some(source),
         thread_source: Some(ThreadSource::Subagent),
         initial_history,

@@ -1,6 +1,7 @@
 //! Background model warmup shared by startup and idle-thread resume.
 //! One scheduled task owns the prepared client session until the next regular
 //! turn consumes it; shutdown and turn cancellation use the same handoff.
+//! Warmup settings are captured when the worker constructs its turn.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -513,6 +513,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) attached_thread: bool,
     pub(crate) startup: Option<Arc<startup::SessionStartup>>,
     pub(crate) config: Config,
+    pub(crate) request_country: codex_protocol::RequestCountry,
     pub(crate) prompt_cache_key: PromptCacheKey,
     pub(crate) allow_provider_model_fallback: bool,
     pub(crate) instructions: SessionInstructions,
@@ -707,6 +708,7 @@ impl Session {
             attached_thread,
             startup,
             config,
+            request_country,
             prompt_cache_key,
             allow_provider_model_fallback,
             instructions,
@@ -1032,6 +1034,7 @@ impl Session {
             turn_extension_init,
             provider: provider_auth.model_provider(config.model_provider.clone()),
             step_settings: Arc::new(StepSettings {
+                request_country,
                 collaboration_mode,
                 reasoning_summary: config.model_reasoning_summary,
                 service_tier: config.service_tier.clone(),

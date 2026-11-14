@@ -32,9 +32,16 @@ use crate::init_state_db;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::SessionSettingsUpdate;
 use crate::session::step_context::StepContext;
+use crate::session::step_settings::StepSettingsUpdate;
+use crate::session::tests::update_selected_settings_for_test;
 use crate::thread_manager::ForkSnapshot;
 use crate::thread_manager::StartThreadOptions;
+use crate::tools::context::ToolCallSource;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolPayload;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
+use crate::tools::handlers::multi_agents_v2::SendMessageHandler;
+use crate::tools::registry::ToolExecutor;
 use assert_matches::assert_matches;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::Instructions;
@@ -52,6 +59,7 @@ use codex_login::CodexAuth;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::AgentPath;
+use codex_protocol::RequestCountry;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -1047,19 +1055,25 @@ async fn send_input_submits_user_message() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
 
-    let submission_id = harness
-        .control
-        .send_input(
-            thread_id,
-            vec![UserInput::Text {
+    let control = thread
+        .session
+        .services
+        .local_agent_runtime
+        .control(thread.session.session_id());
+    let receipt = control
+        .send(SendRequest {
+            caller: ThreadId::new(),
+            target: AgentTarget::Id(thread_id),
+            resume_config: harness.config.clone(),
+            input: AgentInput::UserInput(vec![UserInput::Text {
                 text: "hello from tests".to_string(),
                 text_elements: Vec::new(),
-            }],
-            Default::default(),
-        )
+            }]),
+            start_options: Default::default(),
+        })
         .await
-        .expect("send_input should succeed");
-    assert!(!submission_id.is_empty());
+        .expect("a live recipient does not require a registered sender");
+    assert!(!receipt.submission_id.is_empty());
     wait_for_recorded_user_message(thread.as_ref(), "hello from tests").await;
 }
 
@@ -1293,6 +1307,7 @@ async fn spawn_v2_reload_test_child(
             text_input("hello child"),
             source,
             SpawnAgentOptions {
+                request_country: parent.config_snapshot().await.request_country,
                 parent_thread_id: Some(parent.session.thread_id),
                 ..Default::default()
             },
@@ -1306,6 +1321,8 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
     config.model = Some("gpt-5.6-sol".to_string());
+    let germany = RequestCountry::from_iso_code("DE").unwrap();
+    let united_states = RequestCountry::from_iso_code("US").unwrap();
     config.multi_agent_v2.max_concurrent_threads_per_session = 3;
     config.permissions.allow_login_shell = true;
     config
@@ -1318,6 +1335,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let root = harness
         .manager
         .start_thread(StartThreadOptions {
+            request_country: germany.clone(),
             history_mode: Some(ThreadHistoryMode::Paginated),
             client_mcp_extensions: client_mcp_extensions.clone(),
             user_instructions: Some(LoadedUserInstructions {
@@ -1335,6 +1353,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         })
         .await
         .expect("start root thread");
+    assert_eq!(root.thread.config_snapshot().await.request_country, germany);
     let control = root
         .thread
         .session
@@ -1448,10 +1467,14 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
                         parent_turn.config.cwd.clone(),
                         vec![selection],
                     )),
+                    step_settings: StepSettingsUpdate {
+                        request_country: Some(united_states.clone()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 })
                 .await
-                .expect("save parent environments");
+                .expect("save parent environments and country");
             parent_thread.session.mark_interrupted();
             // The fixture has no task runner to finish the turn or consume child results.
             *parent_thread.session.active_turn.lock().await = None;
@@ -1475,6 +1498,13 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
+    assert_eq!(
+        reloaded_child.config_snapshot().await.request_country,
+        match route {
+            V2ReloadRoute::Sender => germany,
+            V2ReloadRoute::NestedParent => united_states,
+        },
+    );
     if matches!(route, V2ReloadRoute::Sender) {
         assert_eq!(
             harness
@@ -1733,10 +1763,12 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
+    let admitted_country = RequestCountry::from_iso_code("DE").unwrap();
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let parent = harness
         .manager
         .start_thread(StartThreadOptions {
+            request_country: admitted_country.clone(),
             history_mode: Some(ThreadHistoryMode::Legacy),
             thread_instructions_provider: Some(Arc::new(TestThreadInstructionsProvider {
                 text: "initial thread instructions".into(),
@@ -1816,6 +1848,7 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
     });
     let resumed_parent = resumed_manager
         .start_thread(StartThreadOptions {
+            request_country: admitted_country.clone(),
             initial_history,
             session_source: Some(SessionSource::Exec),
             thread_instructions_provider: Some(provider.clone()),
@@ -1839,30 +1872,37 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
     assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
 
     if nested {
-        let turn = resumed_parent.thread.session.new_default_turn().await;
-        resumed_parent
-            .thread
-            .session
-            .services
-            .agent_control
-            .send(crate::SendRequest {
-                caller: parent_thread_id,
-                target: crate::AgentTarget::Id(target_thread_id),
-                resume_config: crate::agent::child_config::build_agent_resume_config(&turn)
-                    .expect("capture resume config"),
-                input: crate::AgentInput::Message {
-                    message: AgentMessage::Plaintext("hello after resume".to_string()),
-                    mode: MessageDeliveryMode::QueueOnly,
+        let session = &resumed_parent.thread.session;
+        let turn = session.new_default_turn().await;
+        assert_eq!(turn.request_country(), &admitted_country);
+        let mut issuing_step = StepContext::for_test(Arc::clone(&turn));
+        let issuing_country = RequestCountry::from_iso_code("US").unwrap();
+        update_selected_settings_for_test(
+            Arc::make_mut(&mut Arc::make_mut(&mut issuing_step).settings),
+            |selected| selected.request_country = issuing_country,
+        );
+        SendMessageHandler
+            .handle(ToolInvocation {
+                session: Arc::clone(session),
+                turn,
+                step_context: issuing_step,
+                cancellation_token: CancellationToken::new(),
+                tracker: Default::default(),
+                call_id: "queue-only-cold-load".to_string(),
+                tool_name: codex_tools::ToolName::plain("send_message"),
+                source: ToolCallSource::DirectPlaintextMessage,
+                payload: ToolPayload::Function {
+                    arguments: serde_json::json!({
+                        "target": target_thread_id.to_string(),
+                        "message": "hello after resume",
+                    })
+                    .to_string(),
                 },
-                start_options: TurnStartOptions {
-                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-                    cyber_access_program: turn.cyber_access_program,
-                    ..Default::default()
-                },
+                native_call: None,
+                environments: Default::default(),
             })
             .await
-            .expect("message should reload the grandchild");
+            .expect("queue-only message should reload the grandchild");
         assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
     } else {
         resumed_manager
@@ -1874,6 +1914,14 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
         .get_thread(target_thread_id)
         .await
         .expect("resumed target should be loaded");
+    assert_eq!(
+        resumed_target.config_snapshot().await.request_country,
+        if nested {
+            RequestCountry::UNKNOWN
+        } else {
+            admitted_country
+        },
+    );
     let inherited = resumed_target.session.inherited_instructions().await;
     let root_provider = resumed_parent
         .thread
@@ -5124,6 +5172,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
 
     parent_thread
         .update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::from_iso_code("US").unwrap()),
             environments: Some(TurnEnvironmentRequests::new(
                 harness.config.cwd.clone(),
                 Vec::new(),
@@ -5207,6 +5256,10 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         roots
     );
     let resumed_snapshot = resumed_thread.config_snapshot().await;
+    assert_eq!(
+        resumed_snapshot.request_country,
+        RequestCountry::from_iso_code("US").unwrap()
+    );
     let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: resumed_parent_thread_id,
         depth: resumed_depth,

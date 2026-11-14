@@ -1,6 +1,8 @@
 //! Output gates allow inference immediately, hold complete output, and cancel with the turn.
 use anyhow::Result;
+use codex_core::RequestCountry;
 use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::GuardianAssessment;
@@ -11,6 +13,7 @@ use codex_extension_api::ModelResponseInterceptor;
 use codex_extension_api::ModelResponseStream;
 use codex_extension_api::ResponseEvent;
 use codex_features::Feature;
+use codex_login::CodexAuth;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -18,6 +21,9 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -140,6 +146,116 @@ impl ModelRequestContributor for BudgetCache {
     fn budget_exhausted<'a>(&'a self, _thread_id: &'a str) -> ExtensionFuture<'a, bool> {
         Box::pin(async { *self.0.lock().await })
     }
+}
+
+#[tokio::test]
+#[test_case::test_case(false; "future settings only")]
+#[test_case::test_case(true; "live country update without model switching")]
+async fn country_settings_follow_step_and_turn_lifetimes(live_update: bool) -> Result<()> {
+    const CALL_ID: &str = "country-check";
+    let server = responses::start_mock_server().await;
+    let first = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("first"),
+            responses::ev_function_call(CALL_ID, "check_status", "{}"),
+            ev_completed("first"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config
+                .features
+                .disable(Feature::StepModelSwitching)
+                .expect("disable step model switching");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mut options = test.start_thread_options().await;
+    options.request_country = RequestCountry::from_iso_code("DE")?;
+    options.dynamic_tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "check_status".into(),
+        description: "Check status.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    })];
+    let thread = test.thread_manager.start_thread(options).await?.thread;
+    let message = || {
+        TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Check status.".into(),
+            text_elements: Vec::new(),
+        }])
+    };
+    let TurnInputSubmission::Started { turn_id, .. } =
+        thread.start_or_steer_turn(message()).await?
+    else {
+        panic!("expected a new turn");
+    };
+    wait_for_event(
+        &thread,
+        |event| matches!(event, EventMsg::DynamicToolCallRequest(call) if call.call_id == CALL_ID),
+    )
+    .await;
+    thread
+        .update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::from_iso_code("US")?),
+            ..Default::default()
+        })
+        .await?;
+    if live_update {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        thread
+            .submit(Op::TurnSettings {
+                turn_id: turn_id.clone(),
+                update: TurnSettingsUpdate {
+                    request_country: Some(RequestCountry::from_iso_code("JP")?),
+                    ..Default::default()
+                },
+                reply,
+            })
+            .await?;
+        assert_eq!(receiver.await?, TurnSettingsUpdateOutcome::Applied);
+    }
+    let continuation =
+        responses::mount_sse_once(&server, responses::sse_completed("continued")).await;
+    thread
+        .submit(Op::DynamicToolResponse {
+            id: CALL_ID.into(),
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: "ready".into(),
+                }],
+                success: true,
+            },
+        })
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let next = responses::mount_sse_once(&server, responses::sse_completed("next")).await;
+    thread.start_or_steer_turn(message()).await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let cleared = responses::mount_sse_once(&server, responses::sse_completed("cleared")).await;
+    let mut input = message();
+    input.thread_settings.request_country = Some(RequestCountry::UNKNOWN);
+    thread.start_or_steer_turn(input).await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        [
+            first.single_request(),
+            continuation.single_request(),
+            next.single_request(),
+            cleared.single_request()
+        ]
+        .map(|request| request.body_json().get("request_country").cloned()),
+        [
+            Some(json!("DE")),
+            Some(json!(if live_update { "JP" } else { "DE" })),
+            Some(json!("US")),
+            Some(json!(null))
+        ],
+    );
+    Ok(())
 }
 
 #[tokio::test]

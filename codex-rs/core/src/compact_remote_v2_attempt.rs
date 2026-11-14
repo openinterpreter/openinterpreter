@@ -200,10 +200,10 @@ pub(super) async fn run_remote_compact_v2_attempt(
 
     let mut responses_metadata = match captured_window {
         Some(window) => {
-            sess.compaction_responses_metadata_for_window(turn_context, compaction_metadata, window)
+            sess.compaction_responses_metadata_for_window(step_context, compaction_metadata, window)
         }
         None => {
-            sess.compaction_responses_metadata(turn_context, compaction_metadata)
+            sess.compaction_responses_metadata(step_context, compaction_metadata)
                 .await
         }
     };

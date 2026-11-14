@@ -607,6 +607,11 @@ impl TurnContext {
         Arc::clone(&self.next_step_settings.load().model_info)
     }
 
+    /// Country captured when this turn was admitted. Subsequent steps capture their own settings.
+    pub fn request_country(&self) -> &codex_protocol::RequestCountry {
+        self.initial_settings.request_country()
+    }
+
     /// Legacy: returns the frozen initial-turn model metadata.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn model_info(&self) -> &Arc<CatalogModel> {

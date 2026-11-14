@@ -409,6 +409,7 @@ impl TestAuth {
 }
 
 pub struct TestCodexBuilder {
+    request_country: codex_protocol::RequestCountry,
     apps_tools_cache: codex_core::CodexAppsToolsCache,
     config_mutators: Vec<Box<ConfigMutator>>,
     thread_manager_configurer: Option<Box<dyn FnOnce(ThreadManager) -> ThreadManager + Send>>,
@@ -434,6 +435,12 @@ pub struct TestCodexBuilder {
 }
 
 impl TestCodexBuilder {
+    /// Set the initial country when creating a new thread.
+    pub fn with_request_country(mut self, request_country: codex_protocol::RequestCountry) -> Self {
+        self.request_country = request_country;
+        self
+    }
+
     pub fn with_apps_tools_cache(mut self, cache: codex_core::CodexAppsToolsCache) -> Self {
         self.apps_tools_cache = cache;
         self
@@ -997,6 +1004,7 @@ impl TestCodexBuilder {
                     None
                 };
                 Box::pin(thread_manager.start_thread(StartThreadOptions {
+                    request_country: self.request_country.clone(),
                     history_mode: self.history_mode,
                     client_mcp_extensions: client_mcp_extensions(),
                     environments: environment_requests,
@@ -1585,6 +1593,7 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
+        request_country: Default::default(),
         apps_tools_cache: Default::default(),
         thread_manager_configurer: None,
         config_mutators: vec![Box::new(|config| {

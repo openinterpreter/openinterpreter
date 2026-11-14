@@ -100,6 +100,7 @@ pub(crate) async fn run_codex_thread_interactive(
         attached_thread: false,
         startup: Some(Arc::clone(&startup)),
         config,
+        request_country: parent_ctx.request_country().clone(),
         prompt_cache_key: parent_session
             .services
             .model_client

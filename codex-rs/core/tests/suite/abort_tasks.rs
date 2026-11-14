@@ -13,10 +13,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_protocol::RequestCountry;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::ThreadIdle;
 use core_test_support::responses::ev_assistant_message;
@@ -491,6 +493,12 @@ async fn graceful_suspend_preserves_a_finishing_child_result(
     }
     let server = start_mock_server().await;
     let response = mount_sse_once(&server, sse(vec![ev_completed("received")])).await;
+    let germany = RequestCountry::from_iso_code("DE")?;
+    let initial_country = if scenario == ChildHandoff::GrandchildFinishes {
+        germany.clone()
+    } else {
+        RequestCountry::default()
+    };
     let replacement = test_codex()
         .with_model("gpt-5.6-sol")
         .with_config(|config| {
@@ -503,7 +511,23 @@ async fn graceful_suspend_preserves_a_finishing_child_result(
         .restart_with_auto_env(&server, &source)
         .await?;
     let root = replacement.codex.clone();
+    if !initial_country.is_omitted() {
+        root.update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(initial_country.clone()),
+            ..Default::default()
+        })
+        .await?;
+    }
+    assert_eq!(
+        root.config_snapshot().await.request_country,
+        initial_country
+    );
     if scenario == ChildHandoff::ParentEvicted {
+        root.update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(germany.clone()),
+            ..Default::default()
+        })
+        .await?;
         // The cold worker has one child slot. Load the grandchild through its real
         // parent and release the parent's slot before admitting the grandchild.
         let leaf_id =
@@ -527,6 +551,8 @@ async fn graceful_suspend_preserves_a_finishing_child_result(
             leaf.thread.session_source().parent_thread_id(),
             Some(worker_id)
         );
+        assert_eq!(root.config_snapshot().await.request_country, germany);
+        assert_eq!(leaf.thread.config_snapshot().await.request_country, germany);
         assert!(
             replacement
                 .thread_manager
@@ -537,10 +563,19 @@ async fn graceful_suspend_preserves_a_finishing_child_result(
         return Ok(());
     }
     let parent = if scenario == ChildHandoff::GrandchildFinishes {
+        root.update_thread_settings(ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::default()),
+            ..Default::default()
+        })
+        .await?;
         let loaded = replacement
             .thread_manager
             .load_suspended_agent(&root, worker_id)
             .await?;
+        assert_eq!(
+            loaded.thread.config_snapshot().await.request_country,
+            RequestCountry::default()
+        );
         assert_matches!(loaded.thread.recover_turn_if_idle(RecoverTurnRequest { turn_id: worker_turn.clone(), thread_settings: Default::default(), trace: None, prompt_cache_ttl: None, cyber_access_program: None }).await?,
             codex_core::StartIfIdleSubmission::Started { turn_id, .. } if turn_id == worker_turn);
         Arc::clone(&loaded.thread)

@@ -1177,7 +1177,22 @@ mod tests {
 
     #[test]
     fn direct_serialization_preserves_websocket_request_payload() {
+        for (country_code, expected_country) in [
+            (None, None),
+            (Some(" de "), Some(json!("DE"))),
+            (Some("xX"), Some(Value::Null)),
+        ] {
+            assert_serialized_request(country_code, expected_country);
+        }
+    }
+
+    fn assert_serialized_request(country_code: Option<&str>, expected_country: Option<Value>) {
         let api_request = ResponsesApiRequest {
+            request_country: country_code
+                .map(codex_protocol::RequestCountry::from_iso_code)
+                .transpose()
+                .expect("country is valid")
+                .unwrap_or_default(),
             model: "gpt-test".to_string(),
             input: vec![ResponseItem::Message {
                 status: None,
@@ -1230,6 +1245,10 @@ mod tests {
 
         let mut expected_payload =
             serde_json::to_value(&api_request).expect("serialize responses API request");
+        assert_eq!(
+            expected_payload.get("request_country"),
+            expected_country.as_ref()
+        );
         expected_payload["type"] = json!("response.create");
         expected_payload["previous_response_id"] = json!("resp-1");
         expected_payload["generate"] = json!(false);
@@ -1241,6 +1260,10 @@ mod tests {
         let wire_payload =
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
+        assert_eq!(
+            wire_payload.get("request_country"),
+            expected_country.as_ref()
+        );
         assert_eq!(wire_payload, expected_payload);
     }
 

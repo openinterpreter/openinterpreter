@@ -82,8 +82,9 @@ impl LocalAgentControl {
             // stores without a graph, using the same identity restoration path.
             self.restore_agent_identities(&config, &state, vec![id])
                 .await;
+            let config = config.as_ref().clone();
             let pin = self
-                .ensure_v2_agent_loaded(config.as_ref().clone(), id, Some(thread))
+                .ensure_v2_agent_loaded(config, id, Some(thread))
                 .await?;
             thread = state.get_thread(id).await?;
             // Allow an idle ancestor to give up its slot while its child reloads at capacity.

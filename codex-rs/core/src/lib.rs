@@ -19,6 +19,8 @@ pub use responses_headers::CodexResponsesHeaders;
 mod responses_metadata;
 mod responses_retry;
 pub(crate) mod session;
+pub use codex_protocol::InvalidRequestCountry;
+pub use codex_protocol::RequestCountry;
 pub use codex_protocol::turn_input::NotSubmittedReason;
 pub use codex_protocol::turn_input::PromptCacheTtl;
 pub use codex_protocol::turn_input::RecoverTurnRequest;

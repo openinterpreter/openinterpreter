@@ -1,5 +1,16 @@
 //! Multi-turn Astra scenarios snapshot the model-visible request history of shipped features.
 
+#[path = "scenarios_turn_input_agent_message.rs"]
+mod turn_input_agent_message;
+
+#[path = "scenarios_multi_environment_mcp.rs"]
+mod multi_environment_mcp;
+
+use super::image_rollout::RecordingFileAttachmentStore;
+use super::permissions_messages::PermissionPathScenario;
+use codex_attachment_store::AttachmentStoreErrorKind;
+use codex_core::RequestCountry;
+use codex_protocol_test_support::ContentItemTestExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -2381,6 +2392,1726 @@ async fn app_tool_exposure_request_history() -> Result<()> {
             &ContextSnapshotOptions::default()
                 .rewrite_known_segments()
                 .include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_catalog_refresh_preserves_tools_and_history() -> Result<()> {
+    let requests = super::spawn_agent_description::model_catalog_refresh_requests(
+        MultiAgentVersion::V1,
+        /*model_catalog_in_context*/ true,
+    )
+    .await?;
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "Catalog refreshes append the updated listing once while preserving tools and prior input.",
+        &requests,
+        &ContextSnapshotOptions::default().include_request_settings(),
+    ));
+    Ok(())
+}
+
+#[test_case::test_case(PermissionPathScenario::OmittedPaths; "omitted_paths")]
+#[test_case::test_case(PermissionPathScenario::DeniedReads; "denied_reads")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_permission_paths_follow_selected_model(
+    scenario: PermissionPathScenario,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    if matches!(scenario, PermissionPathScenario::DeniedReads) {
+        core_test_support::skip_if_target_windows!(
+            Ok(()),
+            "Windows restricted-token sandbox cannot enforce deny-read policies"
+        );
+    }
+    let requests =
+        super::permissions_messages::catalog_permission_paths_model_change_requests(scenario)
+            .await?;
+    let mut bodies = requests
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    // Keep the complete history, but collapse the large platform-specific fixture path lists
+    // before snapshot hashing. The helper verifies selected roots, denial facts, and omission.
+    let roots = regex_lite::Regex::new(r"(?m)^(Model [AB] roots: ).*$")?;
+    let filesystem = regex_lite::Regex::new(r"<filesystem>.*</filesystem>")?;
+    for body in &mut bodies {
+        for item in body["input"].as_array_mut().expect("request input") {
+            for content in item["content"].as_array_mut().into_iter().flatten() {
+                if let Some(text) = content["text"].as_str() {
+                    let text = roots.replace_all(text, "${1}<BOUNDED_ROOT_LIST>.");
+                    content["text"] = filesystem
+                        .replace_all(
+                            &text,
+                            "<filesystem><LARGE_PERMISSION_PATH_FIXTURE/></filesystem>",
+                        )
+                        .into_owned()
+                        .into();
+                }
+            }
+        }
+    }
+    let entries = bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>();
+    let (snapshot_name, description) = match scenario {
+        PermissionPathScenario::OmittedPaths => (
+            "catalog_writable_roots_follow_selected_model",
+            "Catalog root and omitted-path wording follows the selected model, appending changed permissions once while preserving prior input and the mandatory omission warning.",
+        ),
+        PermissionPathScenario::DeniedReads => (
+            "catalog_denied_reads_follow_selected_model",
+            "Catalog denied-read wording follows the selected model, appending changed permissions once while preserving prior input, denial facts, and mandatory policy warnings.",
+        ),
+    };
+    insta::assert_snapshot!(
+        snapshot_name,
+        context_snapshot::format_context_snapshot(
+            description,
+            &entries,
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
+fn compaction_chunk(
+    gate: Option<oneshot::Receiver<()>>,
+    events: Vec<serde_json::Value>,
+) -> StreamingSseChunk {
+    StreamingSseChunk {
+        gate,
+        body: sse(events),
+    }
+}
+
+fn compaction_output(value: &str) -> serde_json::Value {
+    json!({"type": "response.output_item.done", "item": {
+        "type": "compaction", "encrypted_content": value
+    }})
+}
+
+async fn async_compaction_test(
+    builder: TestCodexBuilder,
+    responses_uri: &str,
+    features: Vec<Feature>,
+    environment: TestEnv,
+    configure: impl Fn(&mut Config) + Send + Sync + 'static,
+) -> Result<(wiremock::MockServer, TestCodex)> {
+    let config_server = start_mock_server().await;
+    let base_url = format!("{responses_uri}/v1");
+    let test = builder
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            configure_scenario_catalog(config);
+            config.model_provider.base_url = Some(base_url);
+            config.model_context_window = Some(100_000);
+            for feature in features {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable scenario feature");
+            }
+            config
+                .features
+                .enable(Feature::AsyncCompaction)
+                .expect("enable async compaction");
+            config
+                .features
+                .disable(Feature::EnableRequestCompression)
+                .expect("capture raw requests");
+            configure(config);
+        })
+        .with_model("gpt-6-astra")
+        .build_with_environment(&config_server, environment)
+        .await?;
+    Ok((config_server, test))
+}
+
+/// Pending image checks for optional compaction do not delay foreground turn completion.
+/// Its request still replaces files that expire after the sampling request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_compaction_image_checks_do_not_block_turn_completion() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(/*n*/ 2));
+    let image_store = Arc::new(RecordingFileAttachmentStore {
+        resolve_barrier: Some(Arc::clone(&barrier)),
+        ..Default::default()
+    });
+    let (release_sampling, sampling_gate) = oneshot::channel();
+    let (streaming, _completions) = start_streaming_sse_server(vec![
+        vec![compaction_chunk(
+            Some(sampling_gate),
+            vec![
+                ev_assistant_message("answer", "I examined the image."),
+                ev_completed_with_tokens("answer", /*total_tokens*/ 70_000),
+            ],
+        )],
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                compaction_output("IMAGE_CHECKPOINT"),
+                ev_completed_with_tokens("compact", /*total_tokens*/ 3_000),
+            ],
+        )],
+    ])
+    .await;
+    let config_server = start_mock_server().await;
+    let base_url = format!("{}/v1", streaming.uri());
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_image_store(image_store.clone())
+        .with_request_country(RequestCountry::from_iso_code("DE")?)
+        .with_config(move |config| {
+            configure_scenario_catalog(config);
+            config.model_provider.base_url = Some(base_url);
+            config.model_context_window = Some(100_000);
+            config.features.enable(Feature::AsyncCompaction).unwrap();
+            config
+                .features
+                .disable(Feature::EnableRequestCompression)
+                .unwrap();
+        })
+        .with_model("gpt-6-astra")
+        .build_with_auto_env(&config_server)
+        .await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            text("Describe this image."),
+            UserInput::Image {
+                image: ImageReference::File {
+                    file_id: "file_expiring".to_string(),
+                },
+                detail: Some(ImageDetail::High),
+            },
+        ]))
+        .await?;
+    let turn_id = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
+        _ => None,
+    })
+    .await;
+    // Release the sampling lookup, then expire the file before its response finishes.
+    barrier.wait().await;
+    streaming.wait_for_request_count(/*count*/ 1).await;
+    let (reply, outcome) = oneshot::channel();
+    test.codex
+        .submit(Op::TurnSettings {
+            turn_id,
+            update: TurnSettingsUpdate {
+                request_country: Some(RequestCountry::from_iso_code("US").unwrap()),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(outcome.await?, TurnSettingsUpdateOutcome::Applied);
+    image_store
+        .resolve_errors
+        .lock()
+        .expect("resolve errors lock")
+        .insert(
+            "file_expiring".to_string(),
+            AttachmentStoreErrorKind::NotFound,
+        );
+    release_sampling.send(()).expect("finish sampling");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(streaming.requests().await.len(), 1);
+
+    test.codex
+        .update_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+            request_country: Some(RequestCountry::from_iso_code("JP").unwrap()),
+            ..Default::default()
+        })
+        .await?;
+    // The turn completed without releasing the optional compaction lookup.
+    barrier.wait().await;
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 20),
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    let requests = streaming
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(requests.len(), 2);
+    // Compaction keeps the sampling step's country despite live and future settings updates.
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.get("request_country"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(&serde_json::json!("DE")),
+            Some(&serde_json::json!("DE"))
+        ]
+    );
+    assert_eq!(
+        *image_store.resolves.lock().expect("resolves lock"),
+        HashMap::from([("file_expiring".to_string(), 2)])
+    );
+    assert!(requests[0]["input"].to_string().contains("file_expiring"));
+    assert!(
+        requests[1]["input"]
+            .to_string()
+            .contains("[image unavailable]")
+    );
+    assert!(!requests[1]["input"].to_string().contains("file_expiring"));
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LiveSuffix {
+    User,
+    Tool,
+    RetainedTool,
+    OverBudgetRetainedTool,
+}
+
+#[test_case::test_case(LiveSuffix::User; "newer user")]
+#[test_case::test_case(LiveSuffix::Tool; "only assistant and tools")]
+#[test_case::test_case(LiveSuffix::RetainedTool; "retained standalone output")]
+#[test_case::test_case(LiveSuffix::OverBudgetRetainedTool; "ready adoption still over budget")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
+    suffix: LiveSuffix,
+) -> Result<()> {
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
+    use codex_protocol::protocol::ThreadSettingsOverrides;
+    use core_test_support::responses::ev_completed_with_tokens;
+
+    skip_if_no_network!(Ok(()));
+    let over_budget = matches!(suffix, LiveSuffix::OverBudgetRetainedTool);
+    let retained_output = if over_budget {
+        format!("delegated work {}", "x ".repeat(12_000))
+    } else {
+        "delegated work".to_string()
+    };
+    let (release_background, background_gate) = oneshot::channel();
+    let (release_foreground, foreground_gate) = oneshot::channel();
+    let mut responses = vec![
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("draft", "I drafted the launch notes."),
+                ev_completed_with_tokens(
+                    "draft-response",
+                    /*total_tokens*/ if over_budget { 2_000 } else { 70_000 },
+                ),
+            ],
+        )],
+        vec![compaction_chunk(
+            Some(background_gate),
+            vec![
+                compaction_output("ASYNC_LAUNCH_CHECKPOINT"),
+                ev_completed_with_tokens("compact-response", /*total_tokens*/ 3_000),
+            ],
+        )],
+        vec![
+            compaction_chunk(
+                /*gate*/ None,
+                vec![
+                    ev_response_created("team-response"),
+                    ev_assistant_message("team-check", "I will check who is available."),
+                ],
+            ),
+            compaction_chunk(
+                Some(foreground_gate),
+                vec![
+                    ev_function_call_with_namespace("team", "collaboration", "list_agents", "{}"),
+                    ev_completed_with_tokens(
+                        "team-response",
+                        /*total_tokens*/ if over_budget { 9_000 } else { 75_000 },
+                    ),
+                ],
+            ),
+        ],
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("answer", "I can finish the notes myself."),
+                ev_completed_with_tokens(
+                    "answer-response",
+                    /*total_tokens*/ if over_budget { 10 } else { 3_000 },
+                ),
+            ],
+        )],
+    ];
+    if over_budget {
+        responses.insert(
+            3,
+            vec![compaction_chunk(
+                /*gate*/ None,
+                vec![
+                    compaction_output("SYNC"),
+                    ev_completed_with_tokens("sync", /*total_tokens*/ 3_000),
+                ],
+            )],
+        );
+    }
+    let (streaming, _completions) = start_streaming_sse_server(responses).await;
+    let features = match suffix {
+        LiveSuffix::User => vec![Feature::IncrementalTools],
+        LiveSuffix::Tool => vec![],
+        LiveSuffix::RetainedTool | LiveSuffix::OverBudgetRetainedTool => {
+            vec![Feature::RetainClientToolOutputs]
+        }
+    };
+    let reminders = Arc::new(budget_context::PrefixBudgetReminders {
+        remaining: 400.into(),
+    });
+    let mut builder = test_codex();
+    if matches!(suffix, LiveSuffix::User) {
+        let mut extensions = ExtensionRegistryBuilder::new();
+        extensions.prompt_contributor(reminders.clone());
+        builder = builder.with_extensions(Arc::new(extensions.build()));
+    }
+    let (_config_server, test) = async_compaction_test(
+        builder,
+        streaming.uri(),
+        features,
+        test_env().await?,
+        move |config| {
+            if over_budget {
+                config.async_compaction_threshold_percent = 1;
+                config.model_auto_compact_token_limit = Some(5_000);
+            }
+        },
+    )
+    .await?;
+    test.codex.ensure_rollout_materialized().await;
+    let compaction_event = |event: &EventMsg| match event {
+        EventMsg::ItemStarted(event) if matches!(event.item, TurnItem::ContextCompaction(_)) => {
+            Some(("started", event.item.id()))
+        }
+        EventMsg::ItemCompleted(event) if matches!(event.item, TurnItem::ContextCompaction(_)) => {
+            Some(("completed", event.item.id()))
+        }
+        _ => None,
+    };
+
+    test.submit_text_turn("Draft the launch notes.").await?;
+    let timeout = Duration::from_secs(/*secs*/ 20);
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 2)).await?;
+    let next_input = if matches!(suffix, LiveSuffix::User) {
+        reminders
+            .remaining
+            .store(350, std::sync::atomic::Ordering::SeqCst);
+        TurnInputRequest::user_input(vec![text("Check who can finish the notes.")])
+    } else {
+        let item = serde_json::from_value(json!({
+            "type": "function_call_output",
+            "name": "send_message_to_thread",
+            "namespace": "codex_app",
+            "output": retained_output,
+        }))?;
+        TurnInputRequest::new(
+            if matches!(
+                suffix,
+                LiveSuffix::RetainedTool | LiveSuffix::OverBudgetRetainedTool
+            ) {
+                TurnInput::AnnotatedResponseItem(
+                    codex_protocol::turn_input::AnnotatedResponseItem {
+                        item,
+                        annotations: codex_protocol::turn_input::ResponseItemAnnotations {
+                            retain: true,
+                        },
+                    },
+                )
+            } else {
+                TurnInput::ResponseItem(item)
+            },
+        )
+    };
+    test.codex
+        .start_or_steer_turn(next_input.with_thread_settings(ThreadSettingsOverrides {
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Plan,
+                settings: Settings {
+                    model: "gpt-6-astra".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: Some(
+                        "Plan Mode: prepare a plan before making changes.".to_string(),
+                    ),
+                },
+            }),
+            ..Default::default()
+        }))
+        .await?;
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 3)).await?;
+    wait_for_event(&test.codex, |event| {
+        assert_eq!(compaction_event(event), None);
+        matches!(event, EventMsg::ItemCompleted(event)
+        if matches!(&event.item, TurnItem::AgentMessage(message) if message.id == "team-check"))
+    })
+    .await;
+    release_background
+        .send(())
+        .expect("release background compaction");
+    // Wait for client publication while foreground work is gated, keeping adoption optional.
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    reminders
+        .remaining
+        .store(325, std::sync::atomic::Ordering::SeqCst);
+    release_foreground
+        .send(())
+        .expect("release foreground work");
+    let mut compaction_events = Vec::new();
+    wait_for_event(&test.codex, |event| {
+        compaction_events.extend(compaction_event(event));
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    assert_eq!(compaction_events.len(), if over_budget { 4 } else { 2 });
+    const EVENTS_PER_COMPACTION: usize = 2;
+    for pair in compaction_events.as_chunks::<EVENTS_PER_COMPACTION>().0 {
+        assert_eq!((pair[0].0, pair[1].0), ("started", "completed"));
+        assert_eq!(pair[0].1, pair[1].1);
+    }
+    if over_budget {
+        assert_ne!(compaction_events[0].1, compaction_events[2].1);
+    }
+
+    let requests = streaming
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(requests.len(), if over_budget { 5 } else { 4 });
+    if over_budget {
+        let continuation = requests[4]["input"].as_array().expect("continuation input");
+        assert!(
+            continuation
+                .iter()
+                .any(|item| item["encrypted_content"] == "SYNC")
+        );
+        assert!(
+            continuation
+                .iter()
+                .any(|item| item["output"] == retained_output)
+        );
+    }
+    let history = test
+        .codex
+        .load_history(/*include_archived*/ false)
+        .await?
+        .items;
+    assert!(history.windows(2).any(|items| matches!(items,
+        [RolloutItem::Compacted(_), RolloutItem::WorldState(baseline)]
+        if baseline.full && baseline.state["collaboration_mode"]["mode"] == "plan"
+            && !baseline.state.contains_key("cutoff_budget")
+            && !baseline.state.contains_key("install_budget")
+    )));
+    let input = requests[3]["input"].as_array().expect("request input");
+    // The full snapshot normalizes mode text; check the cutoff and later update explicitly.
+    let position = |text: &str| {
+        let positions = input
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| item.to_string().contains(text).then_some(i))
+            .collect::<Vec<_>>();
+        assert_eq!(positions.len(), 1, "{text}");
+        positions[0]
+    };
+    let default = position("# Collaboration Mode: Default");
+    let draft = position("Draft the launch notes.");
+    let compaction = position("ASYNC_LAUNCH_CHECKPOINT");
+    let plan = position("Plan Mode");
+    if matches!(suffix, LiveSuffix::User) {
+        let user = position("Check who can finish the notes.");
+        assert!(draft < compaction && compaction < default && default < plan && plan < user);
+        let entries = requests.iter().map(SnapshotEntry::body).collect::<Vec<_>>();
+        insta::assert_snapshot!(
+            "astra_async_compaction_with_live_suffix",
+            context_snapshot::format_context_snapshot(
+                "Astra compacts a completed launch-notes turn in the background. The user switches to Plan mode and the host changes which budget reminder opts out of full context. Adoption keeps the live suffix and refreshes both reminders after the tool output.",
+                &entries,
+                &ContextSnapshotOptions::default().rewrite_known_segments(),
+            )
+        );
+    } else {
+        let tool = position("delegated work");
+        if matches!(
+            suffix,
+            LiveSuffix::RetainedTool | LiveSuffix::OverBudgetRetainedTool
+        ) {
+            assert!(draft < compaction && compaction < default && default < plan && plan < tool);
+        } else {
+            assert!(default < draft && draft < compaction && compaction < plan && plan < tool);
+        }
+        let assistant = position("I will check who is available.");
+        let call = input
+            .iter()
+            .position(|item| item["type"] == "function_call" && item["call_id"] == "team")
+            .expect("retained tool call");
+        let output = input
+            .iter()
+            .position(|item| item["type"] == "function_call_output" && item["call_id"] == "team")
+            .expect("retained tool output");
+        assert!(tool < assistant && assistant < call && call < output);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExecCatalogRefresh {
+    Hybrid,
+    Metadata,
+}
+
+#[test_case::test_case(ExecCatalogRefresh::Hybrid; "hybrid mode")]
+#[test_case::test_case(ExecCatalogRefresh::Metadata; "exec metadata refresh")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_async_compaction_preserves_exec_catalog(change: ExecCatalogRefresh) -> Result<()> {
+    use codex_models_manager::manager::RefreshStrategy;
+    use core_test_support::responses::mount_models_once_with_etag;
+
+    skip_if_no_network!(Ok(()));
+    let (release_background, background_gate) = oneshot::channel();
+    let (release_foreground, foreground_gate) = oneshot::channel();
+    let (streaming, _completions) = start_streaming_sse_server(vec![
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("draft", "I drafted the launch notes."),
+                ev_completed_with_tokens("draft-response", /*total_tokens*/ 70_000),
+            ],
+        )],
+        vec![compaction_chunk(
+            Some(background_gate),
+            vec![
+                compaction_output("ASYNC_LAUNCH_CHECKPOINT"),
+                ev_completed_with_tokens("compact-response", /*total_tokens*/ 3_000),
+            ],
+        )],
+        vec![
+            compaction_chunk(
+                /*gate*/ None,
+                vec![
+                    ev_response_created("team-response"),
+                    ev_assistant_message("team-check", "I will check who is available."),
+                ],
+            ),
+            compaction_chunk(
+                Some(foreground_gate),
+                vec![
+                    ev_function_call_with_namespace("team", "collaboration", "list_agents", "{}"),
+                    ev_completed_with_tokens("team-response", /*total_tokens*/ 75_000),
+                ],
+            ),
+        ],
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("answer", "I can finish the notes myself."),
+                ev_completed_with_tokens("answer-response", /*total_tokens*/ 3_000),
+            ],
+        )],
+    ])
+    .await;
+    let model_server = wiremock::MockServer::start().await;
+    let mut catalog = bundled_models_response()?;
+    let model = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-6-astra")
+        .expect("bundled Astra model");
+    model.tool_mode = Some(ToolMode::CodeModeOnly);
+    model.supports_image_detail_original = false;
+    mount_models_once_with_etag(&model_server, catalog.clone(), "\"exec-mode-v1\"").await;
+    let model_catalog_url = format!("{}/models", model_server.uri());
+    let (_config_server, test) = async_compaction_test(
+        test_codex(),
+        streaming.uri(),
+        vec![
+            Feature::IncrementalTools,
+            Feature::IncrementalExecTools,
+            Feature::ViewImage,
+        ],
+        test_env().await?,
+        move |config| {
+            config
+                .features
+                .disable(Feature::UnifiedImageBudget)
+                .expect("use the model's image detail capability");
+            config.model_catalog = None;
+            config.model_provider.model_catalog_url = Some(model_catalog_url.clone().into());
+            config.code_mode.disable_in_process_fallback = true;
+        },
+    )
+    .await?;
+    test.codex.ensure_rollout_materialized().await;
+
+    test.submit_text_turn("Draft the launch notes.").await?;
+    let timeout = Duration::from_secs(/*secs*/ 20);
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 2)).await?;
+    // Refresh the same model while the prepared result is still pending.
+    let model = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-6-astra")
+        .expect("bundled Astra model");
+    match change {
+        ExecCatalogRefresh::Hybrid => model.tool_mode = Some(ToolMode::CodeMode),
+        ExecCatalogRefresh::Metadata => {
+            model.supports_image_detail_original = true;
+            let messages = model
+                .model_messages
+                .get_or_insert_default()
+                .tools
+                .get_or_insert_default()
+                .code_mode
+                .get_or_insert_default();
+            messages.exec.get_or_insert_default().description =
+                Some("Previous exec instructions.".to_string());
+            messages.mcp_typescript_preamble = Some("type PreviousResult = string;".to_string());
+        }
+    }
+    mount_models_once_with_etag(&model_server, catalog.clone(), "\"exec-mode-v2\"").await;
+    test.thread_manager
+        .get_models_manager()
+        .list_models(
+            RefreshStrategy::Online,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![text(
+            "Check who can finish the notes.",
+        )]))
+        .await?;
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 3)).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ItemCompleted(event)
+        if matches!(&event.item, TurnItem::AgentMessage(message) if message.id == "team-check"))
+    })
+    .await;
+    release_background
+        .send(())
+        .expect("release background compaction");
+    // Keep foreground work gated until the prepared result is available for optional adoption.
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    release_foreground
+        .send(())
+        .expect("release foreground work");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    let requests = streaming
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(requests.len(), 4);
+    let history = test
+        .codex
+        .load_history(/*include_archived*/ false)
+        .await?
+        .items;
+    let input = requests[3]["input"].as_array().expect("request input");
+    let compaction = input
+        .iter()
+        .position(|item| item["encrypted_content"] == "ASYNC_LAUNCH_CHECKPOINT")
+        .expect("prepared summary was adopted");
+    let user = input
+        .iter()
+        .position(|item| {
+            item["role"] == "user"
+                && item["content"][0]["text"] == "Check who can finish the notes."
+        })
+        .expect("retained user message");
+    let assistant = input
+        .iter()
+        .position(|item| {
+            item["role"] == "assistant"
+                && item["content"][0]["text"] == "I will check who is available."
+        })
+        .expect("retained assistant message");
+    let call = input
+        .iter()
+        .position(|item| item["type"] == "function_call" && item["call_id"] == "team")
+        .expect("retained tool call");
+    let output = input
+        .iter()
+        .position(|item| item["type"] == "function_call_output" && item["call_id"] == "team")
+        .expect("retained tool output");
+    assert!(user < assistant && assistant < call && call < output);
+    let [before_adoption, after_adoption] = [&requests[2], &requests[3]].map(|request| {
+        request["input"]
+            .as_array()
+            .expect("request input")
+            .iter()
+            .filter(|item| item["type"] == "additional_tools")
+            .map(|item| item["tools"].clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(after_adoption, before_adoption);
+    let (exec_positions, exec_declarations): (Vec<_>, Vec<_>) = input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            core_test_support::responses::namespace_child_tool(item, "functions", "exec")
+                .map(|declaration| (index, declaration))
+        })
+        .unzip();
+    let (adoption_index, adopted) = history
+        .windows(2)
+        .enumerate()
+        .find_map(|(index, pair)| match pair {
+            [RolloutItem::Compacted(_), RolloutItem::WorldState(baseline)] if baseline.full => {
+                Some((index, &baseline.state["top_level_tools"]))
+            }
+            _ => None,
+        })
+        .expect("adopted full checkpoint");
+    let changed_hashes: &[&str] = match change {
+        ExecCatalogRefresh::Hybrid => &["/functions.exec"],
+        ExecCatalogRefresh::Metadata => &["/tools/functions.exec", "/exec/Tool: tools.view_image"],
+    };
+    for path in changed_hashes {
+        let live = history[..adoption_index]
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::WorldState(patch) if !patch.full => {
+                    patch.state.get("top_level_tools")?.pointer(path)
+                }
+                _ => None,
+            })
+            .and_then(serde_json::Value::as_str)
+            .expect("live exec update before adoption");
+        assert_eq!(
+            adopted.pointer(path).and_then(serde_json::Value::as_str),
+            Some(live),
+            "{path}"
+        );
+    }
+    if matches!(change, ExecCatalogRefresh::Metadata) {
+        let initial_exec = requests[0]["input"]
+            .as_array()
+            .expect("initial input")
+            .iter()
+            .find_map(|item| {
+                core_test_support::responses::namespace_child_tool(item, "functions", "exec")
+            })
+            .expect("initial exec declaration");
+        assert_eq!(exec_declarations, vec![initial_exec]);
+        assert!(exec_positions[0] < compaction && compaction < user);
+        let is_view_image_update = |item: &&serde_json::Value| {
+            item["role"] == "developer"
+                && item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.lines().any(|line| line == "### `view_image`"))
+        };
+        let live_update = requests[2]["input"]
+            .as_array()
+            .expect("input before adoption")
+            .iter()
+            .find(is_view_image_update)
+            .expect("view_image redefinition during background compaction");
+        assert!(
+            live_update["content"][0]["text"]
+                .as_str()
+                .expect("view_image update text")
+                .contains("detail?: \"high\" | \"original\"")
+        );
+        assert_eq!(
+            input
+                .iter()
+                .filter(is_view_image_update)
+                .collect::<Vec<_>>(),
+            vec![live_update]
+        );
+        assert!(input[compaction + 1..].contains(live_update));
+        return Ok(());
+    }
+    assert_eq!(exec_declarations.len(), 2);
+    assert_ne!(exec_declarations[0], exec_declarations[1]);
+    assert!(
+        exec_positions[0] < compaction
+            && compaction < exec_positions[1]
+            && exec_positions[1] < user
+    );
+    Ok(())
+}
+
+#[derive(PartialEq)]
+enum PendingCompactionOutcome {
+    Absent,
+    Success,
+    SuccessOverBudget,
+    StaleSuccess,
+    Failure,
+    ReadyFailure,
+    Interrupted,
+}
+
+#[test_case::test_case(PendingCompactionOutcome::Success, CompactionTrigger::Auto; "auto uses pending result")]
+#[test_case::test_case(PendingCompactionOutcome::Failure, CompactionTrigger::Auto; "auto falls back after failure")]
+#[test_case::test_case(PendingCompactionOutcome::ReadyFailure, CompactionTrigger::Auto; "auto falls back after failure before checkpoint")]
+#[test_case::test_case(PendingCompactionOutcome::StaleSuccess, CompactionTrigger::Auto; "auto falls back after account changes")]
+#[test_case::test_case(PendingCompactionOutcome::Interrupted, CompactionTrigger::Auto; "auto can be interrupted")]
+#[test_case::test_case(PendingCompactionOutcome::Absent, CompactionTrigger::Manual; "manual without background")]
+#[test_case::test_case(PendingCompactionOutcome::Success, CompactionTrigger::Manual; "manual uses pending result")]
+#[test_case::test_case(PendingCompactionOutcome::Failure, CompactionTrigger::Manual; "manual falls back after failure")]
+#[test_case::test_case(PendingCompactionOutcome::StaleSuccess, CompactionTrigger::Manual; "manual falls back after account changes")]
+#[test_case::test_case(PendingCompactionOutcome::Interrupted, CompactionTrigger::Manual; "manual can be interrupted")]
+#[test_case::test_case(PendingCompactionOutcome::SuccessOverBudget, CompactionTrigger::Auto; "pending adoption still over budget")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_compaction_reuses_pending_work(
+    outcome: PendingCompactionOutcome,
+    trigger: CompactionTrigger,
+) -> Result<()> {
+    use super::rollout_budget::HostAccounting;
+
+    const BACKGROUND_TOKENS: i64 = 3_001;
+
+    skip_if_no_network!(Ok(()));
+    let over_budget = match outcome {
+        PendingCompactionOutcome::SuccessOverBudget => true,
+        _ => false,
+    };
+    let retained_output = format!("LATE_OUTPUT {}", "x ".repeat(12_000));
+    let manual = matches!(trigger, CompactionTrigger::Manual);
+    let has_background = outcome != PendingCompactionOutcome::Absent;
+    let seed_tokens = if over_budget {
+        2_000
+    } else if has_background {
+        70_000
+    } else {
+        10_000
+    };
+    let valid_output = !matches!(
+        outcome,
+        PendingCompactionOutcome::Failure | PendingCompactionOutcome::ReadyFailure
+    );
+    let succeeds = !matches!(
+        outcome,
+        PendingCompactionOutcome::Absent
+            | PendingCompactionOutcome::SuccessOverBudget
+            | PendingCompactionOutcome::Failure
+            | PendingCompactionOutcome::ReadyFailure
+            | PendingCompactionOutcome::StaleSuccess
+    );
+    let response = |id, event, tokens| vec![event, ev_completed_with_tokens(id, tokens)];
+    let immediate = |events| vec![compaction_chunk(/*gate*/ None, events)];
+    let (release_background, background_gate) = oneshot::channel();
+    let mut responses = vec![immediate(response(
+        "seed",
+        ev_assistant_message("seed", "seed"),
+        seed_tokens,
+    ))];
+    if has_background {
+        responses.push(vec![compaction_chunk(
+            Some(background_gate),
+            response(
+                "background",
+                if valid_output {
+                    compaction_output("ASYNC")
+                } else {
+                    ev_assistant_message("invalid", "missing compaction output")
+                },
+                BACKGROUND_TOKENS,
+            ),
+        )]);
+    }
+    if !manual {
+        responses.push(immediate(response(
+            "second",
+            ev_function_call_with_namespace("team", "collaboration", "list_agents", "{}"),
+            /*tokens*/ if over_budget { 9_000 } else { 91_000 },
+        )));
+    }
+    if !succeeds {
+        responses.push(immediate(response(
+            "sync",
+            compaction_output("SYNC"),
+            /*tokens*/ 3_000,
+        )));
+    }
+    responses.push(immediate(response(
+        "continuation",
+        ev_assistant_message("continuation", "continuation"),
+        /*tokens*/ if over_budget { 10 } else { 3_000 },
+    )));
+    let (streaming, mut completions) = start_streaming_sse_server(responses).await;
+    let accounting =
+        (outcome == PendingCompactionOutcome::Success).then(|| Arc::new(HostAccounting::default()));
+    let mut builder = test_codex();
+    if let Some(accounting) = &accounting {
+        let mut extensions = ExtensionRegistryBuilder::new();
+        extensions.thread_lifecycle_contributor(accounting.clone());
+        builder = builder.with_extensions(Arc::new(extensions.build()));
+    }
+    let env = test_env().await?;
+    let (_config_server, test) = async_compaction_test(
+        builder,
+        streaming.uri(),
+        if over_budget {
+            vec![Feature::RetainClientToolOutputs]
+        } else {
+            vec![]
+        },
+        env,
+        move |config| {
+            if over_budget {
+                config.async_compaction_threshold_percent = 1;
+                config.model_auto_compact_token_limit = Some(5_000);
+            }
+        },
+    )
+    .await?;
+    test.codex.ensure_rollout_materialized().await;
+    let timeout = Duration::from_secs(/*secs*/ 20);
+    test.submit_text_turn("first").await?;
+    if has_background {
+        tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 2)).await?;
+    }
+    let release_background = if outcome == PendingCompactionOutcome::ReadyFailure {
+        release_background
+            .send(())
+            .expect("fail background compaction before the next checkpoint");
+        // The client must observe the failure before take_ready polls the closed receiver.
+        tokio::time::timeout(
+            timeout,
+            test.codex.wait_for_background_compaction_for_test(),
+        )
+        .await?;
+        None
+    } else {
+        Some(release_background)
+    };
+    if manual {
+        test.codex.submit(Op::Compact).await?;
+    } else if over_budget {
+        test.codex.start_or_steer_turn(TurnInputRequest::new(TurnInput::AnnotatedResponseItem(
+            codex_protocol::turn_input::AnnotatedResponseItem {
+                item: serde_json::from_value(json!({"type": "function_call_output", "name": "send_message_to_thread", "namespace": "codex_app", "output": retained_output}))?,
+                annotations: codex_protocol::turn_input::ResponseItemAnnotations { retain: true },
+            },
+        ))).await?;
+    } else {
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![text("newer")]))
+            .await?;
+    }
+    let started = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ItemStarted(event)
+            if matches!(event.item, TurnItem::ContextCompaction(_)))
+    })
+    .await;
+    if has_background && outcome != PendingCompactionOutcome::ReadyFailure {
+        assert_eq!(streaming.requests().await.len(), if manual { 2 } else { 3 });
+    }
+    if outcome == PendingCompactionOutcome::Interrupted {
+        test.codex.submit(Op::Interrupt).await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnAborted(_))
+        })
+        .await;
+        release_background
+            .expect("pending background compaction")
+            .send(())
+            .expect("release unused result");
+        completions.remove(1).await?;
+        test.codex.shutdown_and_wait().await?;
+        assert_eq!(streaming.requests().await.len(), if manual { 2 } else { 3 });
+        return Ok(());
+    }
+    if outcome == PendingCompactionOutcome::StaleSuccess {
+        let auth = test.thread_manager.auth_manager();
+        let mut tokens = auth.auth_cached().expect("test auth").get_token_data()?;
+        tokens.id_token.raw_jwt = "e30.e30.signature".to_string();
+        tokens.account_id = Some("second-account".to_string());
+        tokens.access_token = "second-account-token".to_string();
+        std::fs::write(
+            test.home.path().join("auth.json"),
+            serde_json::to_vec(
+                &json!({"auth_mode":"chatgpt", "tokens":tokens, "last_refresh":chrono::Utc::now()}),
+            )?,
+        )?;
+        auth.reload().await;
+    }
+    if has_background && let Some(release_background) = release_background {
+        release_background.send(()).expect("release pending result");
+    }
+    let EventMsg::ItemStarted(started) = started else {
+        unreachable!();
+    };
+    let mut starts = vec![started.item.id()];
+    let mut completed = Vec::new();
+    wait_for_event(&test.codex, |event| {
+        if let EventMsg::ItemStarted(event) = event
+            && matches!(event.item, TurnItem::ContextCompaction(_))
+        {
+            starts.push(event.item.id());
+        }
+        if let EventMsg::ItemCompleted(event) = event
+            && matches!(event.item, TurnItem::ContextCompaction(_))
+        {
+            completed.push(event.item.id());
+        }
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(completed, starts);
+    assert_eq!(starts.len(), if over_budget { 2 } else { 1 });
+    assert_eq!(starts.iter().collect::<HashSet<_>>().len(), starts.len());
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    if manual {
+        test.submit_text_turn("after manual compaction").await?;
+    }
+
+    let history = test.codex.load_history(/*include_archived*/ false).await?;
+    let usage = |id| {
+        history
+            .items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::TokenUsageRecord(record) if record.response_id == id => Some(record),
+                _ => None,
+            })
+            .expect("persisted usage")
+    };
+    assert!(history.items.iter().all(|item| !matches!(item,
+        RolloutItem::TokenUsageRecord(record) if record.response_id == "background"
+    )));
+    if let Some(accounting) = accounting {
+        let reports = accounting.reports.lock().expect("usage reports");
+        let charged_turns: Vec<_> = reports
+            .iter()
+            .filter(|report| report.usage.total_tokens == BACKGROUND_TOKENS)
+            .map(|report| &report.turn_id)
+            .collect();
+        assert_eq!(charged_turns, [&usage("seed").turn_id]);
+    }
+    let continuation = usage("continuation");
+    assert_eq!(
+        (
+            continuation.turn_token_usage.total_tokens,
+            continuation.thread_token_usage.total_tokens,
+        ),
+        if over_budget {
+            (12_010, 14_010)
+        } else if manual {
+            (3_000, seed_tokens + if succeeds { 3_000 } else { 6_000 })
+        } else if succeeds {
+            (94_000, 164_000)
+        } else {
+            (97_000, 167_000)
+        },
+    );
+
+    let requests = streaming
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        requests.len(),
+        (if manual { 2 } else { 3 }) + usize::from(has_background) + usize::from(!succeeds)
+    );
+    if over_budget {
+        for request in &requests[3..] {
+            assert!(
+                request["input"]
+                    .as_array()
+                    .expect("compaction or continuation input")
+                    .iter()
+                    .any(|item| item["output"] == retained_output)
+            );
+        }
+    }
+    if manual && !succeeds {
+        let foreground = &requests[requests.len() - 2];
+        let metadata: serde_json::Value = serde_json::from_str(
+            foreground["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("manual foreground metadata"),
+        )?;
+        assert_eq!(metadata["compaction"]["trigger"], "manual");
+        assert_eq!(metadata["compaction"]["reason"], "user_requested");
+        assert_eq!(metadata["compaction"]["phase"], "standalone_turn");
+    }
+    let summaries: Vec<_> = requests.last().expect("continuation")["input"]
+        .as_array()
+        .expect("foreground input")
+        .iter()
+        .filter(|item| item["type"] == "compaction")
+        .map(|item| &item["encrypted_content"])
+        .collect();
+    assert_eq!(summaries, [&json!(if succeeds { "ASYNC" } else { "SYNC" })]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unshared_apps_catalog_across_turns() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let requests =
+        super::mcp_tool_cache::apps_requests_during_peer_discovery(/*share*/ false).await?;
+    let snapshot = context_snapshot::format_request_history_snapshot(
+        "A peer finishes Apps discovery during submit. The thread uses its own catalog on its first and second model requests.",
+        &requests,
+        &ContextSnapshotOptions::default()
+            .rewrite_known_segments()
+            .include_request_settings(),
+    );
+    insta::assert_snapshot!("unshared_apps_catalog_across_turns", snapshot);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_plugin_guidance_follows_model_and_survives_resume() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    write_scenario_capabilities(&home)?;
+    let configure = |config: &mut Config| {
+        configure_catalog_plugin_scenario(config);
+        let catalog = config.model_catalog.as_mut().unwrap();
+        let base = catalog
+            .models
+            .iter()
+            .find(|model| model.slug == "gpt-5.5")
+            .unwrap()
+            .clone();
+        for (slug, generic, enabled) in [
+            ("plugins-default", json!({}), true),
+            (
+                "plugins-a",
+                json!({"intro": "Catalog intro A: {{literal}}.", "usage_instructions": "Catalog usage A.\nKeep this line."}),
+                true,
+            ),
+            (
+                "plugins-b",
+                json!({"intro": "Catalog intro B.", "usage_instructions": "Catalog usage B."}),
+                true,
+            ),
+            (
+                "plugins-empty",
+                json!({"intro": "", "usage_instructions": " \n"}),
+                true,
+            ),
+            (
+                "plugins-invalid",
+                json!({"intro": "x".repeat(501), "usage_instructions": "y".repeat(2001)}),
+                true,
+            ),
+            (
+                "plugins-null",
+                json!({"intro": null, "usage_instructions": null}),
+                true,
+            ),
+            (
+                "plugins-off",
+                json!({"intro": "Disabled catalog intro.", "usage_instructions": "Disabled catalog usage."}),
+                false,
+            ),
+        ] {
+            let mut model = base.clone();
+            model.slug = slug.to_string();
+            model.include_plugin_usage_instructions = enabled;
+            model.model_messages =
+                Some(serde_json::from_value(json!({"plugins": {"generic": generic}})).unwrap());
+            catalog.models.push(model);
+        }
+    };
+    let mut builder = test_codex()
+        .with_model("plugins-default")
+        .with_home(home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_extensions(skills_extensions())
+        .with_config(configure);
+    let test = builder.build_with_auto_env(&server).await?;
+    let mock = mount_sse_sequence(
+        &server,
+        (0..10)
+            .map(|i| sse(vec![ev_completed(&format!("plugins-{i}"))]))
+            .collect(),
+    )
+    .await;
+    test.submit_text_turn("Use the bundled plugin guidance.")
+        .await?;
+    for model in ["plugins-a", "plugins-a", "plugins-b"] {
+        test.codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![text("Continue with the selected model.")])
+                    .with_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+                        model: Some(model.to_string()),
+                        ..Default::default()
+                    }),
+            )
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    builder = builder.with_config(configure).with_model("plugins-b");
+    let resumed = builder.restart_with_auto_env(&server, &test).await?;
+    resumed
+        .submit_text_turn("Continue after restarting with the same guidance.")
+        .await?;
+    for model in [
+        "plugins-empty",
+        "plugins-invalid",
+        "plugins-null",
+        "plugins-off",
+        "plugins-a",
+    ] {
+        resumed
+            .codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![text("Continue with the selected model.")])
+                    .with_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+                        model: Some(model.to_string()),
+                        ..Default::default()
+                    }),
+            )
+            .await?;
+        wait_for_event(&resumed.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 10);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body_json()["model"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!("plugins-default"),
+            json!("plugins-a"),
+            json!("plugins-a"),
+            json!("plugins-b"),
+            json!("plugins-b"),
+            json!("plugins-empty"),
+            json!("plugins-invalid"),
+            json!("plugins-null"),
+            json!("plugins-off"),
+            json!("plugins-a"),
+        ]
+    );
+    let guidance = requests
+        .iter()
+        .map(|request| {
+            request
+                .message_input_texts("developer")
+                .into_iter()
+                .filter(|text| text.starts_with("<plugins_instructions>"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let bundled = concat!(
+        "<plugins_instructions>\n## Plugins\n",
+        "A plugin is a local bundle of skills, MCP servers, and apps.\n",
+        "### How to use plugins\n",
+        "- Skill naming: If a plugin contributes skills, those skill entries are prefixed with `plugin_name:` in the Skills list.\n",
+        "- MCP naming: Plugin-provided MCP tools keep standard MCP identifiers such as `mcp__server__tool`; use tool provenance to tell which plugin they come from.\n",
+        "- Trigger rules: If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n",
+        "- Relationship to capabilities: Plugins are not invoked directly. Use their underlying skills, MCP tools, and app tools to help solve the task.\n",
+        "- Relevance: Determine what a plugin can help with from explicit user mention or from the plugin-associated skills, MCP tools, and apps exposed elsewhere in this turn.\n",
+        "- Missing/blocked: If the user requests a plugin that does not have relevant callable capabilities for the task, say so briefly and continue with the best fallback.\n",
+        "</plugins_instructions>",
+    );
+    let catalog_a = "<plugins_instructions>\n## Plugins\nCatalog intro A: {{literal}}.\n### How to use plugins\nCatalog usage A.\nKeep this line.\n</plugins_instructions>";
+    let replacement_prefix = "<plugins_instructions>\nThese plugin usage instructions replace all previously provided plugin usage instructions.\n\n\n";
+    let replaced_a = catalog_a.replacen("<plugins_instructions>\n", replacement_prefix, 1);
+    let replaced_bundled = bundled.replacen("<plugins_instructions>\n", replacement_prefix, 1);
+    assert_eq!(guidance[0], vec![bundled]);
+    assert_eq!(guidance[1].last(), Some(&replaced_a));
+    assert_eq!(guidance[2], guidance[1]);
+    assert_eq!(
+        guidance[3].last().map(String::as_str),
+        Some(concat!(
+            "<plugins_instructions>\n",
+            "These plugin usage instructions replace all previously provided plugin usage instructions.\n\n\n",
+            "## Plugins\nCatalog intro B.\n### How to use plugins\nCatalog usage B.\n</plugins_instructions>",
+        ))
+    );
+    assert_eq!(
+        guidance[4], guidance[3],
+        "resume must not duplicate retained custom guidance"
+    );
+    assert_eq!(guidance[5].last(), Some(&replaced_bundled));
+    assert_eq!(
+        guidance[6], guidance[5],
+        "oversized fields fall back without appending unchanged guidance"
+    );
+    assert_eq!(
+        guidance[7], guidance[5],
+        "null fields preserve bundled guidance"
+    );
+    assert_eq!(
+        guidance[8].last().map(String::as_str),
+        Some(
+            "<plugins_instructions>\nThe previously provided plugin usage instructions no longer apply.\n</plugins_instructions>"
+        )
+    );
+    assert_eq!(guidance[9].last().map(String::as_str), Some(catalog_a));
+    for pair in guidance.windows(2) {
+        assert!(
+            pair[1].starts_with(&pair[0]),
+            "prior plugin guidance must remain verbatim in history"
+        );
+    }
+    assert_eq!(
+        guidance[9]
+            .iter()
+            .filter(|text| text.contains("Catalog intro A: {{literal}}."))
+            .count(),
+        2
+    );
+    assert!(guidance.iter().flatten().all(|text| text.len() <= 4096));
+    for request in &requests {
+        assert!(!request.body_contains_text("Disabled catalog intro."));
+        assert!(
+            !request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text.contains("<plugins_instructions>"))
+        );
+    }
+    insta::assert_snapshot!(
+        "catalog_plugin_guidance_follows_model_and_survives_resume",
+        context_snapshot::format_labeled_requests_snapshot(
+            "First and final requests show generic plugin guidance and the complete append-only history. All ten intermediate model, wording, fallback, availability and resume states are asserted in the test.",
+            &[
+                ("Initial bundled guidance", &requests[0]),
+                ("Final retained history", &requests[9])
+            ],
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
+#[test_case::test_case(true, false; "apps_enabled")]
+#[test_case::test_case(false, false; "apps_disabled")]
+#[test_case::test_case(true, true; "simplified_selection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_selected_plugin_wording_preserves_capability_policy(
+    apps_enabled: bool,
+    simplified_selection: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    core_test_support::skip_if_remote!(Ok(()), "plugin MCP fixture uses a host-local executable");
+    let server = start_mock_server().await;
+    let apps = core_test_support::apps_test_server::AppsTestServer::mount(&server).await?;
+    let home = Arc::new(TempDir::new()?);
+    write_scenario_capabilities(&home)?;
+    let plugin_root = home.path().join("plugins/cache/test/notes/local");
+    fs::write(
+        plugin_root.join(".mcp.json"),
+        json!({"mcpServers": {"notes": {"command": stdio_server_bin()?, "cwd": "."}}}).to_string(),
+    )?;
+    fs::write(
+        plugin_root.join(".app.json"),
+        json!({"apps": {"notes_app": {"id": "calendar"}}}).to_string(),
+    )?;
+    let config_path = home.path().join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            "{}\n[apps.calendar]\nenabled = {apps_enabled}\n",
+            fs::read_to_string(&config_path)?
+        ),
+    )?;
+    let test = test_codex()
+        .with_model("selected-custom")
+        .with_home(home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_extensions(skills_extensions())
+        .with_config(move |config| {
+            configure_catalog_plugin_scenario(config);
+            config.chatgpt_base_url = apps.chatgpt_base_url;
+            config
+                .features
+                .enable(Feature::Apps)
+                .expect("enable Apps for selected-plugin scenario");
+            config
+                .features
+                .set_enabled(Feature::SimplifiedSelectionHints, simplified_selection)
+                .expect("configure selected-plugin hint mode");
+            let catalog = config
+                .model_catalog
+                .as_mut()
+                .expect("scenario model catalog");
+            let base = catalog
+                .models
+                .iter()
+                .find(|model| model.slug == "gpt-5.5")
+                .expect("bundled scenario base model")
+                .clone();
+            for (slug, selected) in [
+                (
+                    "selected-custom",
+                    json!({
+                        "intro": "Catalog selected {{ plugin_name }}.",
+                        "search_tools": "Catalog search for this explicit request.",
+                        "skill_namespace": "Catalog skills {{ skill_namespace }}.",
+                        "apps": "Catalog apps {{ apps }}.",
+                        "mcp_servers": "Catalog MCP {{ mcp_servers }}.",
+                        "closing": "Catalog closing.",
+                        "omitted": "Catalog omitted.",
+                    }),
+                ),
+                (
+                    "selected-fallback",
+                    json!({
+                        "intro": "Invalid intro without the required name.",
+                        "search_tools": "Catalog search from the receiving model.",
+                        "skill_namespace": "Invalid {{ unknown }}.",
+                        "apps": " \n",
+                        "mcp_servers": "{{ mcp_servers }} and {{ mcp_servers }}",
+                        "closing": "x".repeat(501),
+                        "omitted": null,
+                    }),
+                ),
+            ] {
+                let mut model = base.clone();
+                model.slug = slug.to_string();
+                model.include_plugin_usage_instructions = false;
+                model.supports_search_tool = false;
+                model.model_messages = Some(
+                    serde_json::from_value(json!({"plugins": {"selected": selected}}))
+                        .expect("selected-plugin model messages"),
+                );
+                catalog.models.push(model);
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&test.codex, "notes").await?;
+    let mock = mount_sse_sequence(
+        &server,
+        (0..4)
+            .map(|i| sse(vec![ev_completed(&format!("selected-{i}"))]))
+            .collect(),
+    )
+    .await;
+    test.submit_text_turn("List the available capabilities.")
+        .await?;
+    for (model, input) in [
+        (
+            "selected-custom",
+            vec![text("Use the selected plugin."), plugin("notes")],
+        ),
+        (
+            "selected-custom",
+            vec![text("Continue without a plugin selection.")],
+        ),
+        (
+            "selected-fallback",
+            vec![text("Use the selected plugin again."), plugin("notes")],
+        ),
+    ] {
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(input).with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    model: Some(model.to_string()),
+                    ..Default::default()
+                },
+            ))
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[3].body_json()["model"], json!("selected-fallback"));
+    let selected = requests
+        .iter()
+        .map(|request| {
+            request
+                .message_input_texts("developer")
+                .into_iter()
+                .filter(|text| {
+                    text.starts_with("Catalog selected ")
+                        || text.starts_with("Capabilities from ")
+                        || text.starts_with("The user selected ")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let custom = if simplified_selection {
+        "The user selected the `notes` plugin. Use its available skills and tools to complete this request."
+    } else if apps_enabled {
+        "Catalog selected notes.\nCatalog search for this explicit request.\nCatalog skills notes.\nCatalog apps `Calendar`.\nCatalog MCP `notes`.\nCatalog closing."
+    } else {
+        "Catalog selected notes.\nCatalog skills notes.\nCatalog MCP `notes`.\nCatalog closing."
+    };
+    let fallback = if simplified_selection {
+        custom
+    } else if apps_enabled {
+        concat!(
+            "Capabilities from the `notes` plugin:\n",
+            "Catalog search from the receiving model.\n",
+            "- Skills from this plugin are prefixed with `notes:`.\n",
+            "- Apps from this plugin available in this session: `Calendar`.\n",
+            "- MCP servers from this plugin available in this session: `notes`.\n",
+            "Use these plugin-associated capabilities to help solve the task.",
+        )
+    } else {
+        concat!(
+            "Capabilities from the `notes` plugin:\n",
+            "- Skills from this plugin are prefixed with `notes:`.\n",
+            "- MCP servers from this plugin available in this session: `notes`.\n",
+            "Use these plugin-associated capabilities to help solve the task.",
+        )
+    };
+    assert!(
+        selected[0].is_empty(),
+        "catalog wording must not imply an explicit selection"
+    );
+    assert_eq!(selected[1], vec![custom]);
+    assert_eq!(
+        selected[2], selected[1],
+        "an implicit follow-up must not repeat the selected-plugin hint"
+    );
+    assert_eq!(selected[3], vec![custom, fallback]);
+    assert!(
+        requests[1].body_contains_text("This tool is part of plugin `notes`."),
+        "catalog wording must preserve tool provenance"
+    );
+    for request in &requests {
+        assert!(
+            !request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text.contains("Catalog selected notes."))
+        );
+    }
+    insta::assert_snapshot!(
+        format!(
+            "catalog_selected_plugin_wording_apps_{apps_enabled}_simplified_{simplified_selection}"
+        ),
+        context_snapshot::format_request_history_snapshot(
+            "Selected-plugin wording follows the receiving model while live skills, MCP, App policy, explicit selection eligibility and simplified selection dispatch remain authoritative.",
+            &requests,
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_selected_plugin_omission_bounds_runtime_capabilities() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let apps = core_test_support::apps_test_server::AppsTestServer::mount_with_connector_name(
+        &server,
+        &"Calendar café ".repeat(400),
+    )
+    .await?;
+    let home = Arc::new(TempDir::new()?);
+    write_scenario_capabilities(&home)?;
+    fs::write(
+        home.path().join("plugins/cache/test/notes/local/.app.json"),
+        json!({"apps": {"notes_app": {"id": "calendar"}}}).to_string(),
+    )?;
+    let test = test_codex()
+        .with_model("gpt-5.5")
+        .with_home(home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_extensions(skills_extensions())
+        .with_config(move |config| {
+            configure_catalog_plugin_scenario(config);
+            config.chatgpt_base_url = apps.chatgpt_base_url;
+            config.features.enable(Feature::Apps).unwrap();
+            config
+                .features
+                .disable(Feature::SimplifiedSelectionHints)
+                .unwrap();
+            let model = config
+                .model_catalog
+                .as_mut()
+                .unwrap()
+                .models
+                .iter_mut()
+                .find(|model| model.slug == "gpt-5.5")
+                .unwrap();
+            model.include_plugin_usage_instructions = false;
+            model.model_messages = Some(
+                serde_json::from_value(json!({"plugins": {"selected": {
+                    "intro": "Catalog selected {{ plugin_name }}.",
+                    "apps": "Catalog apps {{ apps }}.",
+                    "omitted": "Catalog capability list omitted here.",
+                }}}))
+                .unwrap(),
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mock = mount_sse_sequence(&server, vec![sse(vec![ev_completed("bounded-plugin")])]).await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            text("Use the selected plugin."),
+            plugin("notes"),
+        ]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = mock.single_request();
+    let selected = request
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|text| text.starts_with("Catalog selected notes."))
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    assert!(selected[0].contains("Catalog apps `Calendar café "));
+    assert!(selected[0].ends_with("\nCatalog capability list omitted here."));
+    assert!(
+        selected[0].len() <= 4096,
+        "the bound applies after runtime capability substitution"
+    );
+    insta::assert_snapshot!(
+        "catalog_selected_plugin_omission_bounds_runtime_capabilities",
+        context_snapshot::format_request_history_snapshot(
+            "A catalog omission suffix is reserved within the final selected-plugin bound after substituting a long Unicode runtime capability name.",
+            &mock.requests(),
+            &ContextSnapshotOptions::default().include_request_settings(),
         )
     );
     Ok(())

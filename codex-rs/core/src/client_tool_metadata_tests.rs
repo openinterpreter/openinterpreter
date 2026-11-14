@@ -43,6 +43,7 @@ fn request_with_metadata_and_source(
     output.set_tool_call_cell_id("cell");
     output.mark_tool_calls_complete();
     ResponsesApiRequest {
+        request_country: Default::default(),
         model: "test".to_string(),
         input: vec![output],
         tools: None,

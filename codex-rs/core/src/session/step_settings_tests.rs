@@ -11,6 +11,7 @@ use codex_features::Feature;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_prompts::render_model_instructions;
+use codex_protocol::RequestCountry;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -292,6 +293,7 @@ async fn environment_only_update_revalidates_existing_step_settings() {
 
 fn configured_settings() -> StepSettings {
     StepSettings {
+        request_country: RequestCountry::from_iso_code("DE").unwrap(),
         collaboration_mode: CollaborationMode {
             mode: ModeKind::Default,
             settings: Settings {
@@ -323,6 +325,7 @@ fn sparse_patch_uses_the_settings_version_being_updated() {
     let constraints = step_settings_constraints(&requirements);
     let initial = configured_settings();
     let tier_update = StepSettingsUpdate {
+        request_country: Some(RequestCountry::from_iso_code("US").unwrap()),
         service_tier: Some(Some("fast".to_string())),
         ..Default::default()
     };
@@ -341,6 +344,7 @@ fn sparse_patch_uses_the_settings_version_being_updated() {
         .apply(&tier_update, &constraints)
         .expect("a previously prepared sparse update should apply");
     let expected = StepSettings {
+        request_country: RequestCountry::from_iso_code("US").unwrap(),
         service_tier: Some(ServiceTier::Fast.request_value().to_string()),
         ..latest
     };
@@ -383,6 +387,7 @@ fn collaboration_replacement_wins_and_effort_clear_remains_sparse() {
         .apply(
             &StepSettingsUpdate {
                 effort: Some(None),
+                request_country: Some(RequestCountry::UNKNOWN),
                 ..Default::default()
             },
             &constraints,
@@ -391,6 +396,7 @@ fn collaboration_replacement_wins_and_effort_clear_remains_sparse() {
     assert_eq!(
         cleared,
         StepSettings {
+            request_country: RequestCountry::UNKNOWN,
             collaboration_mode: replacement.with_updates(
                 /*model*/ None,
                 Some(None),

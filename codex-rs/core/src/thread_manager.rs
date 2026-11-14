@@ -344,6 +344,8 @@ pub enum PromptCacheKey {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Trusted host country for the initial thread settings.
+    pub request_country: codex_protocol::RequestCountry,
     /// Request-body cache key policy for this thread and its children. Hosts must reapply it on cold resume.
     pub prompt_cache_key: PromptCacheKey,
     /// Host-owned provider for this root thread's additional instructions.
@@ -441,6 +443,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            request_country: codex_protocol::RequestCountry::default(),
             prompt_cache_key: PromptCacheKey::default(),
             thread_instructions_provider: None,
             allow_provider_model_fallback: false,
@@ -566,6 +569,7 @@ fn effective_originator_value(
 
 pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) config: Config,
+    pub(crate) request_country: codex_protocol::RequestCountry,
     pub(crate) prompt_cache_key: Option<PromptCacheKey>,
     pub(crate) initial_history: InitialHistory,
     pub(crate) agent_control: LocalAgentControl,
@@ -1784,6 +1788,7 @@ impl ThreadManager {
         thread_extension_init.insert(reasoning_effort_pin);
         Ok((
             StartThreadOptions {
+                request_country: settings.request_country,
                 history_mode: Some(settings.history_mode),
                 environments: Some(settings.environments.into_requests().environment_requests),
                 inherited_environments: Some(environments),
@@ -2410,6 +2415,7 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         let ResumeThreadWithHistoryOptions {
             config,
+            request_country,
             prompt_cache_key,
             initial_history,
             agent_control,
@@ -2427,6 +2433,7 @@ impl ThreadManagerState {
         let prompt_cache_key = prompt_cache_key.unwrap_or(inherited_prompt_cache_key);
         let thread_source = initial_history.get_resumed_thread_source();
         let options = StartThreadOptions {
+            request_country,
             prompt_cache_key,
             initial_history,
             session_source: Some(session_source),
@@ -2557,6 +2564,7 @@ impl ThreadManagerState {
         };
         let StartThreadOptions {
             mut config,
+            request_country,
             prompt_cache_key,
             thread_instructions_provider,
             allow_provider_model_fallback,
@@ -2900,6 +2908,7 @@ impl ThreadManagerState {
             attached_thread,
             startup,
             config,
+            request_country,
             prompt_cache_key,
             allow_provider_model_fallback,
             instructions: startup_context.instructions,

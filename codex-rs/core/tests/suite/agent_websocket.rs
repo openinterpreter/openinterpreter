@@ -6,6 +6,7 @@ use codex_core::AgentServiceTier;
 use codex_core::AgentTurnAdmission;
 use codex_core::CodexThreadSettingsOverrides;
 use codex_core::InheritedSessionId;
+use codex_core::RequestCountry;
 use codex_core::SteerSubmission;
 use codex_core::ThreadManager;
 use codex_core::TurnInputRequest;
@@ -912,6 +913,131 @@ async fn websocket_first_turn_uses_startup_prewarm_and_create(
     );
 
     server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_country_changes_on_one_connection() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_websocket_server_with_headers(vec![WebSocketConnectionConfig {
+        requests: ["warm", "first", "refreshed", "cleared", "omitted"]
+            .into_iter()
+            .map(|id| vec![ev_response_created(id), ev_completed(id)])
+            .collect(),
+        response_headers: Vec::new(),
+        accept_delay: None,
+        close_after_requests: false,
+    }])
+    .await;
+    let test = test_codex()
+        .with_model("gpt-5.2")
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_request_country(RequestCountry::UNKNOWN)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .unwrap();
+        })
+        .build_with_websocket_server(&server)
+        .await?;
+    let warmup = server
+        .wait_for_request(/*connection_index*/ 0, /*request_index*/ 0)
+        .await
+        .body_json();
+    assert_eq!(warmup["generate"].as_bool(), Some(false));
+    assert_eq!(warmup.get("request_country"), Some(&Value::Null));
+
+    for request_country in [
+        Some(RequestCountry::from_iso_code("DE")?),
+        Some(RequestCountry::from_iso_code("US")?),
+        Some(RequestCountry::UNKNOWN),
+        Some(RequestCountry::default()),
+    ] {
+        test.codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
+                    text: "hello".to_string(),
+                    text_elements: Vec::new(),
+                }])
+                .with_thread_settings(ThreadSettingsOverrides {
+                    request_country,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        wait_for_successful_turn(&test.codex).await;
+    }
+    assert_eq!(server.handshakes().len(), 1);
+    let requests: Vec<_> = server
+        .single_connection()
+        .iter()
+        .map(core_test_support::responses::WebSocketRequest::body_json)
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.get("request_country"))
+            .collect::<Vec<_>>(),
+        [
+            Some(&Value::Null),
+            Some(&json!("DE")),
+            Some(&json!("US")),
+            Some(&Value::Null),
+            None,
+        ]
+    );
+    assert_eq!(requests[1].get("generate"), None);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.get("previous_response_id"))
+            .collect::<Vec<_>>(),
+        [
+            None,
+            Some(&json!("warm")),
+            Some(&json!("first")),
+            Some(&json!("refreshed")),
+            Some(&json!("cleared"))
+        ]
+    );
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_country_survives_websocket_to_http_fallback() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = core_test_support::responses::start_mock_server().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(wiremock::ResponseTemplate::new(426))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fallback = core_test_support::responses::mount_sse_once(
+        &server,
+        core_test_support::responses::sse_completed("fallback"),
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_request_country(RequestCountry::UNKNOWN)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::ResponsesWebsocketsV2)
+                .unwrap();
+            config.model_provider.supports_websockets = true;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_text_turn("Continue over HTTP.").await?;
+    let request = fallback.single_request();
+    assert_eq!(
+        request.body_json().get("request_country"),
+        Some(&Value::Null)
+    );
     Ok(())
 }
 

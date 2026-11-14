@@ -228,6 +228,7 @@ impl LunaSampler {
         auth_owner: Option<AuthOwner>,
     ) -> execution::SamplingExecution {
         let api_request = ResponsesApiRequest {
+            request_country: Default::default(),
             model: MODEL.to_owned(),
             input,
             tools: None,

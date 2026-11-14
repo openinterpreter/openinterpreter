@@ -1132,6 +1132,8 @@ async fn compaction_and_review_submissions_share_execution_observer() {
     let (review_session, events, submissions) = test_review_session().await;
     let child_session = Arc::clone(&review_session.session);
     let mut params = test_review_params().await;
+    let expected_country = codex_protocol::RequestCountry::UNKNOWN;
+    params.parent_context.request_country = expected_country.clone();
     params
         .spawn_config
         .features
@@ -1164,6 +1166,10 @@ async fn compaction_and_review_submissions_share_execution_observer() {
             .expect("child submission");
         if index == 0 {
             assert!(matches!(submission.op, Op::Compact));
+            assert_eq!(
+                child_session.thread_config_snapshot().await.request_country,
+                expected_country
+            );
         } else {
             let Op::TurnInput { reply, .. } = submission.op else {
                 panic!("expected review input after compaction");

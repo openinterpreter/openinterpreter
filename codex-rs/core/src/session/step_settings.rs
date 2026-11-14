@@ -8,6 +8,7 @@ use codex_features::Features;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::RequestCountry;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 /// a turn. A turn may contain several steps, each using its own captured settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StepSettings {
+    /// Trusted host country captured for requests issued with these settings.
+    pub(crate) request_country: RequestCountry,
     pub(crate) collaboration_mode: CollaborationMode,
     /// `None` follows the pinned model's default.
     pub(crate) reasoning_summary: Option<ReasoningSummary>,
@@ -53,6 +56,10 @@ pub(crate) struct ResolvedStepSettings {
 }
 
 impl ResolvedStepSettings {
+    pub(crate) fn request_country(&self) -> &RequestCountry {
+        &self.selected.request_country
+    }
+
     /// Derives request values from selected settings and pinned metadata.
     pub(super) fn new(
         selected: Arc<StepSettings>,
@@ -218,6 +225,8 @@ impl ModelInfoOverrides {
 /// that full value for another. Merge the requested edits with each target.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StepSettingsUpdate {
+    /// Omission preserves the runtime country.
+    pub(crate) request_country: Option<RequestCountry>,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<Option<ReasoningEffort>>,
     /// A complete collaboration mode takes precedence over model and effort edits.
@@ -259,6 +268,9 @@ impl StepSettings {
         constraints: &StepSettingsConstraints<'_>,
     ) -> ConstraintResult<Self> {
         let mut next = self.clone();
+        if let Some(request_country) = &update.request_country {
+            next.request_country.clone_from(request_country);
+        }
         next.collaboration_mode = update.collaboration_mode.clone().unwrap_or_else(|| {
             self.collaboration_mode.with_updates(
                 update.model.clone(),

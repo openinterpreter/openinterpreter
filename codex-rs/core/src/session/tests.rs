@@ -4,7 +4,11 @@ use crate::McpRefreshReason;
 use crate::agent::LocalAgentControl;
 use codex_mcp::McpServerKey;
 use codex_protocol::ContextWindowId;
+use codex_protocol::RequestCountry;
 use codex_thread_store::ThreadPersistenceMetadata;
+
+#[path = "mailbox_prewarm_tests.rs"]
+mod mailbox_prewarm_tests;
 
 #[path = "network_policy_tests.rs"]
 mod network_policy_tests;
@@ -4535,6 +4539,7 @@ async fn set_rate_limits_retains_previous_credits() {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -4659,6 +4664,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -5283,6 +5289,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -7000,6 +7007,51 @@ pub(crate) async fn build_world_state_from_turn_context(
 }
 
 #[tokio::test]
+async fn response_metadata_builders_capture_fresh_mcp_attribution() {
+    let (mut session, turn_context) = make_session_and_context().await;
+    session.services.executed_tool_calls =
+        crate::state::ExecutedToolCalls::new(&turn_context.config.features, &InitialHistory::New);
+    let turn_context = Arc::new(turn_context);
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let before = session
+        .responses_metadata(&step_context, CodexResponsesRequestKind::Turn)
+        .await;
+    let source = McpAttributionSource {
+        connector_id: None,
+        plugin_id: None,
+        server_name: "example".to_string(),
+        tool_name: "search".to_string(),
+        first_turn_id: turn_context.sub_id.clone(),
+    };
+    session
+        .services
+        .executed_tool_calls
+        .record_mcp_source(source.clone());
+    let after = session
+        .responses_metadata(&step_context, CodexResponsesRequestKind::Turn)
+        .await;
+    let compaction = session
+        .compaction_responses_metadata(
+            &step_context,
+            CompactionTurnMetadata::new(
+                CompactionTrigger::Auto,
+                CompactionReason::ContextLimit,
+                CompactionImplementation::Responses,
+                CompactionPhase::MidTurn,
+            ),
+        )
+        .await;
+    let expected = Some(McpAttribution {
+        status: McpAttributionStatus::Complete,
+        error_reason: None,
+        sources: vec![source],
+    });
+    assert_eq!(before.mcp_attribution, Some(McpAttribution::default()));
+    assert_eq!(after.mcp_attribution, expected);
+    assert_eq!(compaction.mcp_attribution, expected);
+}
+
+#[tokio::test]
 async fn responses_metadata_uses_selected_harness_analytics_client() {
     for enabled in [true, false] {
         let (mut session, mut turn_context) = make_session_and_context().await;
@@ -7053,6 +7105,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -7401,6 +7454,7 @@ async fn make_session_with_config_and_rx(
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -7539,6 +7593,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -9412,6 +9467,7 @@ where
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
