@@ -27,7 +27,6 @@ async fn assert_output(source: &str, expected: Value) {
                 max_output_tokens: None,
             },
             Arc::new(NoopCodeModeSessionDelegate),
-            /*preempt*/ None,
         )
         .await
         .expect("start cell");
