@@ -8,6 +8,120 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemPayload;
 
 #[tokio::test]
+async fn overview_cloud_selection_routes_before_reading_or_displacing_current_task() -> Result<()> {
+    let mut app = make_test_app().await;
+    let (client, mut commands, _notifications) = CloudClient::channel(/*capacity*/ 1);
+    let backend_id = BackendId::new();
+    let mut server = AppServerSession::new(
+        backend_id,
+        AppServerClient::Cloud(client),
+        ThreadParamsMode::Cloud,
+    );
+    let [current, target] = std::array::from_fn(|_| ThreadId::new());
+    app.active_thread_id = Some(current);
+    app.primary_thread_id = Some(current);
+    app.app_server_backend_id = Some(backend_id);
+    assert!(app.backend_registry.observe(backend_id, target));
+    let row = overview_thread(
+        target,
+        /*parent_thread_id*/ None,
+        "Other task",
+        ThreadStatus::NotLoaded,
+    );
+    app.agents_overview.threads.insert(target, Some(row));
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let selection = tokio::select! {
+        result = app.select_agents_overview_thread(&mut tui, &mut server, target) => result?,
+        _ = commands.recv() => panic!("selection must not read before the navigation is ready"),
+    };
+    assert!(matches!(selection, AppRunControl::Continue));
+    assert!(matches!(
+        events.try_recv()?,
+        AppEvent::ResumeBackendSession(session)
+            if session.backend_id == backend_id && session.thread_id == target
+    ));
+    assert_eq!(app.current_displayed_thread_id(), Some(current));
+    assert!(commands.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn overview_opens_a_search_only_task_on_the_search_backend() -> Result<()> {
+    let mut app = make_test_app().await;
+    let (client, _commands, _events) = CloudClient::channel(/*capacity*/ 1);
+    let mut displayed = AppServerSession::new(
+        BackendId::new(),
+        AppServerClient::Cloud(client),
+        ThreadParamsMode::Cloud,
+    );
+    let source = BackendId::new();
+    let [hit, collision] = std::array::from_fn(|_| ThreadId::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    app.app_server_backend_id = Some(displayed.backend_id());
+    assert!(
+        app.backend_registry
+            .observe(displayed.backend_id(), collision)
+    );
+
+    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    view.handle_key_event(KeyCode::Char('/').into());
+    view.handle_paste("Older task".into());
+    let AppEvent::SearchAgentsOverview(search_id, _) = rx.try_recv()? else {
+        panic!("expected an older-history search");
+    };
+    app.agents_overview.search_id = search_id;
+    let row = |id| {
+        overview_thread(
+            id,
+            /*parent_thread_id*/ None,
+            "Older task",
+            ThreadStatus::NotLoaded,
+        )
+    };
+    let found = row(hit);
+    app.apply_agents_overview_search_page(
+        search_id,
+        source,
+        vec![(found.clone(), false), (row(collision), false)],
+        Default::default(),
+        /*ok*/ true,
+    );
+    assert_eq!(
+        app.backend_registry.owner(collision),
+        Some(displayed.backend_id())
+    );
+    assert!(!app.agents_overview.search_matches.contains_key(&collision));
+    assert!(!app.agents_overview.threads.contains_key(&hit));
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.select_agents_overview_thread(&mut tui, &mut displayed, hit)
+        .await?;
+    let AppEvent::ResumeBackendSession(target) = rx.try_recv()? else {
+        panic!("expected the search-only task to resume");
+    };
+    assert_eq!(
+        (
+            target.backend_id,
+            target.thread_id,
+            target.path,
+            target.cwd,
+            target.history_mode
+        ),
+        (
+            source,
+            hit,
+            found.path,
+            Some(found.cwd.to_path_buf()),
+            Some(found.history_mode)
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn overview_worktree_creation_busy_state() {
     let mut app = make_test_app().await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

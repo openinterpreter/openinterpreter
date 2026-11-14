@@ -3,9 +3,14 @@
 
 use super::realtime::RealtimeConversationPhase;
 use super::*;
+use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::RestrictedInputMode;
 
 impl ChatWidget {
+    pub(crate) fn composer_paste_deadline(&self) -> Option<std::time::Instant> {
+        self.bottom_pane.composer_paste_deadline()
+    }
+
     pub(crate) fn record_realtime_disconnect_failure(&mut self) {
         if matches!(
             self.realtime_conversation.phase,
@@ -166,6 +171,16 @@ impl ChatWidget {
             self.bottom_pane
                 .handle_key_event_with_activation_key(key, activation_key);
         }
+    }
+
+    pub(crate) fn cancel_cloud_handoff_input(&mut self) -> CancellationEvent {
+        // Count buffered terminal input as part of the draft before deciding to quit.
+        self.bottom_pane.flush_composer_paste_burst();
+        let cancellation = self.bottom_pane.on_ctrl_c();
+        if cancellation == CancellationEvent::Handled {
+            self.refresh_startup_recovery();
+        }
+        cancellation
     }
 
     pub(crate) fn handle_restricted_key(&mut self, key: KeyEvent, mode: RestrictedInputMode) {

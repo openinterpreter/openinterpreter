@@ -37,6 +37,9 @@ pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
 pub(super) struct AgentsOverviewState {
     /// Missing metadata records a local resume until the next metadata refresh.
     pub(super) threads: HashMap<ThreadId, Option<Thread>>,
+    /// Older-history matches retain their exact backend owner for guarded navigation.
+    pub(super) search_matches: HashMap<ThreadId, Thread>,
+    pub(super) search_id: Uuid,
     /// Lifecycle removals take precedence over delayed tool registration responses.
     pub(super) removed_threads: HashSet<ThreadId>,
     /// Local visibility only; activity and metadata refreshes never reveal hidden roots.
@@ -517,6 +520,39 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<AppRunControl> {
+        // A task in the current view needs no navigation. Cloud task switching must
+        // resolve the destination before touching the active task's session or draft.
+        let viewing_task = self.current_displayed_thread_id() == Some(thread_id)
+            && (!self.thread_unavailable(thread_id) || self.chat_widget.is_read_only_view());
+        if let Some(owner) = self.backend_registry.owner(thread_id)
+            && (owner != app_server.backend_id()
+                || (app_server.thread_params_mode()
+                    == crate::app_server_session::ThreadParamsMode::Cloud
+                    && !self.chat_widget.fork_in_progress
+                    && !viewing_task))
+        {
+            let Some(thread) = self
+                .agents_overview
+                .threads
+                .get(&thread_id)
+                .and_then(Option::as_ref)
+                .or_else(|| self.agents_overview.search_matches.get(&thread_id))
+            else {
+                self.add_agents_overview_error(format!(
+                    "Agent session {thread_id} is unavailable. Refresh Command Center and try again."
+                ));
+                return Ok(AppRunControl::Continue);
+            };
+            self.app_event_tx
+                .send(AppEvent::ResumeBackendSession(SessionTarget {
+                    backend_id: owner,
+                    thread_id,
+                    path: thread.path.clone(),
+                    cwd: Some(thread.cwd.to_path_buf()),
+                    history_mode: Some(thread.history_mode),
+                }));
+            return Ok(AppRunControl::Continue);
+        }
         Box::pin(self.attach_agents_overview_thread(
             tui, app_server, thread_id, /*started*/ None, /*startup_draft*/ None,
         ))

@@ -1165,6 +1165,10 @@ impl BottomPane {
         enabled: bool,
         placeholder: Option<String>,
     ) {
+        if !enabled {
+            self.composer.cancel_vim_search();
+            self.composer.cancel_history_search();
+        }
         self.composer.set_input_enabled(enabled, placeholder);
         self.request_redraw();
     }

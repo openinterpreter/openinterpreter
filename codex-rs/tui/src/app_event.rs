@@ -382,6 +382,14 @@ pub(crate) enum AppEvent {
         request_id: Uuid,
         result: Result<AgentsOverviewThreadRefresh, String>,
     },
+    SearchAgentsOverview(Uuid, usize),
+    AgentsOverviewSearchPage {
+        id: Uuid,
+        backend_id: crate::backend_id::BackendId,
+        rows: Vec<(Thread, bool)>,
+        cursor: crate::app::agents_overview_discovery::AgentsOverviewDiscovery,
+        ok: bool,
+    },
     /// Switch to a root session selected from the shared dashboard.
     SelectAgentsOverviewThread {
         thread_id: ThreadId,
@@ -744,6 +752,9 @@ pub(crate) enum AppEvent {
 
     /// Resume a thread by UUID or thread name inside the running TUI session.
     ResumeSessionByIdOrName(String),
+
+    /// Reattach an externally unarchived thread only while it remains displayed and unarchived.
+    ResumeUnarchivedThread(ThreadId),
 
     /// Attach a conversation through the registered backend that owns it.
     ResumeBackendSession(crate::resume_picker::SessionTarget),

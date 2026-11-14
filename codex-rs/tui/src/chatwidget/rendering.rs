@@ -14,12 +14,13 @@ use ratatui::text::Span;
 use ratatui::widgets::Block;
 use std::cell::Cell;
 
-struct ExternalWriterNotice {
+struct ReadOnlyThreadNotice {
+    reason: ReadOnlyThread,
     command_center_available: bool,
     transcript_hint: Option<crate::key_hint::ShortcutHint>,
 }
 
-impl Renderable for ExternalWriterNotice {
+impl Renderable for ReadOnlyThreadNotice {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let content_width = area.width.saturating_sub(/*rhs*/ 4);
         let card_lines = self.card_lines(content_width);
@@ -57,17 +58,19 @@ impl Renderable for ExternalWriterNotice {
     }
 }
 
-impl ExternalWriterNotice {
+impl ReadOnlyThreadNotice {
     fn card_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let title: Line<'static> = vec![
-            "🔒".into(),
-            "  ".into(),
-            "This conversation is open in another app".bold(),
-        ]
-        .into();
+        let (prefix, title, indent) = match self.reason {
+            ReadOnlyThread::ExternalWriter => {
+                ("🔒  ", "This conversation is open in another app", "    ")
+            }
+            ReadOnlyThread::Archived => ("", "This thread was archived", ""),
+        };
+        let title: Line<'static> = vec![prefix.into(), title.bold()].into();
+        let (key, action) = self.reason.action();
         let retry: Line<'static> = vec![
-            Span::styled("r", crate::style::accent_style()),
-            " to retry".into(),
+            Span::styled(key, crate::style::accent_style()),
+            format!(" to {action}").into(),
         ]
         .into();
         let mut lines = word_wrap_lines(&[title], usize::from(width));
@@ -79,18 +82,17 @@ impl ExternalWriterNotice {
             lines.push(retry);
         }
         lines.extend(word_wrap_lines(
-            &[Line::from(
-                "Close it there and press R to continue here.".dim(),
-            )],
+            &[Line::from(self.reason.message().dim())],
             RtOptions::new(usize::from(width))
-                .initial_indent("    ".into())
-                .subsequent_indent("    ".into()),
+                .initial_indent(indent.into())
+                .subsequent_indent(indent.into()),
         ));
         lines
     }
 
     fn footer_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut items = vec![("r".to_string(), "retry".to_string())];
+        let (key, action) = self.reason.action();
+        let mut items = vec![(key.to_string(), action.to_string())];
         let escape = crate::key_hint::plain(KeyCode::Esc).display_label();
         let mut quit_keys = vec![
             crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
@@ -242,8 +244,11 @@ impl ChatWidget {
         footer: Option<&'a crate::bottom_pane::TranscriptFooter>,
         command_popup_placement: crate::bottom_pane::CommandPopupPlacement,
     ) -> RenderableItem<'a> {
-        if self.external_writer_view && !self.bottom_pane.has_active_view() {
-            RenderableItem::Owned(Box::new(ExternalWriterNotice {
+        if let Some(reason) = self.read_only_thread
+            && !self.bottom_pane.has_active_view()
+        {
+            RenderableItem::Owned(Box::new(ReadOnlyThreadNotice {
+                reason,
                 command_center_available: self.remote_connection.is_some(),
                 transcript_hint: self.bottom_pane.transcript_shortcut_hint(),
             }))
