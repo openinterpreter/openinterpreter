@@ -1318,8 +1318,10 @@ mod tests {
     use super::ExecMetadata;
     use super::ExecParams;
     use super::ExecResponse;
+    use super::FsMissingChangedNotification;
     use super::FsOpenParams;
     use super::FsReadFileParams;
+    use super::FsWatchMissingParams;
     use super::HttpRequestParams;
     use super::NetworkProxyCapabilities;
     use super::ProcessId;

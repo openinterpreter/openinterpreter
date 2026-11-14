@@ -1233,12 +1233,16 @@ mod tests {
     use serde_json::to_string;
 
     #[test]
-    fn legacy_shell_model_metadata_deserializes_as_unified_exec() {
-        for legacy_shell_type in ["default", "local", "shell_command"] {
+    fn shell_model_metadata_preserves_distinct_tool_variants() {
+        for (shell_type, expected) in [
+            ("default", ConfigShellToolType::Default),
+            ("local", ConfigShellToolType::Local),
+            ("shell_command", ConfigShellToolType::ShellCommand),
+            ("unified_exec", ConfigShellToolType::UnifiedExec),
+        ] {
             assert_eq!(
-                from_str::<ConfigShellToolType>(&format!("\"{legacy_shell_type}\""))
-                    .expect("legacy shell type"),
-                ConfigShellToolType::UnifiedExec
+                from_str::<ConfigShellToolType>(&format!("\"{shell_type}\"")).expect("shell type"),
+                expected
             );
         }
         assert_eq!(
@@ -1649,6 +1653,7 @@ mod tests {
         assert_eq!(
             messages,
             ModelMessages {
+                instructions_template: Some("legacy catalog instructions".to_string()),
                 collaboration_modes: Some(CollaborationModeMessages {
                     default: Some(String::new()),
                     plan: None,

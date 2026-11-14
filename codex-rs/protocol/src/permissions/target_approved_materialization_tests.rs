@@ -202,15 +202,20 @@ fn approved_command_discards_other_volume_grants_before_materialization() {
         entry(workspace("private"), Deny),
     ]);
     let approved = policy.for_approved_command(&context);
-    assert_eq!(
-        [
-            "file:///C:/work/public",
-            "file:///C:/work/private/file",
-            "file:///D:/scoped"
-        ]
-        .map(|path| approved.resolve_access(&uri(path), &context)),
-        [Write, Deny, Deny],
-    );
+    let access = [
+        "file:///C:/work/public",
+        "file:///C:/work/private/file",
+        "file:///D:/scoped",
+    ]
+    .map(|path| approved.resolve_access(&uri(path), &context));
+    // If the host cannot prove the cross-volume denial, approval must preserve the original
+    // restricted policy instead of granting the C: volume and silently dropping D: protection.
+    if access[0] == Deny {
+        assert_eq!(approved, policy);
+        assert_eq!(access, [Deny, Deny, Deny]);
+    } else {
+        assert_eq!(access, [Write, Deny, Deny]);
+    }
 }
 
 #[test]

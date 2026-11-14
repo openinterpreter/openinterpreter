@@ -3876,12 +3876,12 @@ mod tests {
         };
         assert_eq!(
             items,
-            vec![FunctionCallOutputContentItem::InputImage {
+            urls.map(|url| FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::Inline {
-                    image_url: "data:image/png;base64,BASE64".into(),
+                    image_url: url.into(),
                 },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
-            }]
+            })
         );
 
         Ok(())
