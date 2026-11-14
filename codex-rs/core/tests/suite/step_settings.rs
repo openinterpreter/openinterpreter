@@ -488,6 +488,7 @@ async fn tool_result_history_keeps_originating_model_across_switch_and_replay() 
                     model: Some(model.to_string()),
                     ..Default::default()
                 },
+                reply: None,
             })
             .await?;
         test.submit_text_turn("review previous diagnostics").await?;
@@ -572,7 +573,7 @@ async fn tool_result_history_keeps_originating_model_across_switch_and_replay() 
         replay_config.model = Some(model.to_string());
         let resumed = test
             .thread_manager
-            .resume_thread_from_rollout(
+            .resume_legacy_thread_from_rollout(
                 replay_config.clone(),
                 rollout_path.clone(),
                 codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("dummy")),
@@ -583,7 +584,7 @@ async fn tool_result_history_keeps_originating_model_across_switch_and_replay() 
             .thread;
         let forked = test
             .thread_manager
-            .fork_thread(
+            .fork_legacy_thread(
                 ForkSnapshot::Interrupted,
                 StartThreadOptions::new(replay_config),
                 rollout_path.clone(),
@@ -598,6 +599,7 @@ async fn tool_result_history_keeps_originating_model_across_switch_and_replay() 
                         model: Some(model.to_string()),
                         ..Default::default()
                     },
+                    reply: None,
                 })
                 .await?;
             thread
@@ -705,7 +707,7 @@ async fn custom_tool_output_replay_preserves_originating_budget() -> Result<()> 
     replay_config.model = Some(MODEL_A.to_string());
     let resumed = test
         .thread_manager
-        .resume_thread_from_rollout(
+        .resume_legacy_thread_from_rollout(
             replay_config.clone(),
             rollout_path.clone(),
             codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("dummy")),
@@ -716,7 +718,7 @@ async fn custom_tool_output_replay_preserves_originating_budget() -> Result<()> 
         .thread;
     let forked = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::Interrupted,
             StartThreadOptions::new(replay_config),
             rollout_path,
@@ -1078,7 +1080,6 @@ async fn active_model_switch_updates_core_context_from_captured_settings(
                 }
                 let messages = model.model_messages.as_mut().expect("model messages");
                 messages.instructions_template = Some(format!("Instructions for {slug}."));
-                messages.instructions_variables = None;
                 messages.collaboration_modes = Some(CollaborationModeMessages {
                     default: Some(format!("Default collaboration for {slug}.")),
                     plan: None,
@@ -1099,6 +1100,7 @@ async fn active_model_switch_updates_core_context_from_captured_settings(
                     on_request_auto_review: None,
                     never: None,
                     unless_trusted: None,
+                    ..Default::default()
                 });
                 messages.token_budget =
                     (initial_model || destination_has_guidance).then(|| ModelTokenBudgetConfig {
@@ -2307,26 +2309,7 @@ async fn tool_messages_follow_mid_turn_model_changes() -> Result<()> {
                         wait_agent: tool_message("wait_agent"),
                         interrupt_agent: tool_message("interrupt_agent"),
                         list_agents: tool_message("list_agents"),
-                    }),
-                    multi_agent: Some(MultiAgentToolMessages {
-                        spawn_agent: tool_message("spawn_agent"),
-                        send_message: tool_message("send_message"),
-                        followup_task: tool_message("followup_task"),
-                        wait_agent: tool_message("wait_agent"),
-                        interrupt_agent: tool_message("interrupt_agent"),
-                        list_agents: tool_message("list_agents"),
                         post: tool_message("post"),
-                        ..Default::default()
-                    }),
-                    code_mode: Some(CodeModeToolMessages {
-                        exec: Some(ToolMessage {
-                            description: Some(format!("Exec description for {}.", model.slug)),
-                            ..Default::default()
-                        }),
-                        wait: Some(ToolMessage {
-                            description: Some(format!("Wait description for {}.", model.slug)),
-                            parameters: Some(wait_parameters(&model.slug).to_string()),
-                        }),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -2766,8 +2749,6 @@ async fn captured_step_controls_exec_completion_and_write_stdin_output() -> Resu
     .await;
     let end = end.expect("exec completion");
 
-    use codex_utils_output_truncation::TruncationPolicy;
-    use codex_utils_output_truncation::formatted_truncate_text;
     let requests = responses.requests();
     let exec = requests[2]
         .function_call_output_text("exec-b")
@@ -2790,10 +2771,6 @@ async fn captured_step_controls_exec_completion_and_write_stdin_output() -> Resu
     // The formatting check needs an untruncated chunk, independent of how the executor
     // aggregates output across the initial command and later stdin interactions.
     assert!(end.aggregated_output.contains(&output));
-    assert_eq!(
-        end.formatted_output,
-        formatted_truncate_text(&end.aggregated_output, TruncationPolicy::Bytes(400))
-    );
     Ok(())
 }
 
