@@ -1211,14 +1211,6 @@ async fn sse_rate_limit_message_uses_server_advised_retry_delay(code: &str) -> R
 
     let mut telemetry = RetryTelemetryCapture::install();
     let server = responses::start_mock_server().await;
-    let failed = responses::sse_response(responses::sse(vec![json!({
-        "type": "response.failed",
-        "response": {"error": {
-            "code": code,
-            "message": message,
-            "headers": {"Retry-After": error_header}
-        }}
-    })]));
     let response_mock = responses::mount_response_sequence(
         &server,
         vec![

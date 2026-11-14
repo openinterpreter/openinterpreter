@@ -1664,7 +1664,7 @@ print(json.dumps({"hookSpecificOutput": {
 
     let forked = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::TruncateBeforeNthUserMessage(1),
             StartThreadOptions::new(test.config.clone()),
             test.codex.rollout_path().expect("parent rollout path"),
@@ -2971,12 +2971,6 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Resu
             .map(|message| message["text"].clone())
             .collect::<Vec<_>>(),
         vec![json!("initial prompt"), json!("accepted queued prompt")],
-    );
-    assert_eq!(
-        retained["next_order"],
-        // Three accepted input positions (including the blocked prompt), then
-        // the two completed assistant messages.
-        json!(if thread_context_enabled { 5 } else { 0 })
     );
     // Three accepted input positions (including the blocked prompt), then
     // the two completed assistant messages.
