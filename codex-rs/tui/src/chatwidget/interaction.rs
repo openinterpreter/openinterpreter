@@ -56,11 +56,43 @@ impl ChatWidget {
         self.handle_key_event_with_activation_key(key_event, /*activation_key*/ None)
     }
 
+    pub(crate) fn set_new_backend_control(&mut self, label: Option<String>) {
+        if self.new_backend_label != label {
+            self.new_backend_label = label;
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn can_choose_new_backend(&self) -> bool {
+        !self.blocks_direct_input
+            && !self.is_user_turn_pending_or_running()
+            && self.last_turn_id().is_none()
+            && !self.input_queue.has_queued_follow_up_messages()
+            && self.input_queue.startup_submission.is_none()
+            && self.initial_user_message.is_none()
+    }
+
+    pub(super) fn visible_new_backend_control(&self) -> Option<&str> {
+        let label = self.new_backend_label.as_deref()?;
+        (self.can_choose_new_backend()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.fork_in_progress
+            && !self.shortcut_overlay_visible()
+            && !self.quick_dial_menu
+            && self.safety_recourse.is_none()
+            && !self.has_provider_error()
+            && matches!(self.external_editor_state, ExternalEditorState::Closed))
+        .then_some(label)
+    }
+
     pub(crate) fn handle_key_event_with_activation_key(
         &mut self,
         key_event: KeyEvent,
         activation_key: Option<crate::key_hint::KeyBinding>,
     ) -> KeyEventAction {
+        if self.handle_quick_dial_menu(key_event) {
+            return KeyEventAction::None;
+        }
         if self.handle_startup_submission_key(key_event) {
             return KeyEventAction::None;
         }
@@ -477,6 +509,10 @@ impl ChatWidget {
         }
         self.bottom_pane.handle_paste(text);
         self.refresh_startup_recovery();
+    }
+
+    pub(crate) fn is_in_paste_burst(&self) -> bool {
+        self.bottom_pane.is_in_paste_burst()
     }
 
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).

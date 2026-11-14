@@ -1280,21 +1280,42 @@ impl ChatWidget {
     }
 }
 
-fn plugins_popup_hint_line(
-    can_remove_marketplace: bool,
-    can_upgrade_marketplace: bool,
-) -> Line<'static> {
-    match (can_remove_marketplace, can_upgrade_marketplace) {
-        (true, true) => Line::from(
-            "ctrl+u upgrade · ctrl+r remove · space toggle · ←/→ tabs · enter details · esc close",
-        ),
-        (true, false) => {
-            Line::from("ctrl+r remove · space toggle · ←/→ tabs · enter details · esc close")
+impl ChatWidget {
+    fn plugin_toggle_key_available(&self) -> bool {
+        self.bottom_pane
+            .list_keymap()
+            .action_for(KeyEvent::from(KeyCode::Tab))
+            .is_none()
+    }
+
+    fn plugins_popup_hint_line(
+        &self,
+        can_remove_marketplace: bool,
+        can_upgrade_marketplace: bool,
+    ) -> Line<'static> {
+        let mut hints = Vec::new();
+        if can_upgrade_marketplace {
+            hints.push(format!(
+                "{} upgrade",
+                crate::key_hint::ctrl(KeyCode::Char('u')).display_label()
+            ));
         }
-        (false, true) => {
-            Line::from("ctrl+u upgrade · space toggle · ←/→ tabs · enter details · esc close")
+        if can_remove_marketplace {
+            hints.push(format!(
+                "{} remove",
+                crate::key_hint::ctrl(KeyCode::Char('r')).display_label()
+            ));
         }
-        (false, false) => Line::from("←/→ tabs · enter details · space toggle · esc close"),
+        let toggle_available = self.plugin_toggle_key_available();
+        if (can_remove_marketplace || can_upgrade_marketplace) && toggle_available {
+            hints.push("tab toggle".to_string());
+        }
+        hints.extend(["←/→ tabs", "enter details"].map(str::to_string));
+        if !can_remove_marketplace && !can_upgrade_marketplace && toggle_available {
+            hints.push("tab toggle".to_string());
+        }
+        hints.push("esc close".to_string());
+        Line::from(hints.join(" · "))
     }
 }
 

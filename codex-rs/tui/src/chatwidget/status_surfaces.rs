@@ -490,7 +490,7 @@ impl ChatWidget {
     /// Parses configured status-line ids into known items and collects unknown ids.
     ///
     /// Unknown ids are deduplicated in insertion order for warning messages.
-    fn status_line_items_with_invalids(&self) -> (Vec<StatusLineItem>, Vec<String>) {
+    pub(super) fn status_line_items_with_invalids(&self) -> (Vec<StatusLineItem>, Vec<String>) {
         if self.read_only_history {
             return Default::default();
         }
@@ -535,6 +535,13 @@ impl ChatWidget {
         self.current_cwd
             .as_deref()
             .unwrap_or(self.config.cwd.as_path())
+    }
+
+    pub(super) fn status_line_workspace_cwd(&self) -> &Path {
+        self.primary_environment_cwd
+            .as_ref()
+            .map(|cwd| Path::new(cwd.path.as_str()))
+            .unwrap_or_else(|| self.status_line_cwd())
     }
 
     /// Resolves the project root associated with `cwd`.
@@ -1034,7 +1041,7 @@ impl ChatWidget {
         format!("{} {label}{service_tier_label}", self.model_display_name())
     }
 
-    fn processing_tier_display_name(&self) -> Option<&str> {
+    pub(super) fn processing_tier_display_name(&self) -> Option<&str> {
         let id = self.current_service_tier()?;
         self.model_catalog
             .models
@@ -1078,6 +1085,14 @@ impl ChatWidget {
             TerminalTitleStatusKind::WaitingForBackgroundTerminal => "Waiting".to_string(),
             TerminalTitleStatusKind::Thinking => "Thinking".to_string(),
         }
+    }
+
+    pub(super) fn status_line_config_profile(&self) -> Option<String> {
+        let layer = self.config.config_layer_stack.get_active_user_layer()?;
+        let ConfigLayerSource::User { profile, .. } = &layer.name else {
+            return None;
+        };
+        profile.clone()
     }
 
     pub(super) fn terminal_title_spinner_text_at(&self, now: Instant) -> Option<String> {
