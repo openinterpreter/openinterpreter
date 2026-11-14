@@ -268,6 +268,7 @@ mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
+mod cloud_plugins;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -4364,7 +4365,7 @@ impl Session {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "step settings and both environment snapshots must be captured under active_turn then state"
+        reason = "step settings and environments require active_turn then state; cloud snapshots require the catalog publication lock"
     )]
     #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
     async fn capture_step_context_inner(
@@ -4537,6 +4538,7 @@ impl Session {
             {
                 required_servers.push(codex_mcp::CODEX_APPS_MCP_SERVER_NAME.to_owned());
             }
+            let catalogs = self.lock_cloud_catalogs().await;
             let (mcp, prepared_recommendations) = tokio::join!(
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
@@ -4657,6 +4659,7 @@ impl Session {
                     .or_cancel(cancellation_token)
                     .await?;
             }
+            drop(catalogs);
             extension_data.insert(selected_plugins);
             let tool_router = turn::built_tools(
                 self.as_ref(),

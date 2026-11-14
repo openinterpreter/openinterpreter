@@ -63,6 +63,7 @@ pub use tool_lifecycle::ToolTimingInput;
 pub use turn_input::TurnInputContext;
 pub use turn_input::TurnInputEnvironment;
 pub use turn_lifecycle::CatalogRefreshInput;
+pub use turn_lifecycle::CloudCatalogRefreshInput;
 pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
 pub use turn_lifecycle::TurnStartInput;
@@ -215,6 +216,12 @@ pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
 /// Implementations should use these callbacks to seed, observe, or clear
 /// extension-private turn state. The host exposes stable identifiers and
 /// extension stores instead of core runtime objects.
+///
+/// Core serializes explicit catalog refresh and step preparation per thread.
+/// Within a refresh, contributors run concurrently and must not depend on each
+/// other's publication order.
+/// Cloud discovery runs through those refresh callbacks; hosts requesting discovery
+/// should use Core's refresh API rather than invoke hooks directly.
 pub trait TurnLifecycleContributor: Send + Sync {
     /// Refresh extension-owned catalogs immediately before an active model step.
     /// Return true only when the extension changed its MCP projection so the host
@@ -257,6 +264,28 @@ pub trait TurnLifecycleContributor: Send + Sync {
             let _self = self;
             let _input = input;
         })
+    }
+
+    /// Refreshes catalogs before a step; returns true when MCP needs rebuilding.
+    /// Called under the same per-thread catalog lock as explicit refresh and step preparation.
+    fn refresh_catalog_for_step<'a>(
+        &'a self,
+        _input: CatalogRefreshInput<'a>,
+    ) -> ExtensionFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
+    /// Publishes cloud catalogs after explicit invalidation, without requiring a turn.
+    /// Core marks MCP dirty after publication. Accepted complete or partial catalogs
+    /// replace the previous result; failed or superseded discovery returns an error.
+    /// Core invalidates resource keys before calling. MCP-backed catalogs record
+    /// the new key only on acceptance, keeping failed or cancelled refreshes stale.
+    /// Called under the same per-thread catalog lock as step preparation.
+    fn refresh_cloud_catalog<'a>(
+        &'a self,
+        _input: CloudCatalogRefreshInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
     }
 
     /// Observes a completed item without changing it or delaying streamed deltas.

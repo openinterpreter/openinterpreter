@@ -156,7 +156,7 @@ impl SkillProvider for PausedCatalogSkillProvider {
             }
             if self.first_discovery.swap(/*val*/ false, Ordering::SeqCst) {
                 self.started
-                    .send(query.turn_id.clone())
+                    .send(query.turn_id.clone().expect("turn discovery"))
                     .expect("discovery receiver");
                 self.resume
                     .acquire()
