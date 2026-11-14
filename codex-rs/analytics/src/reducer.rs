@@ -4235,6 +4235,7 @@ mod tests {
             status: McpToolCallStatus::Completed,
             arguments: serde_json::json!({}),
             app_context: None,
+            environment_id: None,
             mcp_app_resource_uri: None,
             mcp_app_ui: None,
             plugin_id: None,
