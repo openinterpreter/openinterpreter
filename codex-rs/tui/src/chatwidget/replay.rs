@@ -220,7 +220,7 @@ impl ChatWidget {
             if hidden_nested_review_turn {
                 self.turn_lifecycle
                     .rendered_completion_turn_ids
-                    .insert(turn_id.clone());
+                    .insert(turn_id.clone(), /*labeled*/ true);
             }
             if matches!(
                 status,

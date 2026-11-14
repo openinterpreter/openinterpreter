@@ -6,6 +6,8 @@ use chrono::DateTime;
 use chrono::Datelike;
 use chrono::Local;
 use chrono::NaiveDate;
+use codex_app_server_protocol::Turn;
+use std::collections::HashMap;
 
 /// Completion metadata shown after the assistant's final response.
 ///
@@ -24,6 +26,42 @@ pub struct FinalMessageSeparator {
     clock_format: ClockFormat,
 }
 impl FinalMessageSeparator {
+    /// An untimed boundary remains eligible for later completion metadata when history arrives.
+    pub(crate) fn from_turn_once(
+        turn: &Turn,
+        rendered_completion_turn_ids: &mut HashMap<String, bool>,
+        fallback_elapsed: Option<std::time::Duration>,
+        fallback_completed_at: Option<DateTime<Local>>,
+    ) -> Option<Self> {
+        let elapsed_seconds = turn
+            .duration_ms
+            .and_then(|duration| u64::try_from(duration).ok())
+            .map(|duration| duration / 1_000)
+            .or_else(|| fallback_elapsed.map(|elapsed| elapsed.as_secs()));
+        let completed_at = turn
+            .completed_at
+            .and_then(|timestamp| DateTime::from_timestamp(timestamp, /*nsecs*/ 0))
+            .map(|timestamp| timestamp.with_timezone(&Local))
+            .or(fallback_completed_at);
+        let has_label = completed_at.is_some() || elapsed_seconds.is_some();
+        if rendered_completion_turn_ids
+            .get(&turn.id)
+            .is_some_and(|labeled| *labeled || !has_label)
+        {
+            return None;
+        }
+        rendered_completion_turn_ids.insert(turn.id.clone(), has_label);
+        let cell = Self::new(elapsed_seconds, /*runtime_metrics*/ None);
+        Some(match completed_at {
+            Some(completed_at) => cell.with_completed_at(completed_at, ClockFormat::system()),
+            None => cell,
+        })
+    }
+
+    pub(crate) fn has_timing(&self) -> bool {
+        self.completed_at.is_some() || self.elapsed_seconds.is_some()
+    }
+
     /// Creates completion metadata using the protocol turn duration when available.
     pub(crate) fn new(
         elapsed_seconds: Option<u64>,
