@@ -215,6 +215,8 @@ async fn world_state_stops_after_rejected_refresh() {
             turn_id: "turn",
             model_info: &model_info,
             environments: &[],
+            ready_selected_capability_roots: &[],
+            executor_capability_discovery: None,
             extension_metrics: None,
             session_store: &store,
             thread_store: &store,
