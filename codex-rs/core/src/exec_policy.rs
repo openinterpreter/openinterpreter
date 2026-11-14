@@ -865,7 +865,7 @@ fn render_decision_for_unmatched_command(
     )
 }
 
-fn render_decision_for_unmatched_command_for_platform(
+pub(crate) fn render_decision_for_unmatched_command_for_platform(
     command: &[String],
     context: UnmatchedCommandContext<'_>,
     command_platform: DangerousCommandPlatform,

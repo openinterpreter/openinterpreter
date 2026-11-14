@@ -7332,6 +7332,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
+        session.services.user_shell.as_ref(),
         config.multi_agent_version_from_features(),
         per_turn_config,
         Arc::new(super::step_settings::ResolvedStepSettings::new(
@@ -9689,6 +9690,7 @@ where
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
+        session.services.user_shell.as_ref(),
         config.multi_agent_version_from_features(),
         per_turn_config,
         Arc::new(super::step_settings::ResolvedStepSettings::new(

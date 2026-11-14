@@ -1085,6 +1085,7 @@ impl Session {
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
         session_configuration: &SessionConfiguration,
+        user_shell: &shell::Shell,
         multi_agent_version: MultiAgentVersion,
         per_turn_config: Config,
         step_settings: Arc<ResolvedStepSettings>,
@@ -1101,7 +1102,7 @@ impl Session {
         let available_models = models_manager.try_list_models().unwrap_or_default();
         let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
             per_turn_config.features.get(),
-            crate::tools::tool_user_shell_type(&self.user_shell()),
+            crate::tools::tool_user_shell_type(user_shell),
             per_turn_config.zsh_path.as_ref(),
             per_turn_config.main_execve_wrapper_exe.as_ref(),
         );
@@ -1449,6 +1450,7 @@ impl Session {
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
+            self.services.user_shell.as_ref(),
             multi_agent_version,
             per_turn_config,
             step_settings,

@@ -84,7 +84,7 @@ fn approval_sandbox_permissions(
 }
 
 pub(crate) async fn prepare_unified_exec_zsh_fork(
-    req: &crate::tools::runtimes::unified_exec::UnifiedExecRequest,
+    req: &crate::tools::runtimes::unified_exec::UnifiedExecRequest<'_>,
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx,
     exec_request: ExecRequest,
@@ -521,7 +521,7 @@ fn evaluate_intercepted_exec_policy(
     };
 
     let fallback = |cmd: &[String]| {
-        crate::exec_policy::render_decision_for_unmatched_command(
+        crate::exec_policy::render_decision_for_unmatched_command_for_platform(
             cmd,
             crate::exec_policy::UnmatchedCommandContext {
                 approval_policy,
@@ -530,6 +530,7 @@ fn evaluate_intercepted_exec_policy(
                 sandbox_permissions,
                 command_origin: crate::exec_policy::ExecPolicyCommandOrigin::Generic,
             },
+            codex_shell_command::is_dangerous_command::DangerousCommandPlatform::Posix,
         )
     };
 
