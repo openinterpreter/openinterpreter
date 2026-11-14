@@ -72,6 +72,8 @@ const REFRESHABLE_SERVER_URL: &str = "https://refreshable.example/mcp";
 #[derive(Clone, Copy)]
 enum OAuthStartupScenario {
     DirectAuthorizationMetadata,
+    ClientSecretBasic,
+    ClientSecretPost,
     OidcMetadataAfter503,
     GatewayHeadersHelper,
     SameOriginGatewayHeadersHelper,
@@ -255,6 +257,24 @@ async fn oauth_tool_call_child() -> anyhow::Result<()> {
 async fn refreshes_expired_persisted_token_before_initialize() -> anyhow::Result<()> {
     assert_expired_token_refresh(
         OAuthStartupScenario::DirectAuthorizationMetadata,
+        McpOAuthRefreshMode::Coordinated,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn refreshes_expired_confidential_client_with_basic_auth() -> anyhow::Result<()> {
+    assert_expired_token_refresh(
+        OAuthStartupScenario::ClientSecretBasic,
+        McpOAuthRefreshMode::Coordinated,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn refreshes_expired_confidential_client_with_post_auth() -> anyhow::Result<()> {
+    assert_expired_token_refresh(
+        OAuthStartupScenario::ClientSecretPost,
         McpOAuthRefreshMode::Coordinated,
     )
     .await
