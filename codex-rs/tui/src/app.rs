@@ -1856,6 +1856,7 @@ See the keymap documentation for supported actions and examples."
         self.sync_thread_title_progress();
         self.chat_widget
             .set_sparkle_terminal_focus(tui.is_terminal_focused());
+        tui.set_question_mouse_capture(self.chat_widget.mouse_capture(tui.is_owned_screen()))?;
         if tui.is_owned_screen() {
             return self.render_owned_transcript(tui, screen_size);
         }

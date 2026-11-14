@@ -1,5 +1,7 @@
 //! Prompt rendering for IDE context injected into TUI user turns.
 
+use codex_app_server_protocol::ByteRange;
+use codex_app_server_protocol::TextElement;
 use codex_app_server_protocol::UserInput;
 
 use super::IdeContext;

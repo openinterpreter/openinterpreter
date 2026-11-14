@@ -14,7 +14,12 @@ use codex_app_server_protocol::DynamicToolFunctionSpec;
 use codex_app_server_protocol::DynamicToolNamespaceSpec;
 use codex_app_server_protocol::DynamicToolNamespaceTool;
 use codex_app_server_protocol::DynamicToolSpec;
+use codex_app_server_protocol::GeneratedImageRef;
+use codex_app_server_protocol::GetAccountParams;
+use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::ImageReference;
+use codex_app_server_protocol::ModelListParams;
+use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SortDirection;
@@ -575,7 +580,17 @@ async fn execute_inner(
                 .await
                 .map_err(|error| error.to_string())?;
             let thread_id = started.thread.id.clone();
+            let daybreak_enabled = started.thread.daybreak_enabled.unwrap_or(false);
             register_background_thread(app_event_tx, started.thread, task_tools_available).await?;
+            let cyber_access_program = background_turn_program(
+                &features,
+                &handle,
+                &thread_id,
+                &started.model,
+                &started.model_provider,
+                daybreak_enabled,
+            )
+            .await?;
             if let Some(title) = arguments.title
                 && let Err(error) = request::<ThreadSetNameResponse>(&handle, |request_id| {
                     ClientRequest::ThreadSetName {
@@ -1257,7 +1272,7 @@ async fn start_turn(
             // Older app-server/TUI versions are intentionally unsupported:
             // preserving tool authority takes precedence over legacy fallback.
             tool_output: Some(Box::new(TurnToolOutput {
-                retain: false,
+                retain: true,
                 name: tool.to_string(),
                 namespace: Some(NAMESPACE.to_string()),
                 output: FunctionCallOutputBody::Text(prompt),
