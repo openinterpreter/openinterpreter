@@ -229,11 +229,17 @@ impl ImageGenerationTool {
                     (
                         data.b64_json,
                         transparent_background,
-                        imagegen_request_id,
+                        imagegen_request_id.clone(),
                         data.generation_id,
                     )
                 })
-                .ok_or_else(|| ("image generation returned no image data".to_string(), None))
+                .ok_or_else(|| {
+                    (
+                        "image generation returned no image data".to_string(),
+                        None,
+                        imagegen_request_id,
+                    )
+                })
         });
         let (result, transparent_background, imagegen_request_id, generation_id) = match result {
             Ok(result) => result,
@@ -248,6 +254,7 @@ impl ImageGenerationTool {
                     transparent_background: None,
                     failure,
                     saved_path: None,
+                    input_images,
                     imagegen_request_id: None,
                     generation_id: None,
                 };
