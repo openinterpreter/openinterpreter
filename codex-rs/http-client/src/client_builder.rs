@@ -6,6 +6,7 @@
 //! paths.
 
 use http::HeaderMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -41,6 +42,8 @@ pub struct HttpClientBuilder {
     follow_redirects: bool,
     pub(crate) redirect_observed: Option<Arc<AtomicBool>>,
     pub(crate) connect_timeout: Option<Duration>,
+    // Pin after the caller validates every address, avoiding a DNS-rebinding window.
+    dns_overrides: Vec<(String, Vec<SocketAddr>)>,
     chatgpt_cloudflare_cookie_store: bool,
     chatgpt_cookie_store: Option<Arc<ChatGptCookieStore>>,
     pub(crate) request_logging: RequestLogging,
@@ -161,6 +164,13 @@ impl HttpClientBuilder {
     /// Limits only connection establishment, not the request as a whole.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// Pins an already validated hostname to these addresses for the connection.
+    /// Callers must reject unsafe addresses before using this method.
+    pub fn resolve_to_addrs(mut self, host: &str, addrs: &[SocketAddr]) -> Self {
+        self.dns_overrides.push((host.to_owned(), addrs.to_vec()));
         self
     }
 
@@ -435,6 +445,9 @@ impl HttpClientBuilder {
         if let Some(connect_timeout) = self.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);
         }
+        for (host, addrs) in self.dns_overrides {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
         if self.chatgpt_cloudflare_cookie_store {
             builder = match self.chatgpt_cookie_store {
                 Some(store) => builder.cookie_provider(store),
@@ -455,6 +468,7 @@ impl Default for HttpClientBuilder {
             follow_redirects: true,
             redirect_observed: None,
             connect_timeout: None,
+            dns_overrides: Vec::new(),
             chatgpt_cloudflare_cookie_store: false,
             chatgpt_cookie_store: None,
             request_logging: RequestLogging::Enabled,

@@ -105,7 +105,6 @@ libc = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
 regex-lite = { workspace = true }
-reqwest = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = [
     "base64",
     "macros",

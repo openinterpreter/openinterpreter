@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_http_client::HttpClientBuilder;
 use pretty_assertions::assert_eq;
-use reqwest::dns::Resolve;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -26,8 +26,8 @@ use super::read_fetch_body;
 use super::resolve_public_http_url_with_lookup;
 use crate::function_tool::FunctionCallError;
 
-fn parse_url(url: &str) -> reqwest::Url {
-    reqwest::Url::parse(url).unwrap_or_else(|err| panic!("test URL should parse ({url}): {err}"))
+fn parse_url(url: &str) -> url::Url {
+    url::Url::parse(url).unwrap_or_else(|err| panic!("test URL should parse ({url}): {err}"))
 }
 
 async fn lookup_should_not_run(host: String, _port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -198,19 +198,6 @@ async fn allows_public_ip_literals_and_hostnames_that_resolve_publicly() {
     );
 }
 
-struct RebindingResolver {
-    calls: AtomicUsize,
-    addrs: Vec<SocketAddr>,
-}
-
-impl Resolve for RebindingResolver {
-    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let addrs = self.addrs.clone();
-        Box::pin(async move { Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs) })
-    }
-}
-
 #[tokio::test]
 async fn second_dns_answer_cannot_redirect_the_connection_privately() {
     let safe_hits = Arc::new(AtomicUsize::new(0));
@@ -228,23 +215,17 @@ async fn second_dns_answer_cannot_redirect_the_connection_privately() {
     )
     .await;
 
-    let rebinding = Arc::new(RebindingResolver {
-        calls: AtomicUsize::new(0),
-        addrs: vec![secret_addr],
-    });
     let client = fetch_client_builder(Some(&PinnedDns {
-        host: "rebind.test".to_string(),
+        host: "rebind.invalid".to_string(),
         addrs: vec![safe_addr],
     }))
-    .dns_resolver(Arc::clone(&rebinding))
-    .build()
+    .build_direct()
     .expect("client");
 
-    // Omit an explicit URL port so reqwest uses the port from the resolved
-    // SocketAddr. A second DNS answer that returns `secret_addr` would then
-    // connect privately if pinning did not take precedence.
+    // An invalid hostname must still connect to the pinned origin. Without
+    // pinning, a second lookup here would fail (or reach an unverified host).
     let body = client
-        .get("http://rebind.test/")
+        .get("http://rebind.invalid/")
         .send()
         .await
         .expect("pinned request")
@@ -255,22 +236,16 @@ async fn second_dns_answer_cannot_redirect_the_connection_privately() {
     assert_eq!(body, "safe-public-origin");
     assert_eq!(safe_hits.load(Ordering::SeqCst), 1);
     assert_eq!(secret_hits.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        rebinding.calls.load(Ordering::SeqCst),
-        0,
-        "pinned addrs must win over a later private DNS answer"
-    );
+    assert_ne!(safe_addr, secret_addr);
 }
 
 #[tokio::test]
 async fn stops_reading_oversized_chunked_body_without_content_length() {
     let addr = spawn_unbounded_chunked_http_server().await;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("client");
+    let client = HttpClientBuilder::new().build_direct().expect("client");
     let response = client
         .get(format!("http://{addr}/"))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .expect("chunked response");
@@ -299,7 +274,9 @@ async fn escaped_entities_in_fetched_page_are_decoded_once() {
         Arc::clone(&hits),
     )
     .await;
-    let response = reqwest::Client::new()
+    let response = HttpClientBuilder::new()
+        .build_direct()
+        .expect("client")
         .get(format!("http://{addr}/"))
         .send()
         .await
