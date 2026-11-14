@@ -971,6 +971,7 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            ..ModelProviderInfo::default()
         }
     }
 
@@ -1328,6 +1329,7 @@ mod tests {
                     url: None,
                     headers: None,
                     body: Some(body.to_string()),
+                    retry_after: None,
                 };
                 assert_eq!(provider.is_recoverable_auth_error(&error), recoverable);
             }

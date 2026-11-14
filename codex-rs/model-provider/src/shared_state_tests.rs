@@ -251,7 +251,11 @@ async fn gateway_preserves_runtime_auth_and_rejects_header_collisions() {
             },
             format!("{}/register", server.uri()).parse().unwrap(),
         ));
-        let provider = crate::test_support::runtime_model_provider(info, primary, (runtime, mode));
+        let provider = crate::provider::create_model_provider_with_runtime(
+            info,
+            Some(primary),
+            Some((runtime, mode)),
+        );
         let auth = provider.api_auth().await.unwrap();
         let stale_headers = HeaderMap::from_iter([
             (
