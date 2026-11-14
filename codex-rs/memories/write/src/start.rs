@@ -48,7 +48,7 @@ pub fn start_memories_startup_task(
         let parent_permission_profile = parent_permission_profile.clone();
         let context = Arc::new(MemoryStartupContext::new(
             Arc::clone(&thread_manager),
-            auth,
+            Arc::clone(&auth),
             thread_id,
             Arc::clone(&thread),
             config.as_ref(),
@@ -74,7 +74,7 @@ pub fn start_memories_startup_task(
             // done before the quota check.
             phase1::prune(context.as_ref(), &config).await;
 
-            if !guard::rate_limits_ok(&auth_manager, &config).await {
+            if !guard::rate_limits_ok(auth.as_ref(), &config).await {
                 context.counter(
                     MEMORY_STARTUP,
                     /*inc*/ 1,

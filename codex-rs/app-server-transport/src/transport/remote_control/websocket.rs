@@ -865,6 +865,7 @@ impl RemoteControlWebsocket {
         if !self.auth_manager.owner.is_current() {
             return ConnectionEndReason::AuthOwnerChanged;
         }
+        let connected_at = Instant::now();
         self.client_tracker.lock().await.auth = Some(self.auth_manager.owner.clone());
         let (websocket_writer, websocket_reader) = websocket_connection.split();
         let mut join_set = tokio::task::JoinSet::new();
@@ -1446,7 +1447,9 @@ pub(super) async fn connect_remote_control_websocket(
     current_enrollment.check_retry_after()?;
     let websocket_connect_result = tokio::time::timeout(
         REMOTE_CONTROL_WEBSOCKET_CONNECT_TIMEOUT,
-        connect_async(request),
+        codex_websocket_client::WebSocketConnector::new(&auth.http_client_factory)
+            .map_err(io::Error::other)?
+            .connect(request, tungstenite::protocol::WebSocketConfig::default()),
     )
     .await
     .map_err(|_| {

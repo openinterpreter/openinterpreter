@@ -186,7 +186,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for GoalToolExecutor {
                     "Goal tools require a persistent thread.".to_string(),
                 ));
             }
-            match self.kind {
+            match &self.kind {
                 GoalToolKind::Get => self.handle_get(invocation).await,
                 GoalToolKind::Create(thread_manager) => {
                     self.handle_create(invocation, &thread_manager).await

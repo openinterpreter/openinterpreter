@@ -99,10 +99,12 @@ pub async fn start_control_socket_acceptor(
     };
     prepare_control_socket_path(socket_path.as_path()).await?;
     let listener = UnixListener::bind(socket_path.as_path()).await?;
-    let socket_guard = ControlSocketFileGuard {
+    let socket_guard = DaemonSocketFileGuard {
         socket_path,
         #[cfg(unix)]
         rendezvous_path,
+        #[cfg(unix)]
+        _startup_lock,
         #[cfg(windows)]
         _directory_guard: directory_guard,
     };
@@ -242,6 +244,7 @@ async fn run_control_socket_acceptor(
         let transport_event_tx = transport_event_tx.clone();
         tokio::spawn(async move {
             let mut shutdown_request = false;
+            let mut negotiated_compression = WebSocketCompression::Plain;
             let websocket_config = WebSocketConfig::default();
             let max_unfragmented_message_bytes = [
                 websocket_config.max_frame_size,
@@ -271,12 +274,6 @@ async fn run_control_socket_acceptor(
                         response.headers_mut().insert(
                             WEBSOCKET_COMPRESSION_HEADER,
                             HeaderValue::from_static(ZSTD_STREAM_PROTOCOL),
-                        );
-                    }
-                    if let Some(max_bytes) = max_unfragmented_message_bytes {
-                        response.headers_mut().insert(
-                            MAX_UNFRAGMENTED_MESSAGE_BYTES_HEADER,
-                            HeaderValue::from(max_bytes),
                         );
                     }
                     if let Some(max_bytes) = max_unfragmented_message_bytes {
@@ -401,6 +398,43 @@ fn protected_socket_path(rendezvous_path: &Path) -> IoResult<std::path::PathBuf>
     let path = std::fs::canonicalize(parent)?.join(name);
     let hash = Sha256::digest(path.as_os_str().as_bytes());
     Ok(codex_uds::shared_daemon_socket_directory()?.join(format!("{hash:x}")))
+}
+
+/// Resolve a local daemon rendezvous only when it names our protected socket.
+/// Returning the physical path prevents a later replacement of the alias from
+/// redirecting the connection to an unverified listener.
+pub fn verified_local_daemon_socket(socket_path: &Path) -> IoResult<Option<AbsolutePathBuf>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let physical_path = protected_socket_path(socket_path)?;
+        let directory = codex_uds::shared_daemon_socket_directory()?;
+        let directory_metadata = std::fs::symlink_metadata(&directory)?;
+        if !directory_metadata.is_dir()
+            || directory_metadata.uid() != unsafe { libc::geteuid() }
+            || directory_metadata.mode() & 0o777 != 0o700
+            || std::fs::read_link(socket_path).ok().as_deref() != Some(physical_path.as_path())
+        {
+            return Ok(None);
+        }
+        let physical_metadata = std::fs::symlink_metadata(&physical_path)?;
+        if !physical_metadata.file_type().is_socket()
+            || physical_metadata.uid() != unsafe { libc::geteuid() }
+            || physical_metadata.mode() & 0o777 != CONTROL_SOCKET_MODE
+        {
+            return Ok(None);
+        }
+        return AbsolutePathBuf::from_absolute_path_checked(physical_path).map(Some);
+    }
+    #[cfg(windows)]
+    {
+        // The directory validation guard cannot be retained by a bare path.
+        // Do not classify an unpinned Windows alias as a verified local daemon.
+        let _ = socket_path;
+        Ok(None)
+    }
 }
 
 pub struct AppServerStartupLock {
@@ -550,6 +584,8 @@ pub struct DaemonSocketFileGuard {
     socket_path: AbsolutePathBuf,
     #[cfg(unix)]
     rendezvous_path: AbsolutePathBuf,
+    #[cfg(unix)]
+    _startup_lock: AppServerStartupLock,
     // Keep the directory pinned until after the socket file is removed in Drop.
     #[cfg(windows)]
     _directory_guard: std::os::windows::io::OwnedHandle,
