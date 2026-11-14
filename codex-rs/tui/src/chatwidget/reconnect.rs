@@ -169,7 +169,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_restricted_key(&mut self, key: KeyEvent, mode: RestrictedInputMode) {
-        if self.external_writer_view {
+        if self.is_read_only_view() {
             return KeyEventAction::None;
         }
         if mode == RestrictedInputMode::DraftHandoff {
