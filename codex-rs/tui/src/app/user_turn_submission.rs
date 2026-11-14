@@ -8,6 +8,7 @@ use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::user_message_submission::TurnStartSettings;
 use crate::app_server_session::user_message_submission::UserMessageAdmission;
 use crate::app_server_session::user_message_submission::UserMessageSubmissionFailure;
+use codex_app_server_protocol::UserInput;
 
 pub(super) async fn try_submit_user_turn(
     app: &mut App,
@@ -17,6 +18,7 @@ pub(super) async fn try_submit_user_turn(
 ) -> Result<bool> {
     let AppCommand::UserTurn {
         turn_trigger,
+        items,
         cloud_submission,
         client_user_message_id,
         ..
@@ -94,6 +96,18 @@ pub(super) async fn try_submit_user_turn(
 
     match result {
         Ok((admission, selection)) => {
+            if confirmed_direct_fork_start(turn_trigger, items, &admission)
+                && let Some(text) = super::thread_title::user_message_text(items)
+                && let Some(fork_name) = app_server.side_chat_fork_names.remove(&thread_id)
+            {
+                app.generate_thread_title(
+                    app_server,
+                    thread_id,
+                    ThreadTitleDestination::Automatic,
+                    &text,
+                    fork_name,
+                );
+            }
             if selection.is_some() {
                 app.chat_widget.cloud_picker_selection = selection;
             }
@@ -141,6 +155,52 @@ pub(super) async fn try_submit_user_turn(
         Err(UserMessageSubmissionFailure::Unhandled(_)) => unreachable!("returned above"),
     }
     Ok(true)
+}
+
+fn confirmed_direct_fork_start(
+    turn_trigger: &str,
+    items: &[UserInput],
+    admission: &UserMessageAdmission,
+) -> bool {
+    turn_trigger == "user"
+        && !items.is_empty()
+        && matches!(admission, UserMessageAdmission::StartResponse(_))
+}
+
+#[cfg(test)]
+mod side_chat_fork_title_tests {
+    use super::*;
+
+    #[test]
+    fn only_confirmed_direct_start_can_consume_inherited_fork_name() {
+        let items = vec![UserInput::Text {
+            text: "Continue the fork".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(confirmed_direct_fork_start(
+            "user",
+            &items,
+            &UserMessageAdmission::StartResponse("turn".to_string()),
+        ));
+        for admission in [
+            UserMessageAdmission::Queued("queued".to_string()),
+            UserMessageAdmission::Steered("turn".to_string()),
+            UserMessageAdmission::Started("turn".to_string()),
+            UserMessageAdmission::Duplicate,
+        ] {
+            assert!(!confirmed_direct_fork_start("user", &items, &admission));
+        }
+        assert!(!confirmed_direct_fork_start(
+            "user",
+            &[],
+            &UserMessageAdmission::StartResponse("turn".to_string()),
+        ));
+        assert!(!confirmed_direct_fork_start(
+            "system",
+            &items,
+            &UserMessageAdmission::StartResponse("turn".to_string()),
+        ));
+    }
 }
 
 fn turn_start_settings<'a>(
