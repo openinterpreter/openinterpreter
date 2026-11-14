@@ -109,6 +109,20 @@ impl HistoryCell for SessionNoticeCell {
     }
 }
 
+/// Fork lineage stays ahead of older history pages during pagination.
+#[derive(Debug)]
+pub(crate) struct ForkedThreadHistoryCell(pub(crate) PlainHistoryCell);
+
+impl HistoryCell for ForkedThreadHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.0.display_lines(width)
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        self.0.raw_lines()
+    }
+}
+
 #[derive(Debug)]
 pub struct SessionInfoCell(CompositeHistoryCell);
 
@@ -249,7 +263,11 @@ pub(crate) fn new_session_info(
         if local_settings.tui.show_tooltips
             && let Some(tooltips) = tooltip_override
                 .or_else(|| {
-                    tooltips::get_tooltip(auth_plan, show_fast_status, &local_settings.tui.keymap)
+                    tooltips::get_tooltip(
+                        auth_plan,
+                        session.service_tier.as_deref() == Some("fast"),
+                        &local_settings.tui.keymap,
+                    )
                 })
                 .map(|tip| TooltipHistoryCell::new(tip, &config.cwd))
         {
@@ -266,6 +284,28 @@ pub(crate) fn new_session_info(
     }
 
     SessionInfoCell(CompositeHistoryCell { parts })
+}
+/// The fresh terminal header marks the start of visible scrollback after Ctrl+L.
+/// The original session header remains the sole source for the transcript.
+#[derive(Debug)]
+pub(crate) struct ClearScreenHeader(pub(crate) SessionHeaderHistoryCell);
+
+impl HistoryCell for ClearScreenHeader {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.0.display_lines(width)
+    }
+
+    fn live_raw_lines(&self) -> Vec<Line<'static>> {
+        self.0.raw_lines()
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        Vec::new()
+    }
+
+    fn transcript_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        Vec::new()
+    }
 }
 
 pub(crate) fn is_yolo_mode(config: &Config) -> bool {
@@ -309,7 +349,6 @@ impl SessionHeaderHistoryCell {
         Self {
             version,
             model,
-            model_style,
             reasoning_effort,
             directory,
             yolo_mode: false,
@@ -357,65 +396,19 @@ impl SessionHeaderHistoryCell {
 
 impl HistoryCell for SessionHeaderHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
+        if width == 0 {
             return Vec::new();
-        };
+        }
 
-        let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
-
-        let product_name = Product::current().display_name();
-        let title_spans: Vec<Span<'static>> = vec![
-            Span::from(">_ ").dim(),
-            Span::from(product_name).bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{})", self.version)).dim(),
-        ];
-
-        const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
-        const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
-        const DIR_LABEL: &str = "directory:";
-        const PERMISSIONS_LABEL: &str = "permissions:";
-        let label_width = if self.yolo_mode {
-            DIR_LABEL.len().max(PERMISSIONS_LABEL.len())
-        } else {
-            DIR_LABEL.len()
-        };
-
-        let model_label = format!(
-            "{model_label:<label_width$}",
-            model_label = "model:",
-            label_width = label_width
+        let model = self.reasoning_label().map_or_else(
+            || self.model.clone(),
+            |reasoning| format!("{} {reasoning}", self.model),
         );
-        let reasoning_label = self.reasoning_label();
-        let model_spans: Vec<Span<'static>> = {
-            let mut spans = vec![
-                Span::from(format!("{model_label} ")).dim(),
-                Span::styled(self.model.clone(), self.model_style),
-            ];
-            if let Some(reasoning) = reasoning_label {
-                spans.push(Span::from(" "));
-                spans.push(Span::from(reasoning.to_owned()));
-            }
-            if self.show_fast_status {
-                spans.push("   ".into());
-                spans.push(Span::styled("fast", self.model_style.magenta()));
-            }
-            spans.push("   ".dim());
-            spans.push(CHANGE_MODEL_HINT_COMMAND.fg(accent_color()));
-            spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
-            spans
-        };
-
-        let dir_label = format!("{DIR_LABEL:<label_width$}");
-        let dir_prefix = format!("{dir_label} ");
-        let dir_prefix_width = display_width(dir_prefix.as_str());
-        let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
-        let dir = self.format_directory(Some(dir_max_width));
-        let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
 
         let mut lines = vec![
             Line::default(),
-            Line::from(title),
+            Line::from(codex_title(self.version)),
+            Line::from(vec!["     model: ".dim(), model.into(), "   /model".dim()]),
             Line::from(vec![
                 "     ".into(),
                 self.format_directory(Some(width.saturating_sub(/*rhs*/ 5)))

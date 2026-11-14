@@ -5,6 +5,35 @@ use super::*;
 use crate::style::accent_color;
 use crate::terminal_hyperlinks::lines_with_sources_eq;
 
+/// Apply the plan surface after Markdown layout, preserving source-span contrast
+/// across streaming, committed history, and transcript reflow.
+pub(crate) fn style_proposed_plan_line(
+    mut line: HyperlinkLine,
+    plan_style: Style,
+) -> HyperlinkLine {
+    if plan_style.bg.is_none() {
+        return line.style(plan_style);
+    }
+    let adapt = |mut style: Style, background| {
+        style.fg = style
+            .fg
+            .map(|foreground| crate::style::readable_color_on(foreground, style.bg.or(background)));
+        style
+    };
+    line.line.style = adapt(line.line.style.patch(plan_style), plan_style.bg);
+    for span in &mut line.line.spans {
+        span.style = adapt(span.style, line.line.style.bg);
+    }
+    if let Some(source) = &mut line.source {
+        source.line_style = adapt(source.line_style.patch(plan_style), plan_style.bg);
+        source.span_style = adapt(source.span_style, source.line_style.bg);
+        for (_, style) in std::sync::Arc::make_mut(&mut source.styles) {
+            *style = adapt(*style, source.span_style.bg.or(source.line_style.bg));
+        }
+    }
+    line
+}
+
 /// Transient active-cell representation of the mutable tail of a proposed-plan stream.
 ///
 /// The controller prepares the full styled plan lines because plan tails need the same header,
