@@ -495,12 +495,12 @@ async fn provider_catalog_does_not_fall_back_to_unrelated_bundled_models_without
 
     // An unauthenticated endpoint has no matching catalog identity. Keep the
     // selected provider's own fallback, not the unrelated global GPT catalog.
-    manager.remote_models.write().await.identity = None;
+    manager.remote_models.write().await.entry.identity = None;
     assert_eq!(manager.get_remote_models().await, expected);
     assert_eq!(manager.try_get_remote_models().expect("unlocked"), expected);
 
     // A stale cache from another identity must obey the same provider boundary.
-    manager.remote_models.write().await.identity = Some("other-provider".to_string());
+    manager.remote_models.write().await.entry.identity = Some("other-provider".to_string());
     assert_eq!(manager.get_remote_models().await, expected);
 }
 
@@ -901,7 +901,7 @@ async fn get_model_info_uses_bundled_gpt_6_1_sol_metadata() {
         .get_model_info("gpt-6.1-sol", &ModelsManagerConfig::default())
         .await;
 
-    assert!(!model.used_fallback_model_metadata);
+    assert_eq!(model.origin, ModelOrigin::Bundled);
     assert_eq!(model.display_name, "GPT-6.1-Sol");
     // `models.json` is the ChatGPT/Codex OAuth descriptor, whose upstream
     // limits and Ultra multi-agent mode differ from the public API catalog.
@@ -1552,7 +1552,7 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
         );
         assert_eq!(manager.get_remote_models().await, vec![model]);
         assert_eq!(
-            manager.remote_models.read().await.etag.as_deref(),
+            manager.remote_models.read().await.entry.etag.as_deref(),
             Some("stable-catalog-etag")
         );
 
@@ -1571,7 +1571,13 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
         );
         assert_eq!(cache_endpoint.fetch_count(), 0);
         assert_eq!(
-            cache_manager.remote_models.read().await.etag.as_deref(),
+            cache_manager
+                .remote_models
+                .read()
+                .await
+                .entry
+                .etag
+                .as_deref(),
             Some("stable-catalog-etag")
         );
     }

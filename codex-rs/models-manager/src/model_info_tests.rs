@@ -9,7 +9,6 @@ use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::GranularApprovalMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
-use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentModeMessages;
@@ -147,21 +146,9 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
                 }),
                 ..Default::default()
             }),
-            multi_agent: Some(MultiAgentToolMessages {
-                spawn_agent: Some(ToolMessage {
-                    description: Some("Catalog spawn description.".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
             ..Default::default()
         }),
         instructions_template: Some("template".to_string()),
-        instructions_variables: Some(ModelInstructionsVariables {
-            personality_default: Some("default".to_string()),
-            personality_friendly: Some("friendly".to_string()),
-            personality_pragmatic: Some("pragmatic".to_string()),
-        }),
         approvals: Some(approvals),
         collaboration_modes: Some(collaboration_modes),
         auto_review: Some(auto_review),
@@ -170,6 +157,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         token_budget: Some(token_budget),
         confirmation_policies: Some(confirmation_policies),
         guardian_v2: Some(guardian_v2),
+        ..Default::default()
     };
     model.model_messages = Some(messages.clone());
     let config = ModelsManagerConfig {
@@ -181,7 +169,6 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let updated = with_config_overrides(model, &config);
 
     messages.instructions_template = Some(override_instructions.to_string());
-    messages.instructions_variables = None;
     assert_eq!(updated.model_messages, Some(messages));
     assert_eq!(render_model_instructions(&updated), override_instructions);
 }
@@ -210,11 +197,6 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
     ] {
         let mut messages = ModelMessages {
             instructions_template: Some(instructions.to_string()),
-            instructions_variables: Some(ModelInstructionsVariables {
-                personality_default: Some("default".to_string()),
-                personality_friendly: Some("friendly".to_string()),
-                personality_pragmatic: Some("pragmatic".to_string()),
-            }),
             persistent_instructions: Some(String::new()),
             tools: Some(ToolMessages {
                 send_user_message_async: Some(ToolMessage {
@@ -228,12 +210,14 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
                     }),
                     ..Default::default()
                 }),
+                ..Default::default()
             }),
             approvals: Some(ApprovalMessages {
                 on_request: Some("user approvals".to_string()),
                 on_request_auto_review: None,
                 never: None,
                 unless_trusted: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -302,7 +286,8 @@ fn unknown_model_uses_builtin_instruction_template() {
     let model = model_info_from_slug("unknown-model");
 
     assert_eq!(render_model_instructions(&model), BASE_INSTRUCTIONS);
-    assert!(model.used_fallback_model_metadata);
+    assert_eq!(model.slug, "unknown-model");
+    assert_eq!(model.display_name, "unknown-model");
 }
 
 #[test]
