@@ -4833,6 +4833,8 @@ dependencies = [
  "codex-utils-rustls-provider",
  "http 1.5.0",
  "pretty_assertions",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
