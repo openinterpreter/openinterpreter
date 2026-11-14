@@ -13,6 +13,7 @@ use crate::style::readable_color_on;
 use crate::style::secondary_text_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::TerminalHyperlink;
+use crate::terminal_hyperlinks::web_destination;
 use crate::terminal_palette::StdoutColorLevel;
 use crate::terminal_palette::effective_stdout_color_level;
 use crate::thread_color::thread_color;
@@ -123,7 +124,7 @@ where
         thread_id,
         |accent| foreground_style_for_scopes(accent.scopes()),
     )?;
-    if let Some(url) = pull_request_url {
+    if let Some(url) = pull_request_url.and_then(web_destination) {
         for (index, (item, _)) in segments.iter().enumerate() {
             if *item == StatusLineItem::PullRequestNumber {
                 let span_index = index * 2;
@@ -133,7 +134,7 @@ where
                     .sum::<usize>();
                 let end = start + line.line.spans[span_index].width();
                 line.hyperlinks
-                    .push(TerminalHyperlink::web(start..end, url.to_owned()));
+                    .push(TerminalHyperlink::web(start..end, url.clone()));
             }
         }
     }
@@ -151,7 +152,9 @@ where
     F: Fn(StatusLineAccent) -> Option<Style>,
 {
     let mut line = HyperlinkLine::default();
-    for (item, text) in segments {
+    for (item, mut text) in segments {
+        // The terminal drops control characters; offsets must measure the visible row.
+        text.retain(|ch| !ch.is_control());
         if !line.line.spans.is_empty() {
             line.line
                 .push_span(STATUS_LINE_SEPARATOR.set_style(secondary_text_style()));

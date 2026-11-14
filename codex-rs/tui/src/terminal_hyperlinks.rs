@@ -176,6 +176,13 @@ pub(crate) fn lines_with_sources_eq(left: &[HyperlinkLine], right: &[HyperlinkLi
             .eq(right.iter().map(|line| &line.source))
 }
 
+pub(crate) fn source_span_width(span: &Span<'_>) -> usize {
+    span.content
+        .graphemes(/*is_extended*/ true)
+        .map(display_width)
+        .sum()
+}
+
 impl HyperlinkLine {
     pub(crate) fn new(line: Line<'static>) -> Self {
         Self {
@@ -191,16 +198,26 @@ impl HyperlinkLine {
 
     /// The transcript expands tabs after wrapping. Keep their source columns until then.
     pub(crate) fn source_width(&self) -> usize {
-        self.line
-            .iter()
-            .map(|span| display_width(span.content.as_ref()))
-            .sum()
+        self.line.iter().map(source_span_width).sum()
     }
 
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
+        if let Some(destination) = destination.and_then(web_destination) {
+            self.push_linked_span(span, self.source_width(), destination);
+        } else {
+            self.source = None;
+            self.line.push_span(span);
+        }
+    }
+
+    pub(crate) fn push_linked_span(
+        &mut self,
+        span: Span<'static>,
+        start: usize,
+        destination: String,
+    ) {
         self.source = None;
-        let start = self.width();
-        let end = start + display_width(span.content.as_ref());
+        let end = start + source_span_width(&span);
         self.line.push_span(span);
         if end > start {
             self.hyperlinks
