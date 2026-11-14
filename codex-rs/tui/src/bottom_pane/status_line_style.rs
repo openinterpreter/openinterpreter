@@ -402,6 +402,29 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_link_uses_visible_columns_and_validated_web_destination() {
+        let url = "https://github.com/openai/codex/pull/123";
+        let segments = [
+            (StatusLineItem::ModelName, "漢字".to_string()),
+            (
+                StatusLineItem::PullRequestNumber,
+                "PR #123\u{0007}".to_string(),
+            ),
+        ];
+        let line = status_line_from_segments(segments.clone(), false, None, Some(url))
+            .expect("status line");
+        assert_eq!(line.line.spans[2].content, "PR #123");
+        assert_eq!(line.hyperlinks.len(), 1);
+        let start = crate::width::display_width("漢字 · ");
+        assert_eq!(line.hyperlinks[0].columns, start..start + 7);
+        assert_eq!(line.hyperlinks[0].destination, url);
+
+        let untrusted = status_line_from_segments(segments, false, None, Some("file:///secret"))
+            .expect("status line");
+        assert!(untrusted.hyperlinks.is_empty());
+    }
+
+    #[test]
     fn light_status_line_corrects_pale_custom_theme_colors() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
