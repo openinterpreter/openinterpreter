@@ -338,9 +338,6 @@ impl ChatWidget {
             .bottom_pane
             .set_voice_command_enabled(/*enabled*/ false);
         widget.sync_mentions_v2_enabled();
-        widget
-            .bottom_pane
-            .set_queued_message_edit_binding(widget.chat_keymap.edit_queued_message);
         widget.update_collaboration_mode_indicator();
 
         widget
