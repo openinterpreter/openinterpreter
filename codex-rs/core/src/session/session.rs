@@ -1522,10 +1522,35 @@ impl Session {
                 &crate::config::legacy_multi_agent_disabled_sources(&config.config_layer_stack),
             );
 
-            let default_shell = session_configuration
-                .user_shell_override
-                .clone()
-                .unwrap_or_else(shell::default_user_shell);
+            let default_shell = if let Some(user_shell_override) =
+                session_configuration.user_shell_override.clone()
+            {
+                user_shell_override
+            } else if config.features.enabled(Feature::ShellZshFork) {
+                let zsh_path = config.zsh_path.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("zsh fork feature enabled without a configured patched zsh")
+                })?;
+                if !zsh_path.is_file() {
+                    anyhow::bail!(
+                        "zsh fork feature enabled but patched zsh `{}` is unavailable",
+                        zsh_path.display()
+                    );
+                }
+                if config.features.enabled(Feature::UnifiedExecZshFork)
+                    && !config
+                        .main_execve_wrapper_exe
+                        .as_ref()
+                        .is_some_and(|wrapper| wrapper.is_file())
+                {
+                    anyhow::bail!("unified zsh fork enabled without an available execve wrapper");
+                }
+                shell::Shell {
+                    shell_type: shell::ShellType::Zsh,
+                    shell_path: zsh_path.clone(),
+                }
+            } else {
+                shell::default_user_shell()
+            };
             let credential_broker_available = (config.features.enabled(Feature::NetworkProxy)
                 || config.features.enabled(Feature::CredentialMasking))
                 && config
@@ -1548,9 +1573,16 @@ impl Session {
                     .network
                     .as_ref()
                     .is_some_and(crate::config::NetworkProxySpec::credential_broker_enabled);
+            let zsh_fork_mode = codex_tools::UnifiedExecShellMode::for_session(
+                config.features.get(),
+                crate::tools::tool_user_shell_type(&default_shell),
+                config.zsh_path.as_ref(),
+                config.main_execve_wrapper_exe.as_ref(),
+            );
             let prefer_executor_shell_snapshots = config.features.enabled(Feature::ShellSnapshotV2)
                 && config.features.enabled(Feature::ShellTool)
-                && config.features.enabled(Feature::UnifiedExec);
+                && config.features.enabled(Feature::UnifiedExec)
+                && matches!(zsh_fork_mode, codex_tools::UnifiedExecShellMode::Direct);
             let use_executor_shell_snapshots =
                 prefer_executor_shell_snapshots && !credential_broker_active;
             let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot)

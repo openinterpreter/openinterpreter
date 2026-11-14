@@ -1203,7 +1203,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ShellZshFork,
         key: "shell_zsh_fork",
-        stage: Stage::Removed,
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
