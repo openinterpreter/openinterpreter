@@ -5,6 +5,7 @@
 //! terminal status lookup.  It does not introduce a process broker, a second
 //! admission queue, or a shell-based custody probe.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error_code::internal_error;
@@ -432,7 +433,7 @@ impl AgentContractRequestProcessor {
             return Ok(task_admit_blocked(&params.admission_id, blocker));
         }
 
-        let (loaded_thread, source) = self.require_thread(thread_id).await?;
+        let (loaded_thread, source, cwd) = self.require_thread(thread_id).await?;
         ensure_direct_input_allowed(loaded_thread.as_deref(), &source)?;
         let Some(service) = self.queue_service.as_ref() else {
             return Ok(task_admit_blocked(
@@ -446,7 +447,7 @@ impl AgentContractRequestProcessor {
         match service
             .enqueue_admission(
                 thread_id,
-                submission_into_turn_input(params.input, Some(params.admission_id.clone())),
+                submission_into_turn_input(params.input, Some(params.admission_id.clone()), &cwd)?,
                 params.admission_id.clone(),
                 goal_binding_json,
                 params.expected_turn_id.clone(),
@@ -542,7 +543,7 @@ impl AgentContractRequestProcessor {
     async fn require_thread(
         &self,
         thread_id: ThreadId,
-    ) -> Result<(Option<Arc<CodexThread>>, SessionSource), JSONRPCErrorError> {
+    ) -> Result<(Option<Arc<CodexThread>>, SessionSource, PathBuf), JSONRPCErrorError> {
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let snapshot = thread.config_snapshot().await;
             if snapshot.ephemeral {
@@ -550,7 +551,8 @@ impl AgentContractRequestProcessor {
                     "ephemeral thread cannot admit durable tasks",
                 ));
             }
-            return Ok((Some(thread), snapshot.session_source));
+            let cwd = snapshot.cwd().to_path_buf();
+            return Ok((Some(thread), snapshot.session_source, cwd));
         }
         let stored = self
             .thread_store
@@ -569,7 +571,7 @@ impl AgentContractRequestProcessor {
                 "archived thread cannot admit durable tasks",
             ));
         }
-        Ok((None, stored.source))
+        Ok((None, stored.source, stored.cwd))
     }
 
     async fn read_receipt(
