@@ -2,6 +2,9 @@ mod common;
 #[cfg(unix)]
 #[path = "exec_process/shell_snapshot.rs"]
 mod shell_snapshot;
+#[cfg(unix)]
+#[path = "common/tls_proxy.rs"]
+mod tls_proxy;
 #[path = "exec_process/windows_sandbox.rs"]
 mod windows_sandbox;
 
@@ -1933,7 +1936,7 @@ async fn assert_remote_windows_sandbox_process_write(
     let mut sandbox = FileSystemSandboxContext::from_permission_profile(
         codex_protocol::models::PermissionProfile::read_only(),
         cwd.clone(),
-    )?;
+    );
     match expected_sandbox_type {
         codex_sandboxing::SandboxType::WindowsRestrictedToken => {
             sandbox.windows_sandbox_selection = WindowsSandboxSelection::RestrictedToken;
