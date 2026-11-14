@@ -28,6 +28,37 @@ pub(super) enum ThreadBufferedEvent {
     FeedbackSubmission(FeedbackThreadEvent),
 }
 
+/// Only server-confirmed message IDs may be used to deduplicate submitted input. A local
+/// pending composer entry is not proof that the server accepted that message.
+pub(super) fn confirmed_user_message_ids<'a>(
+    turns: &'a [Turn],
+    events: impl Iterator<Item = &'a ThreadBufferedEvent>,
+) -> Vec<String> {
+    turns
+        .iter()
+        .flat_map(Turn::item_payloads)
+        .chain(events.filter_map(|event| {
+            let ThreadBufferedEvent::Notification(notification) = event else {
+                return None;
+            };
+            if let ServerNotification::ItemStarted(notification) = notification.as_ref() {
+                Some(&notification.item.payload)
+            } else if let ServerNotification::ItemCompleted(notification) = notification.as_ref() {
+                Some(&notification.item.payload)
+            } else {
+                None
+            }
+        }))
+        .filter_map(|item| {
+            if let ThreadItemPayload::UserMessage { client_id, .. } = item {
+                client_id.clone()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn is_voice_handoff_item(item: &ThreadItem) -> bool {
     matches!(&item.payload, ThreadItemPayload::UserMessage { content, .. }
         if crate::chatwidget::realtime_delegation_input(content).is_some())

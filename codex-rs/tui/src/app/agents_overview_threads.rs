@@ -6,6 +6,7 @@ use super::App;
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use super::agents_overview_details::preview_agent_message;
 use super::agents_overview_discovery::is_overview_root;
+use super::agents_overview_discovery::list_pinned_threads;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use crate::app_event::AgentsOverviewThreadRefresh;
@@ -31,6 +32,27 @@ use uuid::Uuid;
 
 // Seed the command center with this many recent sessions, in addition to loaded sessions.
 const RECENT_SESSION_LIMIT: usize = 10;
+const RECENT_DETAIL_LIMIT: usize = 10;
+
+// Detail scans prioritize recent and loaded tasks without hydrating every retained rollout.
+fn detail_thread_ids<'a>(threads: impl Iterator<Item = &'a Thread>) -> Vec<ThreadId> {
+    let mut threads: Vec<_> = threads.collect();
+    threads.sort_by(|left, right| {
+        right
+            .recency_at
+            .unwrap_or(right.updated_at)
+            .cmp(&left.recency_at.unwrap_or(left.updated_at))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    threads
+        .into_iter()
+        .enumerate()
+        .filter(|(index, thread)| {
+            *index < RECENT_DETAIL_LIMIT || thread.status != ThreadStatus::NotLoaded
+        })
+        .filter_map(|(_, thread)| ThreadId::from_string(&thread.id).ok())
+        .collect()
+}
 
 impl App {
     pub(super) fn remove_agents_overview_thread(&mut self, thread_id: ThreadId) {

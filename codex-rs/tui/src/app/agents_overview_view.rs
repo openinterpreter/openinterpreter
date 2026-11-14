@@ -104,6 +104,8 @@ fn is_subagent(thread: &Thread) -> bool {
 
 #[derive(Clone)]
 pub(super) struct AgentsOverviewRow {
+    pub(super) backend_id: Option<crate::backend_id::BackendId>,
+    pub(super) search_id: Option<uuid::Uuid>,
     pub(super) details: AgentsOverviewDetails,
     pub(super) thread: Thread,
     pub(super) thread_id: ThreadId,

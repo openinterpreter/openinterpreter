@@ -17,11 +17,13 @@ use super::agents_overview_discovery::is_visible_in_agents_overview;
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
+use super::app_server_requests::BufferedServerRequest;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::backend_id::BackendId;
 use crate::bottom_pane::BottomPaneView;
+use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::chatwidget::ThreadInputStateRestoreMode;
@@ -44,6 +46,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) removed_threads: HashSet<ThreadId>,
     /// Local visibility only; activity and metadata refreshes never reveal hidden roots.
     pub(super) hidden_threads: HashSet<ThreadId>,
+    pub(super) unread: HashSet<ThreadId>,
     pub(super) last_messages: HashMap<ThreadId, String>,
     pub(super) usage: HashMap<ThreadId, super::agents_overview_usage::AgentsOverviewUsage>,
     pub(super) pending_usage: Option<(ThreadId, Uuid)>,
@@ -74,11 +77,41 @@ pub(super) struct AgentsOverviewState {
         Arc<std::sync::Mutex<super::agents_overview_view::AgentsOverviewViewState>>,
     /// Explicit permission-profile choices for new-session carryover, retained across navigation.
     pub(super) selected_permission_profiles: HashMap<ThreadId, String>,
+    /// Accepted menu requests are retained even if the server emits no changed-state event.
+    pub(super) requested_permission_profiles: HashMap<ThreadId, PermissionProfileSelection>,
     /// Keep new tasks subscribed and reusable until a first turn makes them resumable.
     pub(super) blank_sessions: HashMap<ThreadId, crate::app_server_session::AppServerStartedThread>,
     pub(super) input_states: HashMap<ThreadId, ThreadInputState>,
     pub(super) new_session_draft: Option<Box<StartupDraftPump>>,
-    pub(super) dispatched_requests: HashMap<ThreadId, Vec<ServerRequest>>,
+    pub(super) dispatched_requests: HashMap<ThreadId, Vec<BufferedServerRequest>>,
+}
+
+impl AgentsOverviewState {
+    pub(super) fn invalidate_discovery(&mut self, backend: BackendId, displayed: bool) {
+        self.initialized.remove(&backend);
+        self.discovery.remove(&backend);
+        if displayed {
+            self.reset_visible_pagination();
+            self.view_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .has_more = false;
+        }
+        self.refresh_invalidated |= self
+            .active_refresh
+            .is_some_and(|(_, owner)| owner == backend);
+    }
+
+    pub(super) fn reset_visible_pagination(&mut self) {
+        self.show_more_requested = false;
+        self.refill_count = 0;
+    }
+
+    pub(super) fn has_more(&self, backend_id: BackendId) -> bool {
+        self.discovery
+            .get(&backend_id)
+            .is_none_or(super::agents_overview_discovery::AgentsOverviewDiscovery::has_more)
+    }
 }
 
 impl Drop for AgentsOverviewState {
@@ -184,6 +217,10 @@ impl App {
         self.agents_overview.refresh_show_more = false;
         self.agents_overview.active_refresh_thread_ids.clear();
         self.agents_overview.refresh_task = None;
+        let invalidated = std::mem::take(&mut self.agents_overview.refresh_invalidated);
+        let refill_succeeded = result
+            .as_ref()
+            .is_ok_and(|refresh| refresh.recent_seed_complete);
         {
             let mut state = self
                 .agents_overview
@@ -191,9 +228,7 @@ impl App {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.loading = false;
-            state.refresh_failed = !result
-                .as_ref()
-                .is_ok_and(|refresh| refresh.recent_seed_complete);
+            state.refresh_failed = !invalidated && !refill_succeeded;
         }
         match result {
             _ if invalidated => self.agents_overview.refresh_notifications.clear(),
@@ -342,6 +377,12 @@ impl App {
                     .get(selected)
                     .copied()
             });
+        let selected_thread_id = previous_thread_id
+            .filter(|id| {
+                self.agents_overview.threads.contains_key(id)
+                    && !self.agents_overview.hidden_threads.contains(id)
+            })
+            .or(self.agents_overview.selection_after_removal.take());
         let threads = self
             .agents_overview
             .threads
@@ -349,7 +390,7 @@ impl App {
             .flatten()
             .cloned()
             .collect();
-        let view = self.agents_overview_view(threads, selected_thread_id);
+        let mut view = self.agents_overview_view(threads, selected_thread_id);
         let matches = &mut self.agents_overview.search_matches;
         if !matches.is_empty() {
             let visible: HashSet<_> = view
@@ -363,6 +404,17 @@ impl App {
         }
         view.load_search_matches(/*additional*/ 0);
         self.agents_overview.visible_thread_ids = view.thread_ids();
+        let next_thread_id = view
+            .selected_index()
+            .and_then(|index| self.agents_overview.visible_thread_ids.get(index).copied());
+        if previous_thread_id != next_thread_id
+            && self
+                .chat_widget
+                .selected_index_for_active_view(AGENTS_OVERVIEW_VIEW_ID)
+                .is_some()
+        {
+            self.cancel_pending_key_chord();
+        }
         if selected_thread_id
             .is_some_and(|thread_id| !self.agents_overview.visible_thread_ids.contains(&thread_id))
             && let Ok(mut state) = self.agents_overview.view_state.lock()
@@ -480,7 +532,7 @@ impl App {
             });
         }
 
-        AgentsOverviewView::new(
+        let mut view = AgentsOverviewView::new(
             rows,
             selected_thread_id,
             self.config.features.enabled(Feature::Worktrees)

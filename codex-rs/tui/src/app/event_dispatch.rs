@@ -234,8 +234,11 @@ impl App {
             | AppEvent::NewSession { name }
             | AppEvent::NewSessionInCurrentWorktree { name } => {
                 self.start_fresh_session(
-                    tui, app_server, /*session_start_source*/ None,
-                    /*initial_user_message*/ None, name,
+                    tui,
+                    app_server,
+                    super::session_lifecycle::FreshSessionStart::NewConversation,
+                    /*initial_user_message*/ None,
+                    name,
                 )
                 .await;
                 if self.chat_widget.has_misalignment_policy_violation() {
@@ -261,8 +264,11 @@ impl App {
                         path.display(),
                     );
                     self.start_fresh_session(
-                        tui, app_server, /*session_start_source*/ None,
-                        /*initial_user_message*/ None, /*new_thread_name*/ None,
+                        tui,
+                        app_server,
+                        super::session_lifecycle::FreshSessionStart::NewConversation,
+                        /*initial_user_message*/ None,
+                        /*new_thread_name*/ None,
                     )
                     .await;
                     if self
@@ -520,7 +526,9 @@ impl App {
                 self.start_fresh_session(
                     tui,
                     app_server,
-                    Some(ThreadStartSource::Clear),
+                    super::session_lifecycle::FreshSessionStart::PreserveCurrentView(Some(
+                        ThreadStartSource::Clear,
+                    )),
                     /*initial_user_message*/ None,
                     name,
                 )

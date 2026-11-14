@@ -19,6 +19,7 @@ use crate::app_server_session::is_server_shutting_down_error;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::startup_draft::StartupDraftPump;
 use crate::streaming::commit_tick::CommitTickScope;
 use codex_app_server_protocol::ThreadPrepareApprovedPlanParams;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -35,6 +36,17 @@ pub(super) enum ThreadAttachPresentation {
     SessionLineage,
     /// A resume whose outgoing events were drained and terminal cleared before capture.
     SessionLineageAfterClear,
+}
+
+pub(super) enum FreshSessionStart {
+    NewConversation,
+    PreserveCurrentView(Option<ThreadStartSource>),
+}
+
+pub(super) struct PreparedFreshSession {
+    pub(super) started: AppServerStartedThread,
+    pub(super) config: Config,
+    pub(super) local_settings: crate::local_settings::LocalSettings,
 }
 
 /// Reports whether a loaded-thread backfill completed and which descendants already had their
@@ -1167,7 +1179,7 @@ impl App {
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-        session_start_source: Option<ThreadStartSource>,
+        start: FreshSessionStart,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
         new_thread_name: Option<String>,
     ) {
@@ -1177,72 +1189,61 @@ impl App {
             }
             return;
         }
-        // Start a fresh in-memory session while preserving resumability via persisted rollout
-        // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
-        // until the new session is configured and any replayed turns have been rendered.
-        match self
-            .prepare_fresh_session(app_server, session_start_source)
-            .await
-        {
-            Ok(mut started) => {
-                self.shutdown_current_thread(app_server).await;
-                let tracked_thread_ids: Vec<ThreadId> =
-                    self.thread_event_channels.keys().copied().collect();
-                for thread_id in tracked_thread_ids {
-                    if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                        tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
-                    }
+        // Trust is checked before defaults are loaded or explicit permissions are applied.
+        if self.current_displayed_thread_id().is_none() {
+            let mut config = self.chat_widget.config_ref().clone();
+            let cwd = config.cwd.to_path_buf();
+            if let Err(control) = self
+                .confirm_directory_trust(
+                    tui,
+                    app_server,
+                    &mut config,
+                    &cwd,
+                    crate::onboarding::DirectoryTrustOptions::default(),
+                    /*startup_draft*/ None,
+                )
+                .await
+            {
+                if matches!(control, AppRunControl::Exit(_)) {
+                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
                 }
-                self.local_settings = self.local_settings.reloaded(&config);
-                self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
-                self.config = config;
-
-                let name_error = if let Some(name) = new_thread_name {
-                    match app_server
-                        .thread_set_name(started.session.thread_id, name.clone())
-                        .await
-                    {
-                        Ok(()) => {
-                            started.session.thread_name = Some(name);
-                            None
-                        }
-                        Err(err) => Some(format!("Failed to name the new session: {err}")),
-                    }
+                return;
+            }
+        }
+        let (session_start_source, mut draft) = match start {
+            FreshSessionStart::NewConversation => (
+                None,
+                Some(StartupDraftPump::for_new_session(
+                    tui,
+                    &self.local_settings,
+                    self.chat_widget.config_ref().cwd.as_path(),
+                )),
+            ),
+            FreshSessionStart::PreserveCurrentView(source) => (source, None),
+        };
+        let previous_thread = self.current_displayed_thread_id();
+        let prepared = StartupDraftPump::run_during_navigation(
+            draft.as_mut(),
+            tui,
+            Box::pin(self.prepare_fresh_session(app_server, session_start_source)),
+        )
+        .await;
+        match prepared {
+            Ok(prepared) => {
+                let presentation = if draft.is_some() {
+                    ThreadAttachPresentation::FreshWithDraft
                 } else {
-                    None
+                    ThreadAttachPresentation::Fresh
                 };
-                if let Err(err) = self
-                    .replace_chat_widget_with_app_server_thread(
-                        tui,
-                        started,
-                        ThreadAttachPresentation::Fresh,
-                        initial_user_message,
-                    )
-                    .await
-                {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to attach to fresh app-server thread: {err}"
-                    ));
-                } else {
-                    if let Some(err) = name_error {
-                        self.chat_widget.add_error_message(err);
-                    }
-                    if let Some(summary) = summary {
-                        let mut lines: Vec<Line<'static>> = Vec::new();
-                        if let Some(usage_line) = summary.usage_line {
-                            lines.push(usage_line.into());
-                        }
-                        if let Some(command) = summary.resume_hint {
-                            let spans =
-                                vec!["To continue this session, run ".into(), command.cyan()];
-                            lines.push(spans.into());
-                        }
-                        self.chat_widget
-                            .add_to_history(history_cell::SessionNoticeCell(
-                                history_cell::PlainHistoryCell::new(lines),
-                            ));
-                    }
-                }
+                self.adopt_fresh_session(
+                    tui,
+                    app_server,
+                    prepared,
+                    presentation,
+                    initial_user_message,
+                    new_thread_name,
+                )
+                .await;
             }
             Err(err) => {
                 self.chat_widget.add_error_message(err.to_string());
@@ -1251,7 +1252,14 @@ impl App {
                 }
             }
         }
-        tui.frame_requester().schedule_frame();
+        if let Some(draft) = draft {
+            let opened_new_session = self.current_displayed_thread_id() != previous_thread;
+            draft
+                .handoff_after_navigation(tui, &mut self.chat_widget, opened_new_session)
+                .await;
+        } else {
+            tui.frame_requester().schedule_frame();
+        }
     }
 
     async fn prepare_fresh_session(
