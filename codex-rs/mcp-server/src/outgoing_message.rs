@@ -336,7 +336,6 @@ mod tests {
                 active_permission_profile: None,
                 cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: Some(ReasoningEffort::default()),
-                initial_messages: None,
                 network_proxy: None,
                 rollout_path: Some(rollout_file.path().to_path_buf()),
             }),
@@ -354,6 +353,13 @@ mod tests {
             panic!("Event must serialize");
         };
         assert_eq!(params, Some(expected_params));
+        assert!(
+            params
+                .as_ref()
+                .and_then(|value| value.pointer("/msg/initial_messages"))
+                .is_none(),
+            "obsolete initial messages must not be synthesized on the session event"
+        );
         Ok(())
     }
 
@@ -380,7 +386,6 @@ mod tests {
             active_permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: Some(ReasoningEffort::default()),
-            initial_messages: None,
             network_proxy: None,
             rollout_path: Some(rollout_file.path().to_path_buf()),
         };
@@ -446,7 +451,6 @@ mod tests {
             active_permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: Some(ReasoningEffort::default()),
-            initial_messages: None,
             network_proxy: None,
             rollout_path: Some(rollout_file.path().to_path_buf()),
         };
