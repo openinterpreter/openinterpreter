@@ -76,6 +76,8 @@ pub(crate) enum StartupDraftInitialScreen {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StartupDraftSessionAction {
     New,
+    /// Opened from a live TUI. Submission stays with the eventual conversation.
+    NewWhileRunning,
     NewFromCommandCenter,
     Resume,
     Fork,
@@ -206,7 +208,9 @@ impl StartupDraftPump {
         let mut blossom = crate::empty_state_animation::EmptyStateAnimation::default();
         if matches!(
             session_action,
-            StartupDraftSessionAction::New | StartupDraftSessionAction::NewFromCommandCenter
+            StartupDraftSessionAction::New
+                | StartupDraftSessionAction::NewWhileRunning
+                | StartupDraftSessionAction::NewFromCommandCenter
         ) {
             blossom.start_fresh();
         }
@@ -231,6 +235,67 @@ impl StartupDraftPump {
             key_chord_matcher: Default::default(),
             key_chords: RuntimeKeymap::defaults().chords,
         }
+    }
+
+    pub(crate) fn for_new_session(tui: &Tui, settings: &LocalSettings, cwd: &Path) -> Self {
+        let mut draft = Self::new(
+            tui,
+            StartupDraftInitialScreen::Composer,
+            StartupDraftSessionAction::NewWhileRunning,
+        );
+        draft.apply_settings(settings, cwd);
+        draft
+    }
+
+    /// Continue awaiting the original operation even when draft input or drawing fails.
+    pub(crate) async fn run_during_navigation<F>(
+        draft: Option<&mut Self>,
+        tui: &mut Tui,
+        operation: F,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        if let Some(draft) = draft {
+            tokio::pin!(operation);
+            match draft.run_until(tui, operation.as_mut()).await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to update the new conversation composer");
+                    operation.await
+                }
+            }
+        } else {
+            operation.await
+        }
+    }
+
+    pub(crate) async fn handoff_after_navigation(
+        mut self,
+        tui: &mut Tui,
+        chat_widget: &mut crate::chatwidget::ChatWidget,
+        opened_new_session: bool,
+    ) {
+        if !opened_new_session {
+            self.bottom_pane.set_footer_hint_override(Some(vec![(
+                "New conversation did not open".into(),
+                "draft kept".into(),
+            )]));
+            if let Err(error) = self.show(tui) {
+                tracing::warn!(%error, "failed to render the new conversation failure");
+            }
+        }
+        if let Err(error) = self.settle_navigation_input(tui).await {
+            tracing::warn!(%error, "failed to finish input for the new conversation composer");
+        }
+        if opened_new_session {
+            chat_widget
+                .empty_state_animation
+                .borrow_mut()
+                .continue_from(&mut self.blossom.borrow_mut());
+        }
+        chat_widget.restore_startup_draft(self.take_draft());
+        tui.frame_requester().schedule_frame();
     }
 
     pub(crate) fn take_draft(&mut self) -> ComposerDraftSnapshot {
@@ -389,6 +454,30 @@ impl StartupDraftPump {
         }
     }
 
+    /// Drain input that arrived during the thread-start handoff, bounded by any paste window.
+    async fn settle_navigation_input(&mut self, tui: &mut Tui) -> io::Result<()> {
+        loop {
+            for _ in 0..STARTUP_EVENT_BATCH_SIZE {
+                let deadline = self
+                    .bottom_pane
+                    .composer_paste_deadline()
+                    .map(Instant::from_std)
+                    .max(
+                        self.pending_paste_newline
+                            .as_ref()
+                            .map(|(started_at, _)| *started_at + STARTUP_PASTE_NEWLINE_TIMEOUT),
+                    )
+                    .unwrap_or_else(Instant::now);
+                let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.events.next()).await
+                else {
+                    return Ok(());
+                };
+                self.handle_event(tui, event)?;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Resolve an ambiguous paste newline before its provisional input owner disappears.
     pub(crate) async fn flush_pending_paste_newline(&mut self, tui: &mut Tui) -> io::Result<()> {
         while let Some((started_at, _)) = &self.pending_paste_newline {
@@ -440,7 +529,12 @@ impl StartupDraftPump {
     }
 
     fn draw(&mut self, tui: &mut Tui, screen_size: Size) -> io::Result<()> {
-        if self.bottom_pane.flush_paste_burst_if_due() {
+        let flushed = if self.session_action == StartupDraftSessionAction::NewWhileRunning {
+            self.bottom_pane.flush_handoff_paste_if_due()
+        } else {
+            self.bottom_pane.flush_paste_burst_if_due()
+        };
+        if flushed {
             crate::startup_recovery::remember(self.bottom_pane.composer_recovery_snapshot());
         }
         if self.bottom_pane.is_in_paste_burst() {
@@ -468,8 +562,11 @@ impl StartupDraftPump {
                     let Some(key) = crate::keymap::dispatch_event(action) else {
                         return false;
                     };
-                    self.session_action != StartupDraftSessionAction::NewFromCommandCenter
-                        && self.bottom_pane.is_startup_submit_key(key)
+                    !matches!(
+                        self.session_action,
+                        StartupDraftSessionAction::NewFromCommandCenter
+                            | StartupDraftSessionAction::NewWhileRunning
+                    ) && self.bottom_pane.is_startup_submit_key(key)
                         || !self.bottom_pane.is_startup_composer_action(key)
                             && self.bottom_pane.is_safe_startup_editor_key(key)
                 })
@@ -507,7 +604,9 @@ fn startup_draft_renderable<'a>(
     let mut renderable = FlexRenderable::new();
     renderable.push(/*flex*/ 1, RenderableItem::Borrowed(header));
     let loading_message = match session_action {
-        StartupDraftSessionAction::New | StartupDraftSessionAction::NewFromCommandCenter => None,
+        StartupDraftSessionAction::New
+        | StartupDraftSessionAction::NewWhileRunning
+        | StartupDraftSessionAction::NewFromCommandCenter => None,
         StartupDraftSessionAction::Resume => Some("  Resuming session…"),
         StartupDraftSessionAction::Fork => Some("  Forking session…"),
     };

@@ -300,7 +300,7 @@ mod input_restore;
 mod input_submission;
 mod interrupts;
 mod questions;
-mod quick_dials;
+pub(crate) mod quick_dials;
 mod startup_submission;
 use self::interrupts::InterruptManager;
 mod keymap_picker;
