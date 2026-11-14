@@ -4318,6 +4318,7 @@ mod tests {
             .ingest(
                 AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                     ItemCompletedNotification {
+                        content_token_count: None,
                         thread_id: keys[2].thread_id.clone(),
                         turn_id: keys[2].turn_id.clone(),
                         completed_at_ms: 1_000,

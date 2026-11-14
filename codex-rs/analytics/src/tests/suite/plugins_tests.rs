@@ -285,6 +285,7 @@ fn plugin_management_event_keeps_plugin_id_local_when_remote_id_exists() {
 fn plugin_used_dedupe_is_keyed_by_turn_and_plugin() {
     let (sender, _receiver) = mpsc::channel(1);
     let queue = AnalyticsEventsQueue {
+        product_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         sender,
         app_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),
         plugin_used_emitted_keys: Arc::new(Mutex::new(HashSet::new())),

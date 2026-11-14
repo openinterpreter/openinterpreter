@@ -217,6 +217,8 @@ async fn initialize_caches_client_and_thread_lifecycle_publishes_once_initialize
                         version: "1.0.0".to_string(),
                     },
                     capabilities: Some(InitializeCapabilities {
+                        explicit_gateway_oauth: false,
+                        required_human_approval: false,
                         experimental_api: false,
                         request_attestation: false,
                         opt_out_notification_methods: None,
@@ -387,6 +389,7 @@ async fn thread_originator_overrides_shared_connection_across_thread_events() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(Box::new(
                 CodexCompactionEvent {
+                    usage_limit_window_minutes: None,
                     thread_id: "thread-work".to_string(),
                     turn_id: "turn-compact".to_string(),
                     trigger: CompactionTrigger::Manual,
@@ -542,6 +545,7 @@ async fn thread_originator_overrides_shared_connection_across_thread_events() {
 fn subagent_thread_started_review_serializes_expected_shape() {
     let event = TrackEventRequest::ThreadInitialized(subagent_thread_started_event_request(
         SubAgentThreadStartedInput {
+            initialization_mode: crate::facts::ThreadInitializationMode::New,
             session_id: "session-root".to_string(),
             thread_id: "thread-review".to_string(),
             parent_thread_id: None,
@@ -595,6 +599,7 @@ fn subagent_thread_started_thread_spawn_serializes_thread_lineage() {
             .expect("valid thread id");
     let event = TrackEventRequest::ThreadInitialized(subagent_thread_started_event_request(
         SubAgentThreadStartedInput {
+            initialization_mode: crate::facts::ThreadInitializationMode::Forked,
             session_id: "session-root".to_string(),
             thread_id: "thread-spawn".to_string(),
             parent_thread_id: Some(parent_thread_id.to_string()),
@@ -620,6 +625,7 @@ fn subagent_thread_started_thread_spawn_serializes_thread_lineage() {
     assert_eq!(payload["event_params"]["thread_id"], "thread-spawn");
     assert_eq!(payload["event_params"]["thread_source"], "subagent");
     assert_eq!(payload["event_params"]["subagent_source"], "thread_spawn");
+    assert_eq!(payload["event_params"]["initialization_mode"], "forked");
     assert_eq!(
         payload["event_params"]["parent_thread_id"],
         "11111111-1111-1111-1111-111111111111"
@@ -635,6 +641,7 @@ fn subagent_thread_started_thread_spawn_serializes_thread_lineage() {
 fn subagent_thread_started_memory_consolidation_serializes_expected_shape() {
     let event = TrackEventRequest::ThreadInitialized(subagent_thread_started_event_request(
         SubAgentThreadStartedInput {
+            initialization_mode: crate::facts::ThreadInitializationMode::New,
             session_id: "session-root".to_string(),
             thread_id: "thread-memory".to_string(),
             parent_thread_id: None,
@@ -663,6 +670,7 @@ fn subagent_thread_started_memory_consolidation_serializes_expected_shape() {
 fn subagent_thread_started_other_serializes_expected_shape() {
     let event = TrackEventRequest::ThreadInitialized(subagent_thread_started_event_request(
         SubAgentThreadStartedInput {
+            initialization_mode: crate::facts::ThreadInitializationMode::New,
             session_id: "session-root".to_string(),
             thread_id: "thread-guardian".to_string(),
             parent_thread_id: None,
@@ -691,6 +699,7 @@ fn subagent_thread_started_other_serializes_explicit_parent_thread_id() {
             .expect("valid thread id");
     let event = TrackEventRequest::ThreadInitialized(subagent_thread_started_event_request(
         SubAgentThreadStartedInput {
+            initialization_mode: crate::facts::ThreadInitializationMode::New,
             session_id: "session-root".to_string(),
             thread_id: "thread-guardian".to_string(),
             parent_thread_id: Some(parent_thread_id.to_string()),
@@ -723,6 +732,7 @@ async fn subagent_thread_started_publishes_without_initialize() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::SubAgentThreadStarted(
                 SubAgentThreadStartedInput {
+                    initialization_mode: crate::facts::ThreadInitializationMode::New,
                     session_id: "session-root".to_string(),
                     thread_id: "thread-review".to_string(),
                     parent_thread_id: None,
@@ -761,6 +771,7 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::SubAgentThreadStarted(
                 SubAgentThreadStartedInput {
+                    initialization_mode: crate::facts::ThreadInitializationMode::New,
                     session_id: "session-thread-1".to_string(),
                     thread_id: "thread-subagent".to_string(),
                     parent_thread_id: Some("thread-1".to_string()),
@@ -823,10 +834,12 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
                     thread_id: "thread-subagent".to_string(),
                     turn_id: "turn-subagent".to_string(),
                     started_at_ms: 1_000,
-                    item: sample_command_execution_item(
-                        CommandExecutionStatus::InProgress,
-                        /*exit_code*/ None,
-                        /*duration_ms*/ None,
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item(
+                            CommandExecutionStatus::InProgress,
+                            /*exit_code*/ None,
+                            /*duration_ms*/ None,
+                        ),
                     ),
                 },
             ))),
@@ -837,13 +850,16 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
         .ingest(
             AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
+                    content_token_count: None,
                     thread_id: "thread-subagent".to_string(),
                     turn_id: "turn-subagent".to_string(),
                     completed_at_ms: 1_042,
-                    item: sample_command_execution_item(
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(42),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item(
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(42),
+                        ),
                     ),
                 },
             ))),

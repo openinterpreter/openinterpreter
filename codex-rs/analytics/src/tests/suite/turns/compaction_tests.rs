@@ -35,6 +35,7 @@ fn compaction_event_serializes_expected_shape() {
         event_type: "codex_compaction_event",
         event_params: crate::events::codex_compaction_event_params(
             CodexCompactionEvent {
+                usage_limit_window_minutes: None,
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 trigger: CompactionTrigger::Auto,
@@ -139,6 +140,8 @@ async fn compaction_event_ingests_custom_fact() {
                         version: "1.0.0".to_string(),
                     },
                     capabilities: Some(InitializeCapabilities {
+                        explicit_gateway_oauth: false,
+                        required_human_approval: false,
                         experimental_api: false,
                         request_attestation: false,
                         opt_out_notification_methods: None,
@@ -205,6 +208,7 @@ async fn compaction_event_ingests_custom_fact() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(Box::new(
                 CodexCompactionEvent {
+                    usage_limit_window_minutes: None,
                     thread_id: "thread-1".to_string(),
                     turn_id: "turn-compact".to_string(),
                     trigger: CompactionTrigger::Manual,

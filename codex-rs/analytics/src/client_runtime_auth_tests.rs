@@ -211,11 +211,11 @@ async fn analytics_between_model_calls_keeps_the_selected_api_resources() {
                 )),
             )),
         };
-        let provider = codex_model_provider::test_support::runtime_model_provider(
-            info,
-            Arc::clone(&credentials),
-            (owner, mode),
-        );
+        let provider = codex_model_provider::ProviderAuthContext {
+            credentials: Arc::clone(&credentials),
+            runtime_auth: Some((owner, mode)),
+        }
+        .model_provider(info);
         for attempt in 0..2 {
             let request = codex_model_provider::resolve_request(
                 provider.as_ref(),

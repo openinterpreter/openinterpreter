@@ -40,6 +40,7 @@ use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandAction;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -47,6 +48,7 @@ use codex_app_server_protocol::McpToolCallAppContext;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 use codex_protocol::protocol::ThreadSource;
 use codex_utils_absolute_path::test_support::PathBufExt;
@@ -99,6 +101,7 @@ fn command_execution_event_serializes_expected_shape() {
             model_slug: None,
             reasoning_effort: None,
             base: CodexToolItemEventBase {
+                turn_trigger: None,
                 thread_id: "thread-1".to_string(),
                 session_id: "session-thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
@@ -255,6 +258,7 @@ async fn cua_tool_call_lifecycle_requires_a_start_and_deduplicates_replay() {
         item: codex_app_server_protocol::ThreadItem::untimed(item(McpToolCallStatus::InProgress)),
     });
     let completed = ServerNotification::ItemCompleted(ItemCompletedNotification {
+        content_token_count: None,
         thread_id: "thread-2".into(),
         turn_id: "turn-2".into(),
         completed_at_ms: 1_100,
@@ -358,6 +362,7 @@ async fn item_lifecycle_notifications_publish_command_execution_event() {
         .ingest(
             AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
+                    content_token_count: None,
                     thread_id: "thread-1".to_string(),
                     turn_id: "turn-1".to_string(),
                     completed_at_ms: 1_045,
@@ -489,6 +494,7 @@ async fn collaborator_tool_events_keep_response_ids_when_completion_races_sampli
         ));
         let completion = AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
             ItemCompletedNotification {
+                content_token_count: None,
                 thread_id: "thread-1".into(),
                 turn_id: "turn-1".into(),
                 completed_at_ms: 1_010,
@@ -834,6 +840,7 @@ async fn mcp_elicitation_classification_survives_turn_completion_and_preserves_c
             .ingest(
                 AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                     ItemCompletedNotification {
+                        content_token_count: None,
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
@@ -952,7 +959,10 @@ async fn image_generation_events_preserve_transparent_background_metadata() {
             id: "image-1".to_string(),
             status: status.to_string(),
             revised_prompt: None,
-            result: "ok".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "ok".into(),
+            },
+            input_images: Vec::new(),
             transparent_background,
             failure: None,
             saved_path: None,
@@ -977,6 +987,7 @@ async fn image_generation_events_preserve_transparent_background_metadata() {
             .ingest(
                 AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                     ItemCompletedNotification {
+                        content_token_count: None,
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,

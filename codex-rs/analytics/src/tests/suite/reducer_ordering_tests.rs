@@ -311,10 +311,12 @@ async fn completed_background_tool_item_emits_after_turn_event() {
                     thread_id: "thread-2".to_string(),
                     turn_id: "turn-2".to_string(),
                     started_at_ms: 998,
-                    item: sample_command_execution_item(
-                        CommandExecutionStatus::InProgress,
-                        /*exit_code*/ None,
-                        /*duration_ms*/ None,
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item(
+                            CommandExecutionStatus::InProgress,
+                            /*exit_code*/ None,
+                            /*duration_ms*/ None,
+                        ),
                     ),
                 },
             ))),
@@ -343,13 +345,16 @@ async fn completed_background_tool_item_emits_after_turn_event() {
         .ingest(
             AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
+                    content_token_count: None,
                     thread_id: "thread-2".to_string(),
                     turn_id: "turn-2".to_string(),
                     completed_at_ms: 1_000,
-                    item: sample_command_execution_item(
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(1),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item(
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(1),
+                        ),
                     ),
                 },
             ))),
@@ -430,13 +435,16 @@ async fn item_completed_without_turn_state_does_not_create_turn_state() {
         .ingest(
             AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                 ItemCompletedNotification {
+                    content_token_count: None,
                     thread_id: "thread-2".to_string(),
                     turn_id: "turn-2".to_string(),
                     completed_at_ms: 1_000,
-                    item: sample_command_execution_item(
-                        CommandExecutionStatus::Completed,
-                        Some(0),
-                        Some(1),
+                    item: codex_app_server_protocol::ThreadItem::untimed(
+                        sample_command_execution_item(
+                            CommandExecutionStatus::Completed,
+                            Some(0),
+                            Some(1),
+                        ),
                     ),
                 },
             ))),

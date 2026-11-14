@@ -364,7 +364,7 @@ fn analytics_destination_uses_http_without_capture_file() {
             let auth = codex_login::CodexAuth::from_api_key(api_key);
             assert_eq!(
                 destination.url_for_auth(&auth).as_deref(),
-                Some(INTERPRETER_ANALYTICS_URL)
+                Some(super::INTERPRETER_ANALYTICS_URL)
             );
         }
     }
@@ -1004,6 +1004,7 @@ fn app_used_preserves_first_classification_and_emits_again_next_turn() {
         thread_id: "thread-1".to_string(),
         turn_id: "turn-1".to_string(),
         product_client_id: "codex_desktop".to_string(),
+        turn_metadata: None,
     };
     for (turn_id, elicitation_type) in [
         ("turn-1", Some(ElicitationType::AuthOrLink)),

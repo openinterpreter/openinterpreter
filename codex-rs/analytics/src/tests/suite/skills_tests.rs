@@ -11,9 +11,17 @@ use crate::reducer::normalize_path_for_skill_id;
 use crate::reducer::skill_id_for_local_skill;
 use crate::tests::support::TEST_PRODUCT_CLIENT_ID;
 use crate::tests::support::test_tracking_context;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::PathBuf;
+
+fn skill_path_uri(path: &PathBuf) -> PathUri {
+    PathUri::from_abs_path(
+        &AbsolutePathBuf::from_absolute_path_checked(path.clone()).expect("absolute skill path"),
+    )
+}
 
 fn expected_absolute_path(path: &PathBuf) -> String {
     std::fs::canonicalize(path)
@@ -30,7 +38,7 @@ fn normalize_path_for_skill_id_repo_scoped_uses_relative_path() {
     let path = normalize_path_for_skill_id(
         Some("https://example.com/repo.git"),
         Some(repo_root.as_path()),
-        skill_path.as_path(),
+        &skill_path_uri(&skill_path),
     );
 
     assert_eq!(path, ".codex/skills/doc/SKILL.md");
@@ -43,7 +51,7 @@ fn normalize_path_for_skill_id_user_scoped_uses_absolute_path() {
     let path = normalize_path_for_skill_id(
         /*repo_url*/ None,
         /*repo_root*/ None,
-        skill_path.as_path(),
+        &skill_path_uri(&skill_path),
     );
     let expected = expected_absolute_path(&skill_path);
 
@@ -57,7 +65,7 @@ fn normalize_path_for_skill_id_admin_scoped_uses_absolute_path() {
     let path = normalize_path_for_skill_id(
         /*repo_url*/ None,
         /*repo_root*/ None,
-        skill_path.as_path(),
+        &skill_path_uri(&skill_path),
     );
     let expected = expected_absolute_path(&skill_path);
 
@@ -72,7 +80,7 @@ fn normalize_path_for_skill_id_repo_root_not_in_skill_path_uses_absolute_path() 
     let path = normalize_path_for_skill_id(
         Some("https://example.com/repo.git"),
         Some(repo_root.as_path()),
-        skill_path.as_path(),
+        &skill_path_uri(&skill_path),
     );
     let expected = expected_absolute_path(&skill_path);
 
@@ -88,7 +96,7 @@ async fn reducer_ingests_skill_invoked_fact() {
     let expected_skill_id = skill_id_for_local_skill(
         /*repo_url*/ None,
         /*repo_root*/ None,
-        skill_path.as_path(),
+        &skill_path_uri(&skill_path),
         "doc",
     );
 
@@ -99,7 +107,7 @@ async fn reducer_ingests_skill_invoked_fact() {
                 invocations: vec![SkillInvocation {
                     skill_name: "doc".to_string(),
                     location: SkillInvocationLocation::Host {
-                        path: skill_path,
+                        path: skill_path_uri(&skill_path),
                         scope: codex_protocol::protocol::SkillScope::User,
                     },
                     plugin_id: None,
@@ -148,7 +156,7 @@ async fn reducer_includes_plugin_ids_for_plugin_skill_invocations() {
                 invocations: vec![SkillInvocation {
                     skill_name: "sample:doc".to_string(),
                     location: SkillInvocationLocation::Host {
-                        path: skill_path,
+                        path: skill_path_uri(&skill_path),
                         scope: codex_protocol::protocol::SkillScope::User,
                     },
                     plugin_id: Some("sample@test".to_string()),

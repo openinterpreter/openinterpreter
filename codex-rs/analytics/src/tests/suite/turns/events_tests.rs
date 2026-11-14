@@ -25,6 +25,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DynamicToolCallStatus;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -100,6 +101,10 @@ fn turn_event_serializes_expected_shape() {
     let event = TrackEventRequest::TurnEvent(Box::new(CodexTurnEventRequest {
         event_type: "codex_turn_event",
         event_params: crate::events::CodexTurnEventParams {
+            critical_path: crate::TurnCriticalPath::Disabled.into(),
+            multi_agent_version: codex_protocol::protocol::MultiAgentVersion::Disabled,
+            usage_limit_window_minutes: None,
+            tools_change_count: 0,
             thread_id: "thread-2".to_string(),
             session_id: "session-thread-2".to_string(),
             turn_id: "turn-2".to_string(),
@@ -183,6 +188,17 @@ fn turn_event_serializes_expected_shape() {
         r#"{
             "event_type": "codex_turn_event",
             "event_params": {
+                "critical_path_status": "disabled",
+                "critical_path_duration_ms": null,
+                "critical_path_inference_ms": null,
+                "critical_path_sampling_ms": null,
+                "critical_path_compaction_ms": null,
+                "critical_path_auto_review_ms": null,
+                "critical_path_auto_review_overhead_ms": null,
+                "critical_path_user_wait_ms": null,
+                "critical_path_tools_ms": null,
+                "critical_path_overhead_ms": null,
+                "critical_path_unknown_ms": null,
                 "thread_id": "thread-2",
                 "session_id": "session-thread-2",
                 "turn_id": "turn-2",
@@ -219,6 +235,7 @@ fn turn_event_serializes_expected_shape() {
                 "approval_policy": "on-request",
                 "approvals_reviewer": "auto_review",
                 "guardian_v2_enabled": true,
+                "multi_agent_version": "disabled",
                 "sandbox_network_access": true,
                 "collaboration_mode": "plan",
                 "personality": "pragmatic",
@@ -239,6 +256,7 @@ fn turn_event_serializes_expected_shape() {
                 "turn_error": null,
                 "codex_error_kind": null,
                 "codex_error_http_status_code": null,
+                "usage_limit_window_minutes": null,
                 "steer_count": 0,
                 "total_tool_call_count": null,
                 "shell_command_count": null,
@@ -262,6 +280,7 @@ fn turn_event_serializes_expected_shape() {
                 "after_last_sampling_ms": 94,
                 "sampling_request_count": 2,
                 "sampling_retry_count": 1,
+                "tools_change_count": 0,
                 "duration_ms": 1234,
                 "started_at": 455,
                 "completed_at": 456
@@ -521,12 +540,16 @@ async fn turn_event_counts_completed_tool_items() {
         },
         ThreadItem::SubAgentActivity {
             id: "sub-agent-activity-1".to_string(),
+            model: None,
+            reasoning_effort: None,
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
         },
         ThreadItem::SubAgentActivity {
             id: "sub-agent-activity-completed".to_string(),
+            model: None,
+            reasoning_effort: None,
             kind: SubAgentActivityKind::Completed,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
@@ -539,9 +562,12 @@ async fn turn_event_counts_completed_tool_items() {
         }),
         ThreadItem::ImageGeneration(ImageGenerationItem {
             id: "image-1".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "ok".into(),
+            },
+            input_images: Vec::new(),
             status: "completed".to_string(),
             revised_prompt: None,
-            result: "ok".to_string(),
             transparent_background: None,
             failure: None,
             saved_path: None,
@@ -571,6 +597,7 @@ async fn turn_event_counts_completed_tool_items() {
             .ingest(
                 AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                     ItemCompletedNotification {
+                        content_token_count: None,
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
