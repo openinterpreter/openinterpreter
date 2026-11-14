@@ -90,6 +90,26 @@ impl App {
         {
             return Ok(AppRunControl::Continue);
         }
+        let overview_action_thread = match &event {
+            AppEvent::ForkAgentsOverviewThread { thread_id }
+            | AppEvent::RenameAgentsOverviewThread { thread_id, .. }
+            | AppEvent::ToggleAgentsOverviewPin { thread_id, .. }
+            | AppEvent::RunAgentsOverviewAction { thread_id, .. }
+            | AppEvent::StopAgentsOverviewThread { thread_id } => Some(*thread_id),
+            _ => None,
+        };
+        let overview_action_owner = match &event {
+            AppEvent::NewAgentsOverviewSession { backend_id, .. }
+            | AppEvent::NewAgentsOverviewWorktree { backend_id, .. } => *backend_id,
+            _ => overview_action_thread.and_then(|id| self.backend_registry.owner(id)),
+        };
+        if overview_action_owner.is_some_and(|owner| owner != app_server.backend_id()) {
+            if matches!(&event, AppEvent::ToggleAgentsOverviewPin { .. }) {
+                self.repaint_agents_overview();
+            }
+            self.add_agents_overview_error("Open this task before using that action.".into());
+            return Ok(AppRunControl::Continue);
+        }
         if matches!(
             &event,
             AppEvent::OpenWindowsSandboxEnablePrompt { .. }
@@ -3541,7 +3561,7 @@ impl App {
             } => {
                 self.apply_agents_overview_search_page(id, backend_id, rows, cursor, ok);
             }
-            AppEvent::NewAgentsOverviewSession { cwd } => {
+            AppEvent::NewAgentsOverviewSession { cwd, .. } => {
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
@@ -3565,7 +3585,7 @@ impl App {
                     AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
                 }
             }
-            AppEvent::NewAgentsOverviewWorktree { cwd } => {
+            AppEvent::NewAgentsOverviewWorktree { cwd, .. } => {
                 Box::pin(self.new_agents_overview_worktree(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewWorktreeCreated(result) => {

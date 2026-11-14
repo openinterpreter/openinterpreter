@@ -110,6 +110,36 @@ async fn run_lifecycle_modal<T>(
 }
 
 impl App {
+    pub(super) fn known_thread_subtree(&self, thread_id: ThreadId) -> HashSet<ThreadId> {
+        let mut removed = HashSet::from([thread_id]);
+        loop {
+            let previous_len = removed.len();
+            for (id, thread) in &self.agents_overview.threads {
+                let Some(thread) = thread else { continue };
+                let parent = thread
+                    .parent_thread_id
+                    .as_deref()
+                    .and_then(|id| ThreadId::from_string(id).ok())
+                    .or(match &thread.source {
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                            parent_thread_id,
+                            ..
+                        }) => Some(*parent_thread_id),
+                        _ => None,
+                    });
+                if thread.session_id == thread_id.to_string()
+                    || parent.is_some_and(|parent| removed.contains(&parent))
+                {
+                    removed.insert(*id);
+                }
+            }
+            if removed.len() == previous_len {
+                break;
+            }
+        }
+        removed
+    }
+
     pub(super) fn toggle_agents_overview_pin(
         &mut self,
         app_server: &AppServerSession,

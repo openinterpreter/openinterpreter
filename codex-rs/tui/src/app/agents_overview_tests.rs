@@ -3284,11 +3284,11 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     for _ in 0..3 {
         view.handle_key_event(KeyCode::Char('n').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { cwd: Some(cwd) }) if cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { cwd: Some(cwd), .. }) if cwd == target.cwd)
         );
         view.handle_key_event(KeyCode::Char('w').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd) }) if cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd), .. }) if cwd == target.cwd)
         );
         view.handle_key_event(KeyCode::Char('g').into());
     }
@@ -3305,7 +3305,7 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     empty.handle_key_event(KeyCode::Char('n').into());
     assert!(matches!(
         rx.try_recv(),
-        Ok(AppEvent::NewAgentsOverviewSession { cwd: None })
+        Ok(AppEvent::NewAgentsOverviewSession { cwd: None, .. })
     ));
     app.config.features.disable(Feature::Worktrees).unwrap();
     let mut disabled = app.agents_overview_view(vec![target], Some(id));

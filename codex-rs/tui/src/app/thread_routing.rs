@@ -17,8 +17,25 @@ use codex_app_server_protocol::WarningNotification;
 const REALTIME_STOP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
 impl App {
+    pub(super) fn displayed_conversation_backend_id(&self) -> Option<crate::backend_id::BackendId> {
+        self.current_displayed_thread_id()
+            .and_then(|thread_id| {
+                self.thread_event_channels
+                    .get(&thread_id)
+                    .and_then(|channel| channel.backend_id)
+                    .or_else(|| self.backend_registry.owner(thread_id))
+            })
+            .or(self.app_server_backend_id)
+    }
+
     pub(super) async fn stop_realtime_conversation(&mut self, app_server: &mut AppServerSession) {
-        let Some(thread_id) = self.chat_widget.reset_realtime_conversation() else {
+        let thread_id = self
+            .background_voice
+            .as_mut()
+            .and_then(|owner| owner.reset_realtime_conversation())
+            .or_else(|| self.chat_widget.reset_realtime_conversation());
+        self.retire_background_voice();
+        let Some(thread_id) = thread_id else {
             return;
         };
         match tokio::time::timeout(
@@ -33,16 +50,6 @@ impl App {
             }
             Err(_) => {
                 tracing::warn!(%thread_id, "timed out stopping voice conversation");
-            }
-        }
-    }
-
-    pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
-        self.stop_realtime_conversation(app_server).await;
-        self.shutdown_side_threads(app_server).await;
-        if let Some(thread_id) = self.chat_widget.thread_id() {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe thread {thread_id}: {err}");
             }
         }
     }
