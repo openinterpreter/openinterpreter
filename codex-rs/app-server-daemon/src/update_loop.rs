@@ -1,5 +1,6 @@
 //! Owns scheduled and manual installs, daemon restarts, and updater replacement.
 
+use std::collections::VecDeque;
 use std::path::Path;
 #[cfg(unix)]
 use std::process::Command as StdCommand;
@@ -72,6 +73,8 @@ const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
 const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
 #[cfg(windows)]
 const OPEN_INTERPRETER_INSTALL_URL: &str = "https://www.openinterpreter.com/install.ps1";
+const INSTALLER_STDERR_TAIL_BYTES: usize = 8 * 1024;
+const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn run(
     http_client_factory: HttpClientFactory,
@@ -614,6 +617,30 @@ async fn run_installer_script(
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to invoke standalone Codex updater")?;
+    // Drain throughout the install: a full stderr pipe must not block the child
+    // before exit. Retain only a bounded tail for a failed install's diagnostic.
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("standalone Codex updater stderr was unavailable")?;
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+    let stderr_tail_writer = Arc::clone(&stderr_tail);
+    let mut stderr_task = tokio::spawn(async move {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            if let Ok(mut tail) = stderr_tail_writer.lock() {
+                for byte in &chunk[..n] {
+                    if tail.len() == INSTALLER_STDERR_TAIL_BYTES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(*byte);
+                }
+            }
+        }
+    });
     #[cfg(windows)]
     let _installer_job = crate::backend::windows::installer_job(&child)?;
     let mut stdin = child
@@ -649,12 +676,12 @@ async fn run_installer_script(
     #[cfg(windows)]
     let status = child.wait().await;
     let status = status.context("failed to wait for standalone Codex updater")?;
+    let _ = tokio::time::timeout(INSTALLER_STDERR_DRAIN_TIMEOUT, &mut stderr_task).await;
+    stderr_task.abort();
 
     if status.success() {
         Ok(UpdateLoopControl::Continue)
     } else {
-        let _ = tokio::time::timeout(INSTALLER_STDERR_DRAIN_TIMEOUT, &mut stderr_task).await;
-        stderr_task.abort();
         let bytes = stderr_tail
             .lock()
             .map(|tail| tail.iter().copied().collect::<Vec<_>>())

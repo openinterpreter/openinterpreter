@@ -10,6 +10,7 @@ use super::PidFileState;
 use super::PidRecord;
 use super::read_process_start_time;
 use crate::managed_install::executable_identity;
+use crate::telemetry::StartFailure;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;

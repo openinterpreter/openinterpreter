@@ -21,6 +21,8 @@ mod release_pruning;
 mod remote_control_client;
 mod settings;
 pub mod telemetry;
+pub use telemetry::StartError;
+use telemetry::StartFailure;
 mod thread_recovery;
 mod update_loop;
 
