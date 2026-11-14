@@ -68,6 +68,7 @@ const INTERRUPTION_ACKNOWLEDGMENT: Duration = Duration::from_millis(400);
 static NEXT_REALTIME_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REALTIME_SPEECH_DELIVERY_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 struct PendingRealtimeSpeech {
     state: PendingSpeechState,
     captioned: bool,
