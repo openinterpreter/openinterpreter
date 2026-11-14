@@ -270,7 +270,14 @@ async fn adopt_managed_updater(
     #[cfg(unix)]
     {
         let _ = listener;
-        reexec_managed_updater(&managed_bin).map(|_| UpdateLoopControl::Stop)
+        reexec_managed_updater(
+            &managed_bin,
+            daemon
+                .pid_file
+                .parent()
+                .context("daemon pid path has no parent")?,
+        )
+        .map(|_| UpdateLoopControl::Stop)
     }
     #[cfg(windows)]
     {
@@ -430,7 +437,7 @@ async fn update_once(
             return Ok((UpdateLoopControl::Stop, None));
         }
         match daemon
-            .try_restart_if_running(restart_mode, &managed_codex_bin)
+            .try_restart_if_running(restart_mode, &managed_codex_bin, &package_root)
             .await?
         {
             RestartIfRunningOutcome::Busy => {

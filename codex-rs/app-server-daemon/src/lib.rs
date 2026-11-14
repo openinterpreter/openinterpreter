@@ -410,8 +410,15 @@ impl Daemon {
         let _operation_lock = self.acquire_operation_lock().await?;
         let selected = self.current_installation()?;
         match command {
-            LifecycleCommand::Start => selected.start(&BTreeMap::new()).await,
-            LifecycleCommand::Restart => selected.restart().await,
+            LifecycleCommand::Start { feature_overrides } => {
+                selected.start(&feature_overrides).await
+            }
+            LifecycleCommand::Restart { feature_overrides } => {
+                let mut settings = selected.load_settings().await?;
+                settings.feature_overrides = feature_overrides;
+                settings.save(&selected.settings_file).await?;
+                selected.restart_with_settings(settings).await
+            }
             LifecycleCommand::Stop => {
                 let output = selected.stop().await?;
                 if let Err(err) = thread_recovery::discard_pending(&selected) {
@@ -1389,7 +1396,9 @@ mod tests {
         )
         .expect("legacy saved threads");
         daemon
-            .run(super::LifecycleCommand::Start)
+            .run(super::LifecycleCommand::Start {
+                feature_overrides: BTreeMap::new(),
+            })
             .await
             .expect_err("missing backend binary");
         assert!(!daemon.recovery_file().expect("recovery path").exists());
