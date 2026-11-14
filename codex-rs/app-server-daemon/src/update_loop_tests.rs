@@ -439,6 +439,7 @@ fn manual_update_daemon(home: &TempDir) -> (Daemon, String) {
     std::fs::write(state.join("app-server.stderr.log"), b"").unwrap();
     (
         Daemon {
+            log_diagnostics: false,
             socket_path: home.path().join("app-server-control/server.sock"),
             pid_file: state.join("app-server.pid"),
             update_pid_file: state.join("app-server-updater.pid"),
@@ -740,7 +741,11 @@ async fn daemon_start_and_restart_preserve_launch_features() {
         );
         assert_eq!(std::fs::read_to_string(&args_path).unwrap(), expected);
         std::fs::remove_file(&args_path).unwrap();
-        let restarted = daemon.restart().await;
+        let restarted = daemon
+            .run(crate::LifecycleCommand::Restart {
+                feature_overrides: features.clone(),
+            })
+            .await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 10);
         while std::fs::read_to_string(&args_path).ok().as_deref() != Some(expected)
             && tokio::time::Instant::now() < deadline

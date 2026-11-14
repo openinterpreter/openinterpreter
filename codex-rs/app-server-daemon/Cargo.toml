@@ -43,6 +43,7 @@ tracing-appender = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

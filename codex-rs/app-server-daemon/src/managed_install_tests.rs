@@ -1,7 +1,8 @@
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
-use super::executable_identity_from_bytes;
+use super::ExecutableIdentity;
+use super::executable_identity;
 use super::managed_codex_bin;
 use super::managed_codex_bin_for_package_dir_and_current_exe;
 use super::parse_codex_version;
