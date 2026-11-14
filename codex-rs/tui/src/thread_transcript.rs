@@ -12,6 +12,7 @@ use crate::history_cell::DelegatedMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ReasoningSummaryCell;
+use crate::history_cell::UserHistoryCell;
 use crate::history_cell::split_reasoning_summary_parts;
 use crate::inline_visualization::InlineVisualizationContext;
 use crate::legacy_core::config::Config;
@@ -103,13 +104,19 @@ pub(crate) fn thread_to_transcript_cells(
         .turns
         .into_iter()
         .flat_map(|turn| {
-            thread_items_to_transcript_cells(
+            let mut cells = thread_items_to_transcript_cells(
                 thread_id,
                 &cwd,
                 turn.items.into_iter().map(|item| item.payload),
                 raw_reasoning_visibility,
                 config,
-            )
+            );
+            if let Some(error) = turn.error {
+                cells.push(Arc::new(crate::history_cell::new_error_event(
+                    error.message,
+                )));
+            }
+            cells
         })
         .collect::<TranscriptCells>();
     if cells.is_empty() {
@@ -288,10 +295,9 @@ fn item_to_cells(
                     &output,
                 )
             {
-                cells.push(Arc::new(PrefixedWrappedHistoryCell::new(
-                    format!("Sent by Codex from task {source_thread_id}\n{prompt}"),
-                    "• ".dim(),
-                    "  ",
+                cells.push(Arc::new(DelegatedMessageCell::new(
+                    &source_thread_id,
+                    prompt,
                 )));
             }
         }

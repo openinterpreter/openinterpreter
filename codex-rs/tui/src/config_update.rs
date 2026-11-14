@@ -31,6 +31,7 @@ use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde_json::Value as JsonValue;
