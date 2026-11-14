@@ -84,6 +84,15 @@ impl InProcessCodeModeSession {
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> Result<StartedCell, String> {
+        self.execute_with_preempt(request, delegate, None).await
+    }
+
+    async fn execute_with_preempt(
+        &self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
+    ) -> Result<StartedCell, String> {
         let yield_time_ms = request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS);
         let max_output_tokens = request.max_output_tokens;
         let output_truncation = self.options.output_truncation;
@@ -91,7 +100,8 @@ impl InProcessCodeModeSession {
             .runtime
             .execute(
                 runtime_request(request, output_truncation),
-                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms)),
+                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms))
+                    .with_yield_signal(preempt.unwrap_or_default()),
                 Arc::new(ProtocolDelegate { delegate }),
             )
             .await
@@ -292,6 +302,17 @@ impl CodeModeSession for InProcessCodeModeSession {
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> CodeModeSessionResultFuture<'a, StartedCell> {
         Box::pin(InProcessCodeModeSession::execute(self, request, delegate))
+    }
+
+    fn execute_with_preempt<'a>(
+        &'a self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
+        Box::pin(InProcessCodeModeSession::execute_with_preempt(
+            self, request, delegate, preempt,
+        ))
     }
 
     fn wait<'a>(

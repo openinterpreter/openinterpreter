@@ -18,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::runtime::RuntimeEventSender;
-use crate::session_runtime::OutputItem;
 
 #[derive(Default)]
 struct TestHost {
@@ -52,8 +51,7 @@ impl CellHost for TestHost {
     async fn commit_completion(
         &self,
         _stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent + Send,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
         self.commit_started.cancel();
@@ -88,8 +86,7 @@ impl CellHost for RecordingHost {
     async fn commit_completion(
         &self,
         _stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent + Send,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
         cell_state.commit_completion(event, || {})

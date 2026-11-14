@@ -310,11 +310,7 @@ async fn tool_start_acknowledgement_reports_error_before_invocation() {
     let delegate = Arc::new(ReleasableToolDelegate::default());
     let service = InProcessCodeModeSession::new();
     let started = service
-        .execute(
-            execute_request("throw 'startup failed';"),
-            delegate.clone(),
-            /*preempt*/ None,
-        )
+        .execute(execute_request("throw 'startup failed';"), delegate.clone())
         .await
         .unwrap();
 
@@ -615,7 +611,7 @@ async fn exit_after_yield_and_tool_response_finishes_successfully() {
     let service = InProcessCodeModeSession::new();
     let yield_signal = CancellationToken::new();
     let started = service
-        .execute(
+        .execute_with_preempt(
             ExecuteRequest {
                 enabled_tools: vec![echo_tool()],
                 source: r#"
@@ -801,6 +797,7 @@ text(load("key"));
                 },
             ],
             error_text: None,
+            result_buffered_for: Duration::ZERO,
         }
     );
 }

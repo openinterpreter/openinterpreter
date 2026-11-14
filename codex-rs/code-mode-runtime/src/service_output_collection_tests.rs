@@ -42,7 +42,6 @@ async fn start(session: &InProcessCodeModeSession, source: &str) -> RuntimeRespo
                 max_output_tokens: Some(MAX_OUTPUT_BYTES),
             },
             Arc::new(NoopCodeModeSessionDelegate),
-            /*preempt*/ None,
         )
         .await
         .unwrap()

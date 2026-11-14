@@ -221,17 +221,22 @@ async fn yielded_cells_retain_their_own_delegate_until_closed() {
     delegate_a.release_tool();
     assert_eq!(
         service
-            .wait(WaitRequest {
-                cell_id: cell_id("1"),
-                yield_time_ms: 60_000
-            })
+            .wait(
+                WaitRequest {
+                    cell_id: cell_id("1"),
+                    yield_time_ms: 60_000,
+                    max_output_tokens: None,
+                },
+                None
+            )
             .await
             .unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
-            error_text: None
+            error_text: None,
+            result_buffered_for: Duration::ZERO,
         })
     );
     assert_eq!(
@@ -247,7 +252,7 @@ async fn yielded_cells_retain_their_own_delegate_until_closed() {
     );
     assert!(weak_a.upgrade().is_none());
 
-    service.terminate(cell_id("2")).await.unwrap();
+    service.terminate(cell_id("2").into()).await.unwrap();
     assert_eq!(
         next_event(&mut events_b).await,
         DelegateEvent::ToolCancelled

@@ -76,7 +76,7 @@ impl SessionRuntime {
     pub(crate) async fn execute<D: SessionRuntimeDelegate>(
         &self,
         request: CreateCellRequest,
-        initial_observe_mode: ObserveMode,
+        initial_observe_mode: impl Into<Observation>,
         delegate: Arc<D>,
     ) -> Result<StartedCell, Error> {
         if self.inner.shutdown_token.is_cancelled() {
@@ -158,7 +158,7 @@ impl SessionRuntime {
         &self,
         cell_id: CellId,
         request: CreateCellRequest,
-        initial_observe_mode: ObserveMode,
+        initial_observe_mode: impl Into<Observation>,
         delegate: Arc<D>,
     ) -> Result<RuntimeEventFuture, Error> {
         let stored_values = self.inner.stored_values.lock().await.clone();
