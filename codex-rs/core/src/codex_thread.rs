@@ -476,6 +476,26 @@ impl CodexThread {
         self.session.flush_rollout().await
     }
 
+    /// Select the current rollout for an explicit feedback save, materializing
+    /// and flushing it before the caller reads its contents. Unlike the normal
+    /// optional rollout path, persistence errors must fail the save closed.
+    pub async fn feedback_rollout_path(&self) -> anyhow::Result<Option<PathBuf>> {
+        let Some(path) = self.session.current_rollout_path().await? else {
+            return Ok(None);
+        };
+        self.session
+            .try_ensure_rollout_materialized(PersistContext::Standard)
+            .await?;
+        self.session.flush_rollout().await?;
+        Ok(Some(path))
+    }
+
+    /// Capture the effective resume settings and the selected tier together,
+    /// avoiding a second read that could observe a different turn configuration.
+    pub async fn resume_config_snapshot(&self) -> (ThreadConfigSnapshot, Option<String>) {
+        self.session.resume_config_snapshot().await
+    }
+
     /// Test barrier: waits for background compaction without consuming its published result.
     /// Call after the request starts, with foreground work gated to prevent new launches.
     #[doc(hidden)]
