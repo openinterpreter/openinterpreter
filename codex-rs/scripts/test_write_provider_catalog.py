@@ -8,6 +8,71 @@ import write_provider_catalog as catalog
 
 
 class ProviderCatalogRefreshTests(unittest.TestCase):
+    def test_api_base_url_resolution(self):
+        source_url = "https://generativelanguage.googleapis.com/v1beta"
+        override_url = source_url + "/openai"
+        for source, override, expected in (
+            (source_url, override_url, override_url),
+            (source_url, None, source_url),
+            (None, override_url, override_url),
+        ):
+            with self.subTest(source=source, override=override):
+                provider = {
+                    "name": "Google",
+                    "api": source,
+                    "models": {"example": {"tool_call": True}},
+                }
+                overrides = (
+                    {"api_base_url_overrides": {"google": override}}
+                    if override is not None
+                    else {}
+                )
+                entry = catalog.build_provider_entry("google", provider, overrides)
+                self.assertEqual(entry["base_url"], expected)
+
+    def test_provider_selection_uses_api_base_url_override(self):
+        valid_url = "https://example.com/v1"
+        for source, override, included in (
+            ("https://${HOST}/v1", valid_url, True),
+            (valid_url, "https://${HOST}/v1", False),
+            (valid_url, "http://localhost:8000/v1", False),
+        ):
+            with self.subTest(source=source, override=override):
+                provider = {"api": source}
+                overrides = {
+                    "include_provider_ids": ["example"],
+                    "api_base_url_overrides": {"example": override},
+                }
+                self.assertEqual(
+                    catalog.should_include_provider("example", provider, overrides),
+                    included,
+                )
+
+    def test_scoped_generation_uses_api_base_url_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "provider_catalog.json"
+            output.write_text('{"providers": []}', encoding="utf-8")
+            provider = {
+                "name": "Google",
+                "api": "https://generativelanguage.googleapis.com/v1beta",
+                "models": {"example": {"tool_call": True}},
+            }
+            override_url = provider["api"] + "/openai"
+            overrides = {
+                "include_provider_ids": ["google"],
+                "api_base_url_overrides": {"google": override_url},
+            }
+            with (
+                patch.object(catalog, "OUTPUT_PATH", output),
+                patch.object(catalog, "load_overrides", return_value=overrides),
+                patch.object(
+                    catalog, "load_models_dev_catalog", return_value={"google": provider}
+                ),
+            ):
+                catalog.write_catalog({"google"})
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["providers"][0]["base_url"], override_url)
+
     def test_exclusions_apply_after_source_and_additions(self):
         overrides = {
             "provider_model_additions": {
