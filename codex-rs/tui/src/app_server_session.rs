@@ -1877,39 +1877,8 @@ impl AppServerSession {
             params.effort.clone_from(&selection.effort);
         }
         let request_id = self.next_request_id();
-        let (sandbox_policy, permissions) =
-            turn_permissions_overrides(permissions_override, cwd.as_path())?;
-        self.client
-            .request_typed(ClientRequest::TurnStart {
-                request_id,
-                params: TurnStartParams {
-                    disabled_plugin_ids: None,
-                    thread_id: thread_id.to_string(),
-                    turn_trigger: Some("user".to_string()),
-                    client_user_message_id: Some(client_user_message_id),
-                    input: items,
-                    tool_output: None,
-                    responsesapi_client_metadata: None,
-                    additional_context: None,
-                    environments: None,
-                    cwd: Some(cwd),
-                    runtime_workspace_roots: Some(workspace_roots.to_vec()),
-                    approval_policy,
-                    approvals_reviewer,
-                    sandbox_policy,
-                    permissions,
-                    model: Some(model),
-                    service_tier,
-                    service_tier_for_turn: None,
-                    effort,
-                    summary,
-                    personality: personality_opt_out_only(personality),
-                    output_schema,
-                    collaboration_mode,
-                    multi_agent_mode: None,
-                    cyber_access_program: None,
-                },
-            })
+        self.request_handle
+            .request_typed(ClientRequest::TurnStart { request_id, params })
             .await
             .wrap_err("turn/start failed in TUI")
     }
