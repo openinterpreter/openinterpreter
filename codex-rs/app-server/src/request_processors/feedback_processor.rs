@@ -346,7 +346,7 @@ impl FeedbackRequestProcessor {
                     report_passcode: report_passcode.as_deref(),
                     tags,
                     include_logs,
-                    extra_attachments: &extra_attachments,
+                    extra_attachments,
                     extra_attachment_paths: &attachment_paths,
                     session_source: Some(session_source),
                     logs_override: sqlite_feedback_logs,

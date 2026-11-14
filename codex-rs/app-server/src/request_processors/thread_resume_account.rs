@@ -1,22 +1,20 @@
-//! Applies the rollout-gated CLI account check before resuming or attaching to a local thread.
+//! Applies the CLI account check before resuming or attaching to a local thread.
 //! Creator tags are immutable; untagged threads and other clients retain existing behavior.
 
 use crate::error_code::invalid_request;
 use codex_app_server_protocol::JSONRPCErrorError;
-use codex_features::Feature;
 use codex_features::Features;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_thread_store::StoredThread;
 
 pub(super) fn check(
-    features: &Features,
+    _features: &Features,
     client_name: Option<&str>,
     auth_manager: &AuthManager,
     thread: &StoredThread,
 ) -> Result<(), JSONRPCErrorError> {
-    if !features.enabled(Feature::CliResumeAccountCheck)
-        || !matches!(client_name, Some("codex-tui" | "codex_exec"))
+    if !matches!(client_name, Some("codex-tui" | "codex_exec"))
         || thread.rollout_path.is_none()
         || (thread.creator_user_id.is_none() && thread.creator_account_id.is_none())
     {

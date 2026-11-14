@@ -1389,7 +1389,7 @@ impl ThreadRequestProcessor {
                 thread_source.map(Into::into),
                 project_id,
                 daybreak_enabled,
-                environments,
+                environment_requests,
                 service_name,
                 allow_provider_model_fallback,
                 experimental_raw_events,
@@ -4796,7 +4796,11 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
-            let mut mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            let mut mismatch_details = collect_resume_override_mismatches(
+                params,
+                &config_snapshot,
+                config_snapshot.service_tier.as_deref(),
+            );
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
                     .thread_state_manager
@@ -4818,7 +4822,7 @@ impl ThreadRequestProcessor {
                 ) && !has_subscribers
                     && matches!(loaded_status, ThreadStatus::Idle)
                     && !is_running
-                    && !existing_thread.has_active_turn().await
+                    && existing_thread.active_turn_id().await.is_none()
                 {
                     // A loaded idle thread is only a cache entry. Shut it down
                     // before removing it so cold resume cannot duplicate a
@@ -5723,6 +5727,8 @@ impl ThreadRequestProcessor {
         let source_multi_agent_version = InitialHistory::Resumed(ResumedHistory {
             conversation_id: source_thread_id,
             history: Arc::clone(latest_context.as_ref().unwrap_or(&source_history_items)),
+            // This transient history is used only to inspect version markers, never committed.
+            history_revision: None,
             rollout_path: source_thread.rollout_path.clone(),
         })
         .get_multi_agent_version()

@@ -319,6 +319,7 @@ impl AgentContractRequestProcessor {
                 archived: false,
                 search_term: None,
                 relation_filter: Some(relation_filter),
+                included_thread_ids: None,
                 use_state_db_only: false,
             })
             .await

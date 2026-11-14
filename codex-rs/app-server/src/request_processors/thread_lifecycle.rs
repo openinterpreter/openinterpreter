@@ -938,18 +938,27 @@ pub(super) async fn handle_thread_listener_command(
             request: resume_request,
             completion_tx,
         } => {
-            handle_pending_thread_resume_request(
-                conversation_id,
-                conversation,
-                codex_home,
-                thread_state_manager,
-                thread_state,
-                thread_watch_manager,
-                outgoing,
-                pending_thread_unloads,
-                *resume_request,
-            )
-            .await;
+            if let Some(conversation) = conversation {
+                handle_pending_thread_resume_request(
+                    conversation_id,
+                    conversation,
+                    codex_home,
+                    thread_state_manager,
+                    thread_state,
+                    thread_watch_manager,
+                    outgoing,
+                    pending_thread_unloads,
+                    *resume_request,
+                )
+                .await;
+            } else {
+                outgoing
+                    .send_error(
+                        resume_request.request_id.clone(),
+                        thread_closing_for_resume(conversation_id),
+                    )
+                    .await;
+            }
             let _ = completion_tx.send(());
         }
         ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, goal } => {
@@ -1027,7 +1036,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     pending_thread_unloads: &PendingThreadUnloads,
     mut pending: crate::thread_state::PendingThreadResumeRequest,
 ) {
-    let (active_turn_metadata, active_turn) = {
+    let (active_turn_metadata, mut active_turn) = {
         let state = thread_state.lock().await;
         let items_view = if pending.include_turns {
             Some(TurnItemsView::Full)

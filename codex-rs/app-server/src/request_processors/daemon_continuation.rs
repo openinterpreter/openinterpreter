@@ -82,7 +82,7 @@ impl ThreadRequestProcessor {
             return;
         }
         // Recovery must not override a stricter saved or newly configured policy.
-        if previous_context.permission_profile() != config.permission_profile {
+        if previous_context.permission_profile != config.permission_profile {
             return;
         }
         let continuation = ContextualUserFragment::into(InternalModelContextFragment::new(
@@ -103,8 +103,10 @@ impl ThreadRequestProcessor {
         if let Err(err) = thread
             .append_rollout_items(&[RolloutItem::EventMsg(EventMsg::TurnAborted(
                 TurnAbortedEvent {
+                    root_turn_id: previous_context.root_turn_id.clone(),
                     turn_id: Some(saved.turn_id.clone()),
                     reason: TurnAbortReason::Interrupted,
+                    error: None,
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,

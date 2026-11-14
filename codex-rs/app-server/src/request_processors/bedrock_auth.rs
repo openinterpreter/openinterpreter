@@ -43,7 +43,10 @@ pub(super) async fn prepare_bedrock_provider(
         ));
     }
 
-    Ok(())
+    let (write, _provider) = config_manager
+        .prepare_provider_config(&layers, AMAZON_BEDROCK_PROVIDER_ID, settings)
+        .map_err(map_config_error)?;
+    Ok(write)
 }
 
 pub(super) async fn clear_user_model_provider_if_bedrock(

@@ -978,6 +978,8 @@ impl TurnRequestProcessor {
             );
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
+                    // Preview does not replace the thread's retained extension inputs.
+                    turn_extension_init: None,
                     disabled_plugin_ids: disabled_plugin_ids.clone(),
                     environments: environment_requests
                         .clone()
@@ -1573,7 +1575,7 @@ impl TurnRequestProcessor {
             )
             .await
             .map_err(|err| internal_error(format!("failed to start review: {err}")))?;
-        let turn = Self::build_review_turn(turn_id, display_text);
+        let turn = Self::build_review_turn(turn_id, display_text.to_string());
         self.emit_review_started(request_id, turn, parent_thread_id)
             .await;
         Ok(())
@@ -1666,7 +1668,7 @@ impl TurnRequestProcessor {
             "review thread",
         );
 
-        let turn = Self::build_review_turn(turn_id, prompt);
+        let turn = Self::build_review_turn(turn_id, prompt.to_string());
         let review_thread_id = thread_id.to_string();
         self.emit_review_started(request_id, turn, review_thread_id)
             .await;
@@ -1692,8 +1694,7 @@ impl TurnRequestProcessor {
             .check_thread_model_provider(parent_thread.config().await.as_ref())
             .await
             .map_err(|error| config_load_error(&error))?;
-        let (review_request, display_text, target_prompt) =
-            Self::review_request_from_target(target)?;
+        let (review_request, display_text) = Self::review_request_from_target(target)?;
         match delivery.unwrap_or(ApiReviewDelivery::Inline) {
             ApiReviewDelivery::Inline => {
                 self.start_inline_review(
@@ -1710,7 +1711,7 @@ impl TurnRequestProcessor {
                     .join("review-agent")
                     .join("SKILL.md");
                 let prompt = format!(
-                    "Use [$review-agent]({}) for this review.\n\n{target_prompt}",
+                    "Use [$review-agent]({}) for this review.\n\n{display_text}",
                     review_skill_path.display()
                 );
                 let actual_chars = prompt.chars().count();

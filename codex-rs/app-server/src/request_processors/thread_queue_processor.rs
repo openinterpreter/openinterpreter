@@ -228,9 +228,6 @@ impl ThreadQueueRequestProcessor {
                 reason: NotSubmittedReason::ServerDraining,
             } => return Err(crate::error_code::server_draining_error()),
             StartIfIdleSubmission::NotSubmitted {
-                reason: NotSubmittedReason::ServerDraining,
-            } => return Err(crate::error_code::server_draining_error()),
-            StartIfIdleSubmission::NotSubmitted {
                 reason: NotSubmittedReason::NotIdle | NotSubmittedReason::PendingTriggerTurn,
             } => {
                 return Err(invalid_request(
