@@ -794,6 +794,7 @@ impl Tui {
 
         Self {
             link_hover: link_pointer::LinkHover::default(),
+            terminal_size_tags: Vec::new(),
             frame_requester,
             shortcut_hud: None,
             shortcut_hud_area: None,
