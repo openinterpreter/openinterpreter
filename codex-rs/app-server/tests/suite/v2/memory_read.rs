@@ -3,6 +3,9 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ThreadMemoryReadParams;
+use codex_app_server_protocol::ThreadMemoryReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
@@ -19,6 +22,65 @@ use core_test_support::responses::start_mock_server;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+
+#[tokio::test]
+async fn thread_memory_read_uses_loaded_threads_resolved_version_without_fallback() -> Result<()> {
+    let server = start_mock_server().await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::MemoryTool)
+        .write(home.path())?;
+    tokio::fs::create_dir_all(home.path().join("memories")).await?;
+    tokio::fs::write(
+        home.path().join("memories/memory_summary.md"),
+        "legacy-only-marker",
+    )
+    .await?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+
+    let v1 = app
+        .start_thread(ThreadStartParams {
+            config: Some([("memories.version".to_string(), json!("v1"))].into()),
+            ..Default::default()
+        })
+        .await?;
+    let v2 = app
+        .start_thread(ThreadStartParams {
+            config: Some([("memories.version".to_string(), json!("v2"))].into()),
+            ..Default::default()
+        })
+        .await?;
+    let disabled = app
+        .start_thread(ThreadStartParams {
+            config: Some(
+                [
+                    ("memories.version".to_string(), json!("v1")),
+                    ("memories.use_memories".to_string(), json!(false)),
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        })
+        .await?;
+
+    for (thread_id, expected) in [
+        (v1.thread.id, Some("legacy-only-marker")),
+        (v2.thread.id, None),
+        (disabled.thread.id, None),
+    ] {
+        let response: ThreadMemoryReadResponse = app
+            .request(|request_id| ClientRequest::ThreadMemoryRead {
+                request_id,
+                params: ThreadMemoryReadParams { thread_id },
+            })
+            .await?;
+        assert_eq!(response.summary.as_deref(), expected);
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn memory_read_version_selects_only_its_own_context() -> Result<()> {
