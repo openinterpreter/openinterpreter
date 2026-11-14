@@ -185,6 +185,10 @@ pub(crate) struct SelectionItem {
     pub is_disabled: bool,
     pub actions: Vec<SelectionAction>,
     pub secondary_action: Option<SelectionSecondaryAction>,
+    /// Override the popup footer for the selected row.
+    pub footer_hint: Option<Line<'static>>,
+    /// Override it while the on-demand search field is active.
+    pub search_footer_hint: Option<Line<'static>>,
     pub dismiss_on_select: bool,
     /// Require an explicit accept key after a direct shortcut highlights this sensitive item.
     pub require_explicit_confirmation: bool,
@@ -207,11 +211,13 @@ pub(crate) struct SelectionItem {
 /// `row_display` controls whether rows can wrap or stay single-line with ellipsis truncation
 /// `description_layout` optionally hides descriptions when their column would become too narrow.
 pub(crate) struct SelectionViewParams {
+    pub presentation: super::ViewPresentation,
     pub picker_surface: PickerSurface,
     /// Upper row budget; compact completion menus retain the default of eight.
     pub max_visible_rows: usize,
     /// Keep the result area at its configured row budget when filtering shrinks it.
     pub reserve_result_rows: bool,
+    pub allow_input_when_disconnected: bool,
     pub view_id: Option<&'static str>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -277,9 +283,11 @@ pub(crate) struct SelectionViewParams {
 impl Default for SelectionViewParams {
     fn default() -> Self {
         Self {
+            presentation: super::ViewPresentation::Inline,
             picker_surface: PickerSurface::default(),
             max_visible_rows: MAX_POPUP_ROWS,
             reserve_result_rows: false,
+            allow_input_when_disconnected: false,
             view_id: None,
             title: None,
             subtitle: None,
@@ -316,6 +324,18 @@ impl Default for SelectionViewParams {
     }
 }
 
+impl SelectionViewParams {
+    /// Centered confirmation preserves keyboard focus while the underlying
+    /// running session remains visible and cannot accidentally accept a digit.
+    pub(crate) fn confirmation() -> Self {
+        Self {
+            presentation: super::ViewPresentation::Centered,
+            auto_number_shortcuts: false,
+            ..Default::default()
+        }
+    }
+}
+
 /// Controls whether a searchable list starts in search mode or waits for a shortcut.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum SearchMode {
@@ -330,9 +350,11 @@ pub(crate) enum SearchMode {
 /// visible rows and source items and for preserving selection while filters
 /// change.
 pub(crate) struct ListSelectionView {
+    presentation: super::ViewPresentation,
     picker_surface: PickerSurface,
     max_visible_rows: usize,
     reserve_result_rows: bool,
+    allow_input_when_disconnected: bool,
     view_id: Option<&'static str>,
     footer_note: Option<Line<'static>>,
     footer_hint: Option<Line<'static>>,
@@ -485,9 +507,11 @@ impl ListSelectionView {
             || params.initial_search_query.is_some();
         let search_query = params.initial_search_query.unwrap_or_default();
         let mut s = Self {
+            presentation: params.presentation,
             picker_surface: params.picker_surface,
             max_visible_rows: params.max_visible_rows.max(/*other*/ 1),
             reserve_result_rows: params.reserve_result_rows,
+            allow_input_when_disconnected: params.allow_input_when_disconnected,
             view_id: params.view_id,
             footer_note: params.footer_note,
             footer_hint: params.footer_hint,
@@ -606,12 +630,21 @@ impl ListSelectionView {
     }
 
     fn active_footer_hint(&self) -> Option<&Line<'static>> {
-        if let Some(action) = self
+        if let Some(item) = self
             .selected_actual_idx()
             .and_then(|idx| self.active_items().get(idx))
-            .and_then(|item| item.secondary_action.as_ref())
         {
-            return Some(&action.footer_hint);
+            if self.on_demand_search_active()
+                && let Some(hint) = item.search_footer_hint.as_ref()
+            {
+                return Some(hint);
+            }
+            if let Some(hint) = item.footer_hint.as_ref() {
+                return Some(hint);
+            }
+            if let Some(action) = item.secondary_action.as_ref() {
+                return Some(&action.footer_hint);
+            }
         }
         self.active_tab_id()
             .and_then(|active_tab_id| {
@@ -1046,6 +1079,25 @@ impl ListSelectionView {
                 .chain(
                     self.footer_hint
                         .iter()
+                        .map(|hint| wrap_styled_line(hint, width).len()),
+                )
+                .chain(
+                    self.items
+                        .iter()
+                        .chain(self.search_items.iter())
+                        .chain(self.tabs.iter().flat_map(|tab| tab.items.iter()))
+                        .flat_map(|item| {
+                            [
+                                item.footer_hint.as_ref().or_else(|| {
+                                    item.secondary_action
+                                        .as_ref()
+                                        .map(|action| &action.footer_hint)
+                                }),
+                                item.search_footer_hint.as_ref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                        })
                         .map(|hint| wrap_styled_line(hint, width).len()),
                 )
                 .max()
@@ -1544,8 +1596,9 @@ impl Renderable for ListSelectionView {
         let note_lines = self
             .footer_note
             .as_ref()
-            .map(|note| wrap_styled_line(note, note_width));
-        let note_height = note_lines.as_ref().map_or(0, |lines| lines.len() as u16);
+            .map(|note| wrap_styled_line(note, note_width))
+            .unwrap_or_default();
+        let note_height = note_lines.len() as u16;
         let hint_lines = self.footer_hint_lines(note_width);
         let hint_height = hint_lines.len() as u16;
         let inner_width = popup_content_width(area.width);
