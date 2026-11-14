@@ -27,6 +27,14 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_goal_extension::GoalCas;
+use codex_goal_extension::GoalCompletionObserver;
+use codex_goal_extension::GoalCompletionObserverFuture;
+use codex_goal_extension::GoalDocumentCreateAdmissionState;
+use codex_goal_extension::GoalDocumentCreateOutcome;
+use codex_goal_extension::GoalDocumentCreatePrecondition;
+use codex_goal_extension::GoalDocumentCreateRequest;
+use codex_goal_extension::GoalDocumentSetRequest;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalRuntimeHandle;
@@ -50,6 +58,33 @@ use codex_protocol::protocol::TruncationPolicy;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+
+async fn create_initial_managed_goal_document(
+    service: &GoalService,
+    runtime: &codex_state::StateRuntime,
+    thread_id: ThreadId,
+    creation_id: &'static str,
+    document: &str,
+    status: Option<ThreadGoalStatus>,
+) -> anyhow::Result<GoalDocumentCreateOutcome> {
+    Ok(service
+        .create_thread_goal_document(
+            runtime,
+            GoalDocumentCreateRequest {
+                thread_id,
+                creation_id,
+                document,
+                objective: "managed mission",
+                status,
+                token_budget: None,
+                max_goal_token_budget: None,
+                precondition: GoalDocumentCreatePrecondition::Absent {
+                    admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                },
+            },
+        )
+        .await?)
+}
 
 #[tokio::test]
 async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Result<()> {
@@ -1519,6 +1554,92 @@ async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct CompletionObserverRecorder {
+    completions: Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+impl GoalCompletionObserver for CompletionObserverRecorder {
+    fn on_goal_completed<'a>(
+        &'a self,
+        goal: &'a codex_state::ThreadGoal,
+        completing_turn_id: Option<String>,
+    ) -> GoalCompletionObserverFuture<'a> {
+        let completions = &self.completions;
+        let goal_id = goal.goal_id.clone();
+        let objective = goal.objective.clone();
+        Box::pin(async move {
+            completions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((goal_id, objective, completing_turn_id));
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn goal_completion_is_observed_before_replacement_goal_creation() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let observer = Arc::new(CompletionObserverRecorder::default());
+    harness
+        .goal_service
+        .set_completion_observer(observer.clone());
+    harness.start_turn("turn-a", &TokenUsage::default()).await;
+
+    let tools = harness.tools();
+    let create_tool = tool_by_name(&tools, "create_goal");
+    create_tool
+        .handle(tool_call(
+            "create_goal",
+            "create-a",
+            json!({ "objective": "mission A" }),
+        ))
+        .await?;
+    let update_tool = tool_by_name(&tools, "update_goal");
+    update_tool
+        .handle(tool_call(
+            "update_goal",
+            "complete-a",
+            json!({ "status": "complete" }),
+        ))
+        .await?;
+
+    // This replacement is intentionally made before the turn ends and before
+    // any receipt read. The observer must have already retained A's exact
+    // terminal identity and completing turn.
+    let replacement_invocation = tool_call(
+        "create_goal",
+        "create-b",
+        json!({ "objective": "mission B" }),
+    );
+    let replacement = create_tool.handle(replacement_invocation.clone()).await?;
+    assert_eq!(
+        json!("mission B"),
+        replacement.code_mode_result(&replacement_invocation.payload)["goal"]["objective"]
+    );
+
+    let completions = observer
+        .completions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(1, completions.len());
+    assert_eq!("mission A", completions[0].1);
+    assert_eq!(Some("turn-a".to_string()), completions[0].2);
+    let current = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("replacement Goal should be current");
+    assert_eq!("mission B", current.objective);
+    assert_eq!(codex_state::ThreadGoalStatus::Active, current.status);
+    Ok(())
+}
+
 #[tokio::test]
 async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() -> anyhow::Result<()>
 {
@@ -1594,6 +1715,579 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
         )
         .await?;
     assert_eq!(goal.goal.token_budget, Some(100));
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_goal_document_round_trips_edits_and_rejects_stale_revision() -> anyhow::Result<()>
+{
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let legacy_goal_file = runtime.sqlite().home().join("GOAL.md");
+    tokio::fs::write(&legacy_goal_file, b"pre-existing goal file").await?;
+    let service = GoalService::new();
+    let document = format!("# managed mission\n{}", "x".repeat(5_000));
+
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "round-trip-initial",
+        &document,
+        None,
+    )
+    .await?;
+    let first_goal = first.goal();
+    let first_document = first.document();
+    assert!(document.len() > 4_000);
+    assert!(first_goal.objective.len() < 4_000);
+    assert!(!first_goal.objective.contains(&document));
+    assert_eq!(first_document.mission_revision, 1);
+    assert!(first_document.path.starts_with("managed-goals/"));
+    assert_eq!(first_document.byte_length, document.len() as i64);
+    assert_eq!(
+        tokio::fs::read(&legacy_goal_file).await?,
+        b"pre-existing goal file"
+    );
+
+    let (_, stored_document, stored_content) = service
+        .read_thread_goal_document(runtime.as_ref(), thread_id)
+        .await?
+        .expect("managed Goal document should be readable");
+    assert_eq!(stored_document, first_document);
+    assert_eq!(stored_content, document);
+
+    let missing_cas = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace without a full Goal tuple",
+                status: None,
+                expected_goal: None,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("existing managed Goal edits must require the full CAS tuple"),
+        Err(error) => error,
+    };
+    assert!(missing_cas.to_string().contains("require expected"));
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("managed document should remain after missing CAS")
+            .2,
+        document
+    );
+
+    let direct_text_edit = service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("narrow text must not replace the document"),
+                status: None,
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await
+        .expect_err("managed Goal objectives must use the document CAS method");
+    assert!(
+        direct_text_edit
+            .to_string()
+            .contains("thread/goal/document/set")
+    );
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("managed document must remain after rejected legacy edit")
+            .2,
+        document
+    );
+
+    let replacement = "revised mission";
+    let first_identity = first.identity();
+    let second = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: replacement,
+                status: None,
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id.clone(),
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
+            },
+        )
+        .await?;
+    assert_eq!(second.document().mission_revision, 2);
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("replacement document should be readable")
+            .2,
+        replacement
+    );
+
+    let stale = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace current mission",
+                status: None,
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id,
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("stale mission revision must fail closed"),
+        Err(error) => error,
+    };
+    assert!(stale.to_string().contains("goal_document_cas_conflict"));
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("current document should remain intact")
+            .2,
+        replacement
+    );
+    assert!(
+        service
+            .clear_thread_goal(runtime.as_ref(), thread_id)
+            .await?
+    );
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_goal_document_initial_create_is_atomic_idempotent_and_replayable()
+-> anyhow::Result<()> {
+    let tempdir = TempDir::new()?;
+    let sqlite_home = tempdir.keep().as_path().abs();
+    let thread_id = test_thread_id()?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home.clone()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = Arc::new(GoalService::new());
+
+    let (left, right) = tokio::join!(
+        create_initial_managed_goal_document(
+            service.as_ref(),
+            runtime.as_ref(),
+            thread_id,
+            "initial-create-1",
+            "initial mission",
+            Some(ThreadGoalStatus::Active),
+        ),
+        create_initial_managed_goal_document(
+            service.as_ref(),
+            runtime.as_ref(),
+            thread_id,
+            "initial-create-1",
+            "initial mission",
+            Some(ThreadGoalStatus::Active),
+        ),
+    );
+    let left = left?;
+    let right = right?;
+    assert_ne!(left.replayed(), right.replayed());
+    let created = if left.replayed() { &right } else { &left };
+    let replayed = if left.replayed() { &left } else { &right };
+    assert!(created.previous_identity().is_none());
+    assert_eq!(created.identity().goal_id, replayed.identity().goal_id);
+    assert_eq!(created.document().mission_revision, 1);
+
+    let conflict = match service
+        .create_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentCreateRequest {
+                thread_id,
+                creation_id: "initial-create-1",
+                document: "different bytes",
+                objective: "different mission",
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: None,
+                max_goal_token_budget: None,
+                precondition: GoalDocumentCreatePrecondition::Absent {
+                    admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                },
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("creationId must not be reused for a different request"),
+        Err(error) => error,
+    };
+    assert!(conflict.to_string().contains("creationId"));
+
+    runtime.close().await;
+    drop(runtime);
+    let reopened = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let retry = create_initial_managed_goal_document(
+        service.as_ref(),
+        reopened.as_ref(),
+        thread_id,
+        "initial-create-1",
+        "initial mission",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
+    assert!(retry.replayed());
+    assert!(retry.previous_identity().is_none());
+    assert_eq!(retry.identity().goal_id, created.identity().goal_id);
+    assert_eq!(retry.document().byte_length, "initial mission".len() as i64);
+
+    let set_without_precondition = service
+        .set_thread_goal_document(
+            reopened.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id: test_thread_id()?,
+                document: "unrelated",
+                status: None,
+                expected_goal: None,
+            },
+        )
+        .await;
+    assert!(set_without_precondition.is_err());
+    reopened.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_goal_document_full_cas_rejects_stale_status_and_updates_atomically()
+-> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = GoalService::new();
+
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "stale-status-initial",
+        "mission A",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
+    let first_identity = first.identity();
+
+    service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Paused),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+
+    let stale = match service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "must not replace paused mission",
+                status: Some(ThreadGoalStatus::Active),
+                expected_goal: Some(GoalCas {
+                    goal_id: first_identity.goal_id,
+                    status: first_identity.status,
+                    mission_revision: first_identity.mission_revision,
+                    lifecycle_revision: first_identity.lifecycle_revision,
+                }),
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("stale status must fail closed"),
+        Err(error) => error,
+    };
+    assert!(stale.to_string().contains("goal_document_cas_conflict"));
+    let unchanged = service
+        .read_thread_goal_document(runtime.as_ref(), thread_id)
+        .await?
+        .expect("managed document should remain after stale CAS");
+    assert_eq!(unchanged.2, "mission A");
+    assert_eq!(unchanged.0.status, codex_state::ThreadGoalStatus::Paused);
+
+    let current = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("Goal should remain present");
+    let updated = service
+        .set_thread_goal_document(
+            runtime.as_ref(),
+            GoalDocumentSetRequest {
+                thread_id,
+                document: "mission A revised under paused state",
+                status: Some(ThreadGoalStatus::Paused),
+                expected_goal: Some(GoalCas {
+                    goal_id: current.goal_id.clone(),
+                    status: ThreadGoalStatus::Paused,
+                    mission_revision: current.mission_revision,
+                    lifecycle_revision: current.lifecycle_revision,
+                }),
+            },
+        )
+        .await?;
+    assert_eq!(
+        updated.document().mission_revision,
+        current.mission_revision + 1
+    );
+    assert_eq!(updated.identity().status, ThreadGoalStatus::Paused);
+    assert_eq!(
+        service
+            .read_thread_goal_document(runtime.as_ref(), thread_id)
+            .await?
+            .expect("updated managed document should be readable")
+            .2,
+        "mission A revised under paused state"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_cas_covers_objective_budget_and_clear_without_stale_effects() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = GoalService::new();
+    let first = service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("initial objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(100)),
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+    let first_identity = first.identity();
+    let updated = service
+        .set_thread_goal_cas(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("edited objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(200)),
+                max_goal_token_budget: None,
+            },
+            GoalCas {
+                goal_id: first_identity.goal_id.clone(),
+                status: first_identity.status,
+                mission_revision: first_identity.mission_revision,
+                lifecycle_revision: first_identity.lifecycle_revision,
+            },
+        )
+        .await?;
+    assert_eq!(updated.goal.objective, "edited objective");
+    assert_eq!(updated.goal.token_budget, Some(200));
+    assert_eq!(
+        updated.identity().mission_revision,
+        first_identity.mission_revision + 1
+    );
+    assert_eq!(
+        updated.identity().lifecycle_revision,
+        first_identity.lifecycle_revision + 1
+    );
+
+    let current_identity = updated.identity();
+    let stale_cases = [
+        GoalCas {
+            goal_id: "different-goal".to_string(),
+            status: current_identity.status,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: ThreadGoalStatus::Paused,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: current_identity.status,
+            mission_revision: first_identity.mission_revision,
+            lifecycle_revision: current_identity.lifecycle_revision,
+        },
+        GoalCas {
+            goal_id: current_identity.goal_id.clone(),
+            status: current_identity.status,
+            mission_revision: current_identity.mission_revision,
+            lifecycle_revision: first_identity.lifecycle_revision,
+        },
+    ];
+    for stale in stale_cases {
+        let error = match service
+            .set_thread_goal_cas(
+                runtime.as_ref(),
+                GoalSetRequest {
+                    thread_id,
+                    objective: GoalObjectiveUpdate::Set("must not replace current objective"),
+                    status: None,
+                    token_budget: GoalTokenBudgetUpdate::Keep,
+                    max_goal_token_budget: None,
+                },
+                stale,
+            )
+            .await
+        {
+            Ok(_) => panic!("stale Goal CAS must not mutate the current Goal"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("goal_cas_conflict"));
+    }
+    assert_eq!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .expect("current Goal should remain after stale CAS attempts")
+            .objective,
+        "edited objective"
+    );
+
+    let stale_clear = service
+        .clear_thread_goal_cas(
+            runtime.as_ref(),
+            thread_id,
+            GoalCas {
+                goal_id: first_identity.goal_id,
+                status: first_identity.status,
+                mission_revision: first_identity.mission_revision,
+                lifecycle_revision: first_identity.lifecycle_revision,
+            },
+        )
+        .await
+        .expect_err("a stale clear must not remove the edited Goal");
+    assert!(stale_clear.to_string().contains("goal_cas_conflict"));
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .is_some()
+    );
+
+    let cleared = service
+        .clear_thread_goal_cas(
+            runtime.as_ref(),
+            thread_id,
+            GoalCas {
+                goal_id: current_identity.goal_id,
+                status: current_identity.status,
+                mission_revision: current_identity.mission_revision,
+                lifecycle_revision: current_identity.lifecycle_revision,
+            },
+        )
+        .await?;
+    assert_eq!(cleared.objective, "edited objective");
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_turn_fails_closed_when_managed_goal_document_drift_is_detected()
+-> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let document = "full mission retained for recoverable retry";
+    let outcome = create_initial_managed_goal_document(
+        &harness.goal_service,
+        runtime.as_ref(),
+        thread_id,
+        "drift-initial",
+        document,
+        None,
+    )
+    .await?;
+    let document_path = runtime
+        .sqlite()
+        .home()
+        .join(outcome.document().path.as_str());
+    tokio::fs::remove_file(document_path).await?;
+
+    let gate_error = harness
+        .turn_start_gate("turn-with-drift")
+        .await
+        .expect_err("managed document drift must reject turn admission");
+    assert!(
+        gate_error.contains("Goal document"),
+        "unexpected gate error: {gate_error}"
+    );
+
+    // A loaded USER/PEER/TIMER turn must not be accounted to a Goal whose full
+    // mission cannot be authenticated. The persisted Goal/document metadata are
+    // left intact so the next resume can recover the missing file instead of
+    // silently narrowing the mission.
+    harness
+        .start_turn("turn-with-drift", &TokenUsage::default())
+        .await;
+    harness
+        .record_token_usage("turn-with-drift", &input_token_usage(7))
+        .await;
+    harness.stop_turn("turn-with-drift").await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("Goal should remain persisted after recoverable document drift");
+    assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
+    assert_eq!(0, goal.tokens_used);
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal_document(thread_id)
+            .await?
+            .is_some()
+    );
     Ok(())
 }
 
@@ -1786,6 +2480,24 @@ impl GoalExtensionHarness {
                 })
                 .await;
         }
+    }
+
+    async fn turn_start_gate(&self, turn_id: &str) -> Result<(), String> {
+        let turn_store = ExtensionData::new(turn_id);
+        let collaboration_mode = default_collaboration_mode();
+        for contributor in self.registry.turn_lifecycle_contributors() {
+            contributor
+                .turn_start_gate(TurnStartInput {
+                    turn_id,
+                    collaboration_mode: &collaboration_mode,
+                    token_usage_at_turn_start: None,
+                    session_store: &self.session_store,
+                    thread_store: &self.thread_store,
+                    turn_store: &turn_store,
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn stop_turn(&self, turn_id: &str) {
@@ -2060,4 +2772,196 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
         codex_state::ThreadGoalStatus::BudgetLimited => ThreadGoalStatus::BudgetLimited,
         codex_state::ThreadGoalStatus::Complete => ThreadGoalStatus::Complete,
     }
+}
+
+#[tokio::test]
+async fn managed_goal_document_create_after_complete_is_atomic_and_idempotent() -> anyhow::Result<()>
+{
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = Arc::new(GoalService::new());
+
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "completed-predecessor-initial",
+        "completed mission A",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
+    let completed = service
+        .set_thread_goal_cas(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Complete),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+            {
+                let identity = first.identity();
+                GoalCas {
+                    goal_id: identity.goal_id,
+                    status: identity.status,
+                    mission_revision: identity.mission_revision,
+                    lifecycle_revision: identity.lifecycle_revision,
+                }
+            },
+        )
+        .await?;
+    let expected = completed.identity();
+
+    let create = |creation_id: &'static str| GoalDocumentCreateRequest {
+        thread_id,
+        creation_id,
+        document: "new mission B",
+        objective: "new mission B",
+        status: Some(ThreadGoalStatus::Active),
+        token_budget: None,
+        max_goal_token_budget: None,
+        precondition: GoalDocumentCreatePrecondition::Completed(GoalCas {
+            goal_id: expected.goal_id.clone(),
+            status: expected.status,
+            mission_revision: expected.mission_revision,
+            lifecycle_revision: expected.lifecycle_revision,
+        }),
+    };
+    let (left, right) = tokio::join!(
+        service.create_thread_goal_document(runtime.as_ref(), create("mission-b-1")),
+        service.create_thread_goal_document(runtime.as_ref(), create("mission-b-1")),
+    );
+    let left = left?;
+    let right = right?;
+    assert_ne!(left.replayed(), right.replayed());
+    let created = if left.replayed() { &right } else { &left };
+    let replayed = if left.replayed() { &left } else { &right };
+    assert_eq!(created.identity().goal_id, replayed.identity().goal_id);
+    assert_ne!(created.identity().goal_id, expected.goal_id);
+    assert_eq!(created.previous_identity(), Some(expected.clone()));
+    assert_eq!(created.identity().mission_revision, 1);
+
+    // A response-loss retry remains a replay even after another reader has
+    // observed the new current Goal; it cannot depend on the current row.
+    let after_reconnect = service
+        .create_thread_goal_document(runtime.as_ref(), create("mission-b-1"))
+        .await?;
+    assert!(after_reconnect.replayed());
+    assert_eq!(
+        after_reconnect.identity().goal_id,
+        created.identity().goal_id
+    );
+
+    // A second creation key cannot reuse the completed predecessor after the
+    // first atomic replacement, and the current new Goal remains untouched.
+    let duplicate = match service
+        .create_thread_goal_document(runtime.as_ref(), create("mission-b-2"))
+        .await
+    {
+        Ok(_) => panic!("a new creation key must not replace the current Goal"),
+        Err(error) => error,
+    };
+    assert!(duplicate.to_string().contains("goal_creation_conflict"));
+    let current = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("new Goal should remain current");
+    assert_eq!(current.goal_id, created.identity().goal_id);
+    assert_eq!(current.objective, "new mission B");
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_goal_document_create_replays_after_state_runtime_reopen() -> anyhow::Result<()> {
+    let tempdir = TempDir::new()?;
+    let sqlite_home = tempdir.keep().as_path().abs();
+    let thread_id = test_thread_id()?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home.clone()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let service = GoalService::new();
+
+    let first = create_initial_managed_goal_document(
+        &service,
+        runtime.as_ref(),
+        thread_id,
+        "restart-predecessor-initial",
+        "completed mission before restart",
+        Some(ThreadGoalStatus::Active),
+    )
+    .await?;
+    let completed = service
+        .set_thread_goal_cas(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Complete),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+            {
+                let identity = first.identity();
+                GoalCas {
+                    goal_id: identity.goal_id,
+                    status: identity.status,
+                    mission_revision: identity.mission_revision,
+                    lifecycle_revision: identity.lifecycle_revision,
+                }
+            },
+        )
+        .await?;
+    let expected = completed.identity();
+    let request = |creation_id: &'static str| GoalDocumentCreateRequest {
+        thread_id,
+        creation_id,
+        document: "new mission after restart",
+        objective: "new mission after restart",
+        status: Some(ThreadGoalStatus::Active),
+        token_budget: None,
+        max_goal_token_budget: None,
+        precondition: GoalDocumentCreatePrecondition::Completed(GoalCas {
+            goal_id: expected.goal_id.clone(),
+            status: expected.status,
+            mission_revision: expected.mission_revision,
+            lifecycle_revision: expected.lifecycle_revision,
+        }),
+    };
+
+    let created = service
+        .create_thread_goal_document(runtime.as_ref(), request("restart-mission-1"))
+        .await?;
+    assert!(!created.replayed());
+    let created_goal_id = created.identity().goal_id.clone();
+    runtime.close().await;
+    drop(runtime);
+
+    // Reopening the SQLite-backed runtime is the first lookup after a cold
+    // restart; the receipt must not depend on the current Goal row still
+    // being the completed predecessor.
+    let reopened = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(sqlite_home),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let retry = GoalService::new()
+        .create_thread_goal_document(reopened.as_ref(), request("restart-mission-1"))
+        .await?;
+    assert!(retry.replayed());
+    assert_eq!(retry.identity().goal_id, created_goal_id);
+    let current = reopened
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("new Goal should survive runtime reopen");
+    assert_eq!(current.goal_id, created_goal_id);
+    assert_eq!(current.objective, "new mission after restart");
+    reopened.close().await;
+    Ok(())
 }

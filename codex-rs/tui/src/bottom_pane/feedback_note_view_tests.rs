@@ -262,6 +262,7 @@ fn feedback_paste_burst_preserves_multiline_note_until_submit() {
             let AppEvent::SubmitFeedback {
                 category,
                 reason,
+                report_passcode,
                 turn_id,
                 include_logs: submitted_logs,
             } = rx.try_recv().expect("submit feedback event")
@@ -277,6 +278,7 @@ fn feedback_paste_burst_preserves_multiline_note_until_submit() {
                     include_logs
                 )
             );
+            assert!(report_passcode.is_none());
             assert!(view.is_complete());
             assert!(rx.try_recv().is_err());
         }
@@ -342,6 +344,7 @@ fn submit_feedback_emits_submit_event_with_trimmed_note() {
         AppEvent::SubmitFeedback {
             category: FeedbackCategory::Bug,
             reason: Some(reason),
+            report_passcode: None,
             turn_id: Some(turn_id),
             include_logs: true,
         } if reason == "something broke" && turn_id == "turn-123"
@@ -369,10 +372,131 @@ fn submit_feedback_omits_empty_note() {
         AppEvent::SubmitFeedback {
             category: FeedbackCategory::GoodResult,
             reason: None,
+            report_passcode: None,
             turn_id: None,
             include_logs: false,
         }
     ));
+}
+
+#[test]
+fn dedicated_passcode_is_masked_separate_and_required_for_opt_in() {
+    let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let mut view = FeedbackNoteView::new_with_passcode_requirement(
+        FeedbackCategory::Bug,
+        None,
+        AppEventSender::new(tx_raw),
+        false,
+        FeedbackAudience::External,
+        true,
+    );
+    view.textarea.insert_str("ordinary report note");
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(rx.try_recv().is_err());
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(rx.try_recv().is_err(), "missing passcode cannot submit");
+    assert!(view.handle_paste("invalid\noperator-secret-123".into()));
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        rx.try_recv().is_err(),
+        "control characters cannot be pasted into passcodes"
+    );
+    assert!(view.handle_paste("operator-secret-123".into()));
+    let area = Rect::new(0, 0, 70, 4);
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+    assert!(!render_buffer(area, &buf).contains("operator-secret-123"));
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let event = rx.try_recv().unwrap();
+    let debug = format!("{event:?}");
+    assert!(!debug.contains("operator-secret-123"));
+    match event {
+        AppEvent::SubmitFeedback {
+            reason,
+            report_passcode,
+            ..
+        } => {
+            assert_eq!(reason.as_deref(), Some("ordinary report note"));
+            assert_eq!(report_passcode.unwrap().into_inner(), "operator-secret-123");
+        }
+        _ => panic!("expected feedback submission"),
+    }
+}
+
+#[test]
+fn dedicated_passcode_waits_for_multiline_note_paste_to_end() {
+    let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let mut view = FeedbackNoteView::new_with_passcode_requirement(
+        FeedbackCategory::Bug,
+        None,
+        AppEventSender::new(tx_raw),
+        false,
+        FeedbackAudience::External,
+        true,
+    );
+    let start = Instant::now();
+    for (index, ch) in "line one\nline two".chars().enumerate() {
+        view.handle_key_event_at(
+            KeyEvent::from(if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            }),
+            start + Duration::from_millis(index as u64),
+        );
+    }
+    assert_eq!(view.textarea.text(), "line one\nline two");
+    assert!(!view.entering_passcode);
+    assert!(rx.try_recv().is_err());
+    view.handle_key_event_at(
+        KeyEvent::from(KeyCode::Enter),
+        start + Duration::from_millis(200),
+    );
+    assert!(view.entering_passcode);
+    assert!(rx.try_recv().is_err());
+    assert!(view.handle_paste("operator-secret-123".into()));
+    view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let AppEvent::SubmitFeedback {
+        reason,
+        report_passcode,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected feedback submission");
+    };
+    assert_eq!(reason.as_deref(), Some("line one\nline two"));
+    assert_eq!(report_passcode.unwrap().into_inner(), "operator-secret-123");
+}
+
+#[test]
+fn server_requested_passcode_retries_original_note_without_putting_secret_in_reason() {
+    let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let mut view = FeedbackNoteView::passcode_retry(
+        FeedbackCategory::Bug,
+        Some("turn-123".into()),
+        AppEventSender::new(tx_raw),
+        false,
+        FeedbackAudience::External,
+        Some("original report note".into()),
+    );
+    assert!(view.entering_passcode);
+    assert_eq!(view.textarea.text(), "original report note");
+    assert!(rx.try_recv().is_err());
+    assert!(view.handle_paste("operator-secret-123".into()));
+    assert!(!render(&view, 70).contains("operator-secret-123"));
+    view.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let AppEvent::SubmitFeedback {
+        reason,
+        report_passcode,
+        turn_id,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected feedback retry");
+    };
+    assert_eq!(reason.as_deref(), Some("original report note"));
+    assert_eq!(turn_id.as_deref(), Some("turn-123"));
+    assert_eq!(report_passcode.unwrap().into_inner(), "operator-secret-123");
 }
 
 #[test]

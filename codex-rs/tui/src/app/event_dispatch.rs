@@ -2334,10 +2334,11 @@ impl App {
             AppEvent::SubmitFeedback {
                 category,
                 reason,
+                report_passcode,
                 turn_id,
                 include_logs,
             } => {
-                self.submit_feedback(app_server, category, reason, turn_id, include_logs);
+                self.submit_feedback(app_server, category, reason, report_passcode, turn_id, include_logs);
             }
             AppEvent::FeedbackSubmitted {
                 origin_thread_id,
@@ -2347,6 +2348,31 @@ impl App {
             } => {
                 self.handle_feedback_submitted(origin_thread_id, category, include_logs, result)
                     .await;
+            }
+            AppEvent::FeedbackPasscodeRequired {
+                origin_thread_id,
+                category,
+                reason,
+                turn_id,
+                include_logs,
+            } => {
+                if self.chat_widget.thread_id() == origin_thread_id {
+                    self.chat_widget.open_feedback_passcode_retry(
+                        category,
+                        reason,
+                        turn_id,
+                        include_logs,
+                        self.feedback_audience,
+                    );
+                } else {
+                    self.handle_feedback_submitted(
+                        origin_thread_id,
+                        category,
+                        include_logs,
+                        Err("report passcode required; retry from the original thread".into()),
+                    )
+                    .await;
+                }
             }
             AppEvent::LaunchExternalEditor => {
                 if self.chat_widget.external_editor_state() == ExternalEditorState::Active {
