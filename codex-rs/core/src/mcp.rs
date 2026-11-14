@@ -210,7 +210,7 @@ impl McpManager {
             context
                 .selected_environments()
                 .map_or(McpEnvironmentScope::HostOnly, McpEnvironmentScope::Selected),
-            context.disabled_plugin_ids(),
+            context.disabled_plugin_ids().unwrap_or(&[]),
         )
         .await
         .config

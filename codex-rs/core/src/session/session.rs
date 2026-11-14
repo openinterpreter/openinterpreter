@@ -516,7 +516,11 @@ impl SessionConfiguration {
         } else if cwd_changed && file_system_policy_has_rebindable_project_root_write {
             // Compatibility projection can resolve filesystem paths. Only compute it
             // when a cwd-bound legacy policy might need rebinding.
-            let current_sandbox_policy = self.sandbox_policy(current_environments);
+            let current_sandbox_policy =
+                codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+                    &self.materialized_permission_profile(current_environments),
+                    self.cwd(),
+                );
             if current_file_system_sandbox_policy.is_semantically_equivalent_to(
                 &FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
                     &current_sandbox_policy,

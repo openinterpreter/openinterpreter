@@ -173,7 +173,6 @@ impl MessageBoardHost for LocalBoardHost {
                 .services
                 .time_provider
                 .current_time(caller)
-                .await
                 .map_err(|error| CodexErr::Io(std::io::Error::other(error)))
         })
     }

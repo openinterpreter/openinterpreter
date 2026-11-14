@@ -1,5 +1,6 @@
 //! Storage-neutral attachment persistence and availability checks.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -50,8 +51,14 @@ pub trait AttachmentStore: Send + Sync {
 /// Attachment data supplied to [`AttachmentStore::upload`].
 #[derive(Clone, Eq, PartialEq)]
 pub struct UploadRequest {
+    /// Owning conversation for scoped storage and later resolution.
+    pub thread_id: String,
+    /// Whether the attachment should follow the short-lived turn lifecycle.
+    pub ephemeral: bool,
     /// Optional name associated with the attachment.
     pub file_name: Option<String>,
+    /// Core-generated policy metadata; tool output cannot supply these tags.
+    pub tags: HashMap<String, String>,
     /// Attachment bytes to persist.
     pub data: Vec<u8>,
 }

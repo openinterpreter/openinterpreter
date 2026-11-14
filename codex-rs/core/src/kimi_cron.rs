@@ -276,7 +276,6 @@ impl KimiCronService {
         self.inner
             .time_provider
             .current_time(self.inner.thread_id)
-            .await
             .map(|time| time.timestamp_millis())
             .map_err(|error| {
                 format!("Unable to read the current time for cron scheduling: {error}")

@@ -309,7 +309,6 @@ impl CodexThread {
             .services
             .time_provider
             .current_time(self.session.thread_id)
-            .await
             .map_err(|error| CodexErr::Io(std::io::Error::other(error)))
     }
 
@@ -669,7 +668,7 @@ impl CodexThread {
         let (reply, result) = oneshot::channel();
         self.io
             .tx_sub
-            .send(Submission {
+            .send(Box::new(Submission {
                 id: new_submission_id(),
                 op: Op::SuspendTurnAndShutdown { reply },
                 turn_extension_init: None,
@@ -678,7 +677,7 @@ impl CodexThread {
                 root_turn_id: None,
                 residency_guard: None,
                 message_delivery: None,
-            })
+            }))
             .await
             .map_err(|_| CodexErr::Fatal("thread session has stopped".to_string()))?;
         let outcome = result

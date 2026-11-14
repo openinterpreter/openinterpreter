@@ -447,7 +447,10 @@ async fn prepare_image(
     preparation.analytics.push(prepared.metadata(origin));
     let resize = prepared.resize;
     let request = UploadRequest {
+        thread_id: origin.thread_id.to_owned(),
+        ephemeral: origin.ephemeral,
         file_name: None,
+        tags: HashMap::from([("usage".to_string(), "prepared_image".to_string())]),
         data: prepared.encoded.bytes.to_vec(),
     };
     let prepared_image = match preparation.image_store.upload(request).await {

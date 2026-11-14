@@ -6,7 +6,10 @@ use super::*;
 #[test]
 fn attachment_debug_output_redacts_bytes() {
     let request = UploadRequest {
+        thread_id: "test-thread".to_string(),
+        ephemeral: false,
         file_name: Some("image.png".to_string()),
+        tags: Default::default(),
         data: b"secret".to_vec(),
     };
     let result = UploadResult::Inline {
@@ -47,7 +50,10 @@ async fn inline_store_preserves_image_bytes() {
     for (file_name, data) in cases {
         let attachment = InlineAttachmentStore
             .upload(UploadRequest {
+                thread_id: "test-thread".to_string(),
+                ephemeral: false,
                 file_name: Some(file_name.to_string()),
+                tags: Default::default(),
                 data: data.to_vec(),
             })
             .await
