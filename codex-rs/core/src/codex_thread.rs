@@ -476,17 +476,17 @@ impl CodexThread {
         self.session.flush_rollout().await
     }
 
-    /// Select the current rollout for an explicit feedback save, materializing
-    /// and flushing it before the caller reads its contents. Unlike the normal
-    /// optional rollout path, persistence errors must fail the save closed.
+    /// Select only an already-materialized local rollout for explicit feedback.
+    /// Untouched threads must not acquire a new rollout just because feedback
+    /// was requested; a missing selected file remains a strict collection error.
     pub async fn feedback_rollout_path(&self) -> anyhow::Result<Option<PathBuf>> {
-        let Some(path) = self.session.current_rollout_path().await? else {
+        let Some(live_thread) = self.session.live_thread() else {
             return Ok(None);
         };
-        self.session
-            .try_ensure_rollout_materialized(PersistContext::Standard)
-            .await?;
-        self.session.flush_rollout().await?;
+        let Some(path) = live_thread.feedback_rollout_path().await? else {
+            return Ok(None);
+        };
+        live_thread.flush().await?;
         Ok(Some(path))
     }
 
