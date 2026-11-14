@@ -46,6 +46,10 @@ pub(crate) const MAX_MCP_ATTRIBUTION_BYTES: usize = 8 * 1024;
 pub(crate) const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
 pub(crate) const HISTORY_INGEST_REQUESTED_KEY: &str = "history_ingest_requested";
 pub(crate) const ANALYTICS_ENABLED_KEY: &str = "analytics_enabled";
+pub(crate) const HISTORY_INITIALIZATION_KEY: &str = "history_initialization";
+// ResponsesAPI rejects a whole client_metadata value above this character limit.
+// Turn metadata is ASCII JSON, so its byte and character lengths are identical.
+const MAX_TURN_METADATA_BYTES: usize = 8096;
 
 pub(crate) const FORKED_FROM_THREAD_ID_KEY: &str = "forked_from_thread_id";
 pub(crate) const FORKED_FROM_ORDINAL_EXCLUSIVE_KEY: &str = "forked_from_ordinal_exclusive";
@@ -332,7 +336,7 @@ impl CodexResponsesMetadata {
     }
 
     pub(crate) fn turn_metadata_json(&self) -> Option<String> {
-        to_ascii_json_string(&self.turn_metadata_payload()).ok()
+        bounded_turn_metadata_json(self.turn_metadata_payload()).ok()
     }
 
     pub(crate) fn turn_metadata_value(&self) -> Option<Value> {
@@ -397,7 +401,7 @@ impl CodexResponsesMetadata {
         // Direct x-codex-turn-metadata is compatibility output. Keep the unbounded tool inventory
         // in client_metadata only so HTTP and WebSocket compatibility headers remain bounded.
         if self.has_turn_metadata()
-            && let Ok(turn_metadata_json) = to_ascii_json_string(&CodexTurnMetadataPayload {
+            && let Ok(turn_metadata_json) = bounded_turn_metadata_json(CodexTurnMetadataPayload {
                 tool_namespaces_info: None,
                 ..self.turn_metadata_payload()
             })
@@ -559,7 +563,78 @@ fn non_empty_workspaces(
     (!workspaces.is_empty()).then_some(workspaces)
 }
 
-#[derive(Serialize)]
+fn bounded_turn_metadata_json(payload: CodexTurnMetadataPayload<'_>) -> serde_json::Result<String> {
+    let full = to_ascii_json_string(&payload)?;
+    if full.len() <= MAX_TURN_METADATA_BYTES {
+        return Ok(full);
+    }
+    let Some(original_workspaces) = payload.workspaces else {
+        return Ok(full);
+    };
+
+    // Reserve all non-remote metadata before fitting complete URLs. A remote must
+    // never be shortened into a different repository identity.
+    let mut workspaces = original_workspaces.clone();
+    let mut candidates = Vec::new();
+    for path in original_workspaces.keys() {
+        let Some(workspace) = workspaces.get_mut(path) else {
+            continue;
+        };
+        let Some(remotes) = workspace.associated_remote_urls.take() else {
+            continue;
+        };
+        if remotes.is_empty() {
+            workspace.associated_remote_urls = Some(remotes);
+            continue;
+        }
+        let without_remotes_len = to_ascii_json_string(workspace)?.len();
+        workspace.associated_remote_urls = Some(BTreeMap::new());
+        let first_map_overhead = to_ascii_json_string(workspace)?.len() - without_remotes_len;
+        workspace.associated_remote_urls = None;
+        for (name, url) in remotes {
+            // [name,url] and name:url differ by the two array delimiters.
+            let entry_len = to_ascii_json_string(&(&name, &url))?.len() - 2;
+            candidates.push((path.as_str(), name, url, entry_len, first_map_overhead));
+        }
+    }
+    let mut projected_len = to_ascii_json_string(&CodexTurnMetadataPayload {
+        workspaces: Some(&workspaces),
+        ..payload.clone()
+    })?
+    .len();
+    if projected_len > MAX_TURN_METADATA_BYTES || candidates.is_empty() {
+        return Ok(full);
+    }
+    candidates.sort_unstable_by(|a, b| {
+        (a.1 != "origin")
+            .cmp(&(b.1 != "origin"))
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.0.cmp(b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    for (path, name, url, entry_len, first_map_overhead) in candidates {
+        let Some(workspace) = workspaces.get_mut(path) else {
+            continue;
+        };
+        let overhead = match &workspace.associated_remote_urls {
+            Some(_) => 1,
+            None => first_map_overhead,
+        };
+        if entry_len + overhead <= MAX_TURN_METADATA_BYTES - projected_len {
+            projected_len += entry_len + overhead;
+            workspace
+                .associated_remote_urls
+                .get_or_insert_default()
+                .insert(name, url);
+        }
+    }
+    to_ascii_json_string(&CodexTurnMetadataPayload {
+        workspaces: Some(&workspaces),
+        ..payload
+    })
+}
+
+#[derive(Clone, Serialize)]
 struct CodexTurnMetadataPayload<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     guardian_recorded_items: Option<bool>,
@@ -624,3 +699,7 @@ struct CodexTurnMetadataPayload<'a> {
     #[serde(flatten)]
     extra: &'a BTreeMap<String, String>,
 }
+
+#[cfg(test)]
+#[path = "responses_metadata_tests.rs"]
+mod tests;
