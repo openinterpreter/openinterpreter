@@ -987,7 +987,7 @@ See the Codex keymap documentation for supported actions and examples."
             turn_tips: Default::default(),
             native_history: Default::default(),
             transcript_view: Default::default(),
-            conversation_frame: crate::owned_transcript::ConversationFrame::default(),
+            conversation_frame: super::owned_transcript::ConversationFrame::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,
