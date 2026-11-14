@@ -601,7 +601,7 @@ async fn remote_plugin_measurements_require_the_frontend_version() -> Result<()>
     skip_if_no_network!(Ok(()));
     // This fixture needs a real remote transport with separately controlled frontend
     // and executor caches, rather than the runner's automatic executor selection.
-    let executor = super::multi_exec_server_sandbox::ExecServerProcess::start().await?;
+    let executor = core_test_support::exec_server::ExecServerProcess::start().await?;
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
     let frontend_script = write_remote_plugin_script_and_config(home.as_ref());
@@ -1117,6 +1117,8 @@ async fn sites_compatibility_guard_in_agent_turn(
     cache_remote_sites: bool,
     expected_skills: (bool, bool),
 ) -> Result<()> {
+    let plugin_name = "sites";
+    let product_sku: Option<&str> = None;
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let response = mount_sse_once(
