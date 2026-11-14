@@ -32,6 +32,13 @@ jobs:
           rust-version: 1.99.1
           manifest-path: ./codex-rs/Cargo.toml
 
+      # The action runs its own binary and does not export it to later steps.
+      - name: Install policy diagnostic CLI after a failed check
+        if: failure()
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80 # v2
+        with:
+          tool: cargo-deny
+
       - name: Capture failed policy check for exact-source diagnosis
         if: failure()
         shell: bash
