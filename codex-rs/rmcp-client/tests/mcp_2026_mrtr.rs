@@ -485,7 +485,11 @@ async fn modern_tool_mrtr_uses_recovered_protocol_after_legacy_session_expiry() 
         .call_tool(
             "confirm".into(),
             Some(json!({})),
-            Some(json!({"requestContext": "caller-context", "openai/readOnly": false})),
+            |_| {
+                Ok(Some(
+                    json!({"requestContext": "caller-context", "openai/readOnly": false}),
+                ))
+            },
             Some(Duration::from_secs(5)),
         )
         .await?;
