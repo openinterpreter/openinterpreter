@@ -212,7 +212,8 @@ impl codex_extension_api::SynchronousApprovalReviewer for AllContributors {
     fn review<'a>(
         &'a self,
         _reason: codex_protocol::approvals::GuardianReviewReason,
-    ) -> ExtensionFuture<'_, Option<codex_protocol::protocol::ReviewDecision>> {
+        _async_approval: Option<ExtensionFuture<'a, ()>>,
+    ) -> ExtensionFuture<'a, Option<codex_protocol::protocol::ReviewDecision>> {
         Box::pin(std::future::ready(Some(
             codex_protocol::protocol::ReviewDecision::Approved,
         )))
