@@ -14,6 +14,7 @@ use rmcp::ServiceExt;
 use rmcp::model::CancelledNotification;
 use rmcp::model::CancelledNotificationParam;
 use rmcp::model::ClientConfig;
+use rmcp::model::ClientInfo;
 use rmcp::model::ClientJsonRpcMessage;
 use rmcp::model::ClientNotification;
 use rmcp::model::ClientRequest;
