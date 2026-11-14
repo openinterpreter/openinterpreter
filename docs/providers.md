@@ -127,6 +127,18 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
+Likewise, [AI Stupid Level](https://aistupidlevel.info/router) is an
+OpenAI-compatible chat-completions router: its `auto-coding` model sends each
+request to the model that currently scores best on its coding benchmark:
+
+```toml
+[model_providers.aistupidlevel]
+name = "AI Stupid Level"
+base_url = "https://aistupidlevel.info/v1"
+env_key = "ASL_ROUTER_KEY"
+wire_api = "chat"
+```
+
 ## Authentication
 
 Provider auth can come from:
