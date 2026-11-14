@@ -1588,6 +1588,23 @@ impl ChatComposer {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
+        self.set_text_content_with_shell_prefix(
+            text,
+            text_elements,
+            local_image_paths,
+            mention_bindings,
+            ShellPrefixHandling::Interpret,
+        );
+    }
+
+    pub(super) fn set_text_content_with_shell_prefix(
+        &mut self,
+        text: String,
+        text_elements: Vec<TextElement>,
+        local_image_paths: Vec<PathBuf>,
+        mention_bindings: Vec<MentionBinding>,
+        shell_prefix: ShellPrefixHandling,
+    ) {
         if !self.sparkle.history_preview {
             if local_image_paths.is_empty() {
                 self.note_sparkle_replaced_text(&text);
