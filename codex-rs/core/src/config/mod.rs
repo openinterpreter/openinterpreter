@@ -47,6 +47,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::History;
 use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_config::types::MemoriesConfig;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
@@ -144,6 +145,7 @@ use codex_sandboxing::SandboxType;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::Platform;
@@ -346,6 +348,14 @@ pub(crate) async fn test_config() -> Config {
     )
     .await
     .expect("load default test config")
+}
+
+/// Process-local launch directories for stdio servers supplied by the host.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpLaunchCwds {
+    pub plugins: HashMap<String, HashMap<String, AbsolutePathBuf>>,
+    /// Server name, expected executable, and launch directory.
+    pub configured: HashMap<String, (String, AbsolutePathBuf)>,
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -758,6 +768,8 @@ pub struct Config {
     pub guardian_transcript_mode: codex_protocol::TranscriptFormat,
     /// Frozen section policy for sync Guardian; absence keeps fixed budgeting.
     pub guardian_sync_elastic_budget: Option<codex_guardian_context::ElasticBudgetConfig>,
+    /// Frozen section policy for async Guardian; absence keeps fixed budgeting.
+    pub guardian_async_elastic_budget: Option<codex_guardian_context::ElasticBudgetConfig>,
 
     /// Optional replacement for the gated history-retrieval instructions.
     /// Blank config values are treated as unset, like other Guardian policy overrides.
@@ -1061,6 +1073,8 @@ pub struct Config {
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
     pub file_opener: UriBasedFileOpener,
+    /// Process-local launch directories for stdio servers supplied by the host.
+    pub mcp_launch_cwds: Arc<McpLaunchCwds>,
 
     /// Path to the current Codex executable. This cannot be set in the config
     /// file: it must be set in code via [`ConfigOverrides`].
@@ -1266,6 +1280,7 @@ pub struct CodeModeConfig {
     pub direct_only_tool_namespaces: Vec<String>,
     /// Keep code mode fail-closed when the standalone host is unavailable.
     pub disable_in_process_fallback: bool,
+    pub heartbeat_interval_s: u32,
 }
 
 impl Default for CodeModeConfig {
@@ -1277,6 +1292,7 @@ impl Default for CodeModeConfig {
             excluded_tool_namespaces: Vec::new(),
             direct_only_tool_namespaces: Vec::new(),
             disable_in_process_fallback: false,
+            heartbeat_interval_s: 0,
         }
     }
 }
@@ -1965,6 +1981,8 @@ impl Config {
         {
             catalog.enable_ema(auth.idp.clone());
         }
+        let use_launch_cwds = self.features.enabled(Feature::McpSharedReplCwd)
+            && self.features.enabled(Feature::McpConnectionSharing);
         for (plugin_order, plugin) in loaded_plugins
             .plugins()
             .iter()
@@ -1985,7 +2003,17 @@ impl Config {
                 )
             }
             .with_host_root(PathUri::from_abs_path(&plugin.root));
-            for (name, plugin_server) in plugin_mcp_servers {
+            let launch_cwds = self.mcp_launch_cwds.plugins.get(&plugin.config_name);
+            for (name, mut plugin_server) in plugin_mcp_servers {
+                if use_launch_cwds
+                    && let Some(path) = launch_cwds.and_then(|cwds| cwds.get(&name))
+                    && plugin_server.is_local_environment()
+                    && !plugin.is_agent_plugin()
+                    && let McpServerTransportConfig::Stdio { cwd, .. } =
+                        &mut plugin_server.transport
+                {
+                    *cwd = Some(LegacyAppPathString::from_abs_path(path));
+                }
                 let registration = McpServerRegistration::from_plugin(
                     name,
                     attribution.clone(),
@@ -1999,10 +2027,17 @@ impl Config {
             catalog.register(registration);
         }
         for (name, server) in self.mcp_servers.get() {
-            catalog.register(McpServerRegistration::from_config(
-                name.clone(),
-                server.clone(),
-            ));
+            let mut server = server.clone();
+            if use_launch_cwds
+                && let Some((executable, path)) = self.mcp_launch_cwds.configured.get(name)
+                && server.is_local_environment()
+                && let McpServerTransportConfig::Stdio { command, cwd, .. } = &mut server.transport
+                && command == executable
+                && cwd.is_none()
+            {
+                *cwd = Some(LegacyAppPathString::from_abs_path(path));
+            }
+            catalog.register(McpServerRegistration::from_config(name.clone(), server));
         }
 
         McpConfig {
@@ -2887,6 +2922,11 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
             .unwrap_or_default(),
         disable_in_process_fallback: host
             .and_then(|config| config.disable_in_process_fallback)
+            .unwrap_or_default(),
+        heartbeat_interval_s: config_toml
+            .code_mode
+            .as_ref()
+            .and_then(|config| config.heartbeat_interval_s)
             .unwrap_or_default(),
     }
 }
@@ -4320,21 +4360,18 @@ impl Config {
                 FeatureToml::Enabled(_) => None,
             })
             .unwrap_or_default();
-        let guardian_sync_elastic_budget = cfg.features.as_ref()
-            .and_then(|features| features.guardianv2.as_ref())
-            .and_then(|feature| match feature {
-                FeatureToml::Config(guardian) if guardian.sync_elastic_budgeting == Some(true) => Some(guardian),
-                FeatureToml::Config(_) | FeatureToml::Enabled(_) => None,
-            })
-            .map(|guardian| {
-                let sections = guardian.sync_elastic_sections.as_ref().filter(|sections| !sections.is_empty())
+        let resolve_elastic_budget = |named_sections: Option<&BTreeMap<String, codex_features::GuardianElasticSectionConfigToml>>, prefix: &str| {
+                let sections = named_sections.filter(|sections| !sections.is_empty())
                     .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData,
-                        "sync_elastic_sections is required when sync_elastic_budgeting is enabled"))?;
+                        format!("{prefix}_elastic_sections is required when {prefix}_elastic_budgeting is enabled")))?;
                 let mut policy = codex_guardian_context::ElasticBudgetConfig::default();
                 for (name, limits) in sections {
                     let section = codex_guardian_context::ElasticSection::deserialize(name.as_str().into_deserializer())
                         .map_err(|error: serde::de::value::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
                     if section == codex_guardian_context::ElasticSection::TranscriptSelectedExecResults {
+                        if prefix == "async" {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "transcript_selected_exec_results is only supported for sync elastic budgeting"));
+                        }
                         if limits.nested_tool_names.is_empty() || limits.nested_tool_names.iter().any(|name| name.trim().is_empty()) {
                             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
                                 "transcript_selected_exec_results requires nonempty nested_tool_names"));
@@ -4354,12 +4391,26 @@ impl Config {
                     }
                     if policy.sections.insert(section, section_limits).is_some() {
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                            format!("duplicate sync_elastic_sections section: {name}")));
+                            format!("duplicate {prefix}_elastic_sections section: {name}")));
                     }
                 }
                 policy.validate().map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
                 Ok::<_, std::io::Error>(policy)
-            }).transpose()?;
+            };
+        let guardian = cfg.features.as_ref()
+            .and_then(|features| features.guardianv2.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Config(guardian) => Some(guardian),
+                FeatureToml::Enabled(_) => None,
+            });
+        let guardian_sync_elastic_budget = guardian
+            .filter(|guardian| guardian.sync_elastic_budgeting == Some(true))
+            .map(|guardian| resolve_elastic_budget(guardian.sync_elastic_sections.as_ref(), "sync"))
+            .transpose()?;
+        let guardian_async_elastic_budget = guardian
+            .filter(|guardian| guardian.async_elastic_budgeting == Some(true))
+            .map(|guardian| resolve_elastic_budget(guardian.async_elastic_sections.as_ref(), "async"))
+            .transpose()?;
         let guardian_conversation_history_prompt = cfg.auto_review.as_ref().and_then(|auto_review| {
             normalize_guardian_policy_config(
                 auto_review.experimental_conversation_history_prompt.as_deref(),
@@ -4726,6 +4777,7 @@ impl Config {
             extra_config: None,
             bypass_hook_trust,
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
+            mcp_launch_cwds: Arc::default(),
             codex_self_exe,
             codex_linux_sandbox_exe,
             main_execve_wrapper_exe: None,
@@ -4742,6 +4794,7 @@ impl Config {
             guardian_policy_template,
             guardian_transcript_mode,
             guardian_sync_elastic_budget,
+            guardian_async_elastic_budget,
             guardian_conversation_history_prompt,
             guardian_conversation_history_max_output_tokens,
             guardian_review_timeout: cfg
