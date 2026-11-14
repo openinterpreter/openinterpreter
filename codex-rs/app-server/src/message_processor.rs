@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
+use crate::current_time::app_server_time_provider;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -414,7 +415,10 @@ impl MessageProcessor {
                     outgoing.clone(),
                     thread_state_manager.clone(),
                 )),
-                None,
+                Some(app_server_time_provider(
+                    outgoing.clone(),
+                    thread_state_manager.clone(),
+                )),
             );
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),

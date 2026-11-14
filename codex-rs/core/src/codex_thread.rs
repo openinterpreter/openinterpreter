@@ -309,6 +309,7 @@ impl CodexThread {
             .services
             .time_provider
             .current_time(self.session.thread_id)
+            .await
             .map_err(|error| CodexErr::Io(std::io::Error::other(error)))
     }
 

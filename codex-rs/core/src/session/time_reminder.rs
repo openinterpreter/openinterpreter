@@ -102,7 +102,12 @@ impl Session {
         turn_context: &TurnContext,
         clock_read: &'static str,
     ) -> CodexResult<Option<DateTime<Utc>>> {
-        let error = match self.services.time_provider.current_time(self.thread_id) {
+        let error = match self
+            .services
+            .time_provider
+            .current_time(self.thread_id)
+            .await
+        {
             Ok(time) => {
                 let mut state = self.state.lock().await;
                 state.current_time_reminder.last_clock_failure = None;
