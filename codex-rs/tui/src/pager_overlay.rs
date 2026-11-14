@@ -91,7 +91,11 @@ impl Overlay {
         Self::Static(StaticOverlay::with_renderables(renderables, title, keymap))
     }
 
-    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+    pub(crate) fn handle_event(
+        &mut self,
+        tui: &mut tui::Tui,
+        event: TuiEvent,
+    ) -> Result<Option<u64>> {
         let input = match self {
             Overlay::Transcript(_) => tui::OverlayInput::Transcript,
             Overlay::Static(_) => tui::OverlayInput::StaticPager,
@@ -100,12 +104,12 @@ impl Overlay {
         tui.set_overlay_input(input)?;
         let result = match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
-            Overlay::Static(o) => o.handle_event(tui, event),
-            Overlay::Analytics(o) => o.handle_event(tui, event),
+            Overlay::Static(o) => o.handle_event(tui, event).map(|()| None),
+            Overlay::Analytics(o) => o.handle_event(tui, event).map(|()| None),
         };
         if result.is_err() || self.is_done() {
             let restore = tui.set_overlay_input(tui::OverlayInput::Default);
-            return result.and(restore);
+            return result.and_then(|completed| restore.map(|()| completed));
         }
         result
     }

@@ -854,6 +854,30 @@ impl BottomPane {
 
     /// Forward a key event to the active view or the composer.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
+        self.handle_key_event_with_activation_key(key_event, /*activation_key*/ None)
+    }
+
+    pub(crate) fn handle_key_event_with_activation_key(
+        &mut self,
+        key_event: KeyEvent,
+        activation_key: Option<KeyBinding>,
+    ) -> InputResult {
+        let routed_key = activation_key.unwrap_or_else(|| KeyBinding::from_event(key_event));
+        if self.consume_view_transition_key(routed_key, key_event.kind) {
+            return InputResult::None;
+        }
+        if key_event.kind == KeyEventKind::Release {
+            for view in &mut self.view_stack {
+                view.handle_key_release(key_event);
+            }
+        } else if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && self.view_stack.len() > 1
+        {
+            let covered_view_count = self.view_stack.len() - 1;
+            for view in &mut self.view_stack[..covered_view_count] {
+                view.observe_key_event_while_covered(key_event, routed_key);
+            }
+        }
         let records_composer_activity =
             matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                 && !key_hint::has_ctrl_or_alt(key_event.modifiers)
@@ -2348,6 +2372,7 @@ impl BottomPane {
         &'a self,
         mut options: ComposerRenderOptions<'a>,
     ) -> RenderableItem<'a> {
+        let views = &self.view_stack;
         if self.warnings_active()
             && let Some(warnings) = &self.warnings_view
         {

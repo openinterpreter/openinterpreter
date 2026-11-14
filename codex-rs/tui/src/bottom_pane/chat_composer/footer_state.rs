@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use super::super::footer::footer_height;
 use super::super::footer::shows_passive_footer_line;
+use super::super::status_line::StatusLine;
 use super::ActivePopup;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
