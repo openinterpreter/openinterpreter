@@ -1,4 +1,6 @@
 use crate::config::RolloutBudgetConfig;
+use crate::config::rollout_budget_threshold_reached;
+use codex_protocol::BudgetUnitsSum;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -7,10 +9,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 /// Budget reminder returned by a controller and acknowledged after history insertion.
 pub struct RolloutBudgetReminder {
-    pub remaining_tokens: i64,
+    pub remaining_units: f64,
     /// Backend-defined reminder position, returned unchanged on acknowledgement.
     pub reminder_index: i64,
 }
@@ -19,11 +23,13 @@ pub struct RolloutBudgetReminder {
 #[derive(Default)]
 pub(crate) struct RolloutBudget {
     state: OnceLock<Mutex<RolloutBudgetState>>,
+    /// An explicit stop gates new tools across the tree, even with per-thread host accountants.
+    stop_tools: AtomicBool,
 }
 
 struct RolloutBudgetState {
     config: RolloutBudgetConfig,
-    weighted_tokens_used: f64,
+    posted: BudgetUnitsSum,
     /// Last reminder delivered to each thread, so every thread observes crossed thresholds.
     deliveries: HashMap<ThreadId, ThreadBudgetDelivery>,
 }
@@ -38,18 +44,35 @@ impl RolloutBudget {
         self.state.get_or_init(|| {
             Mutex::new(RolloutBudgetState {
                 config,
-                weighted_tokens_used: 0.0,
+                posted: BudgetUnitsSum::default(),
                 deliveries: HashMap::new(),
             })
         });
     }
 
     /// Records usage and returns whether an enforced budget is exhausted.
-    pub(crate) fn record_usage(&self, usage: &TokenUsage) -> CodexResult<bool> {
+    pub(crate) fn record_usage(
+        &self,
+        usage: Option<&TokenUsage>,
+        hook_charge: codex_hooks::HookCharge,
+    ) -> CodexResult<bool> {
         let Some(mut state) = self.lock() else {
             return Ok(false);
         };
-        let units = if let Some(units) = usage.codex_rollout_budget_units.as_ref() {
+        if !hook_charge.units.is_finite() || hook_charge.units < 0.0 {
+            return Err(CodexErr::Fatal("invalid rollout budget charge".into()));
+        }
+        if hook_charge.overflowed {
+            // All allowances are finite. No future nonnegative receipt can make
+            // this total representable; the remaining allowance is known to be zero.
+            state.posted.add(f64::INFINITY);
+            if state.config.enforce_limit {
+                self.stop_new_tools();
+            }
+        }
+        let provider_units = if let Some(units) =
+            usage.and_then(|usage| usage.codex_rollout_budget_units.as_ref())
+        {
             let units = units.as_f64().unwrap_or(f64::NAN);
             if !units.is_finite() || units < 0.0 {
                 return Err(CodexErr::Fatal(
@@ -58,13 +81,38 @@ impl RolloutBudget {
                 ));
             }
             units
-        } else {
+        } else if let Some(usage) = usage {
             usage.output_tokens.max(0) as f64 * state.config.sampling_token_weight
                 + usage.non_cached_input() as f64 * state.config.prefill_token_weight
+        } else {
+            0.0
         };
-        state.weighted_tokens_used += units;
-        Ok(state.config.enforce_limit
-            && state.weighted_tokens_used >= state.config.limit_tokens as f64)
+        if state.posted.total().is_infinite() {
+            return Ok(state.config.enforce_limit);
+        }
+        state.posted.add(provider_units);
+        state.posted.add(hook_charge.units);
+        if !state.posted.total().is_finite() {
+            if state.config.enforce_limit {
+                self.stop_new_tools();
+            }
+            return Err(CodexErr::Fatal("invalid rollout budget charge".into()));
+        }
+        // Equality is allowed, including one rounding step (0.1 + 0.2 versus 0.3).
+        let exhausted = state.config.enforce_limit
+            && state.posted.total() > state.config.limit_budget.next_up();
+        if exhausted {
+            self.stop_new_tools();
+        }
+        Ok(exhausted)
+    }
+
+    pub(crate) fn stop_new_tools(&self) {
+        self.stop_tools.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn tools_stopped(&self) -> bool {
+        self.stop_tools.load(Ordering::Acquire)
     }
 
     pub(crate) fn pending_reminder(
@@ -73,22 +121,22 @@ impl RolloutBudget {
         window_id: &str,
     ) -> Option<RolloutBudgetReminder> {
         let state = self.lock()?;
-        let remaining_tokens = (state.config.limit_tokens as f64 - state.weighted_tokens_used)
-            .max(0.0)
-            .floor() as i64;
+        let remaining_units = (state.config.limit_budget - state.posted.total()).max(0.0);
         let reminder_index = state
             .config
             .reminder_at_remaining_tokens
             .iter()
-            .filter(|&&threshold| remaining_tokens <= threshold)
+            .filter(|&&threshold| rollout_budget_threshold_reached(remaining_units, threshold))
             .count() as i64;
-        if state.deliveries.get(&thread_id).is_some_and(|delivery| {
-            delivery.window_id.as_str() == window_id && delivery.reminder_index >= reminder_index
-        }) {
+        let previous = state.deliveries.get(&thread_id);
+        let crossed_threshold = reminder_index > previous.map_or(0, |d| d.reminder_index);
+        let new_window = state.config.reminder_at_context_start
+            && previous.is_none_or(|d| d.window_id != window_id);
+        if !crossed_threshold && !new_window {
             return None;
         }
         Some(RolloutBudgetReminder {
-            remaining_tokens,
+            remaining_units,
             reminder_index,
         })
     }

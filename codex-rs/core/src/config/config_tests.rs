@@ -709,6 +709,28 @@ disable_in_process_fallback = true
 }
 
 #[tokio::test]
+async fn load_config_resolves_response_process_mode() -> std::io::Result<()> {
+    let streaming = r#"[responses]
+process_mode = "streaming"
+"#;
+    let buffered = r#"[responses]
+process_mode = "after_complete_response"
+"#;
+    for (toml, expected) in [
+        ("", ResponseProcessMode::Streaming),
+        (streaming, ResponseProcessMode::Streaming),
+        (buffered, ResponseProcessMode::AfterCompleteResponse),
+    ] {
+        assert_eq!(
+            load_config_from_toml(toml).await?.response_process_mode,
+            expected
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_resolves_tool_registry_config() -> std::io::Result<()> {
     let codex_home = tempdir()?;
 
@@ -927,7 +949,7 @@ async fn load_config_resolves_rollout_budget() -> std::io::Result<()> {
         r#"
 [features.rollout_budget]
 enabled = true
-limit_tokens = 100000
+limit_budget = 100000.5
 reminder_at_remaining_tokens = [50000, 25000, 10000]
 sampling_token_weight = 1.0
 prefill_token_weight = 0.1
@@ -947,20 +969,66 @@ prefill_token_weight = 0.1
         config.rollout_budget,
         Some(RolloutBudgetConfig {
             enforce_limit: true,
-            limit_tokens: 100_000,
+            limit_budget: 100_000.5,
+            reminder_at_context_start: true,
             reminder_at_remaining_tokens: vec![50_000, 25_000, 10_000],
             sampling_token_weight: 1.0,
             prefill_token_weight: 0.1,
         })
     );
+    // A persisted integer limit and threshold may differ by one beyond f64's exact range.
+    let legacy: ConfigToml = toml::from_str(
+        "[features.rollout_budget]\nenabled = true\nlimit_tokens = 9007199254740993\nreminder_at_remaining_tokens = [9007199254740992]\n",
+    )
+    .expect("legacy integer budget should deserialize");
+    let persisted = serde_json::to_value(&legacy).expect("serialize persisted config");
+    let persisted_budget = &persisted["features"]["rollout_budget"];
+    assert_eq!(
+        persisted_budget["limit_tokens"].as_i64(),
+        Some(9_007_199_254_740_993)
+    );
+    assert!(persisted_budget.get("limit_budget").is_none());
+    let config = Config::load_from_base_config_with_overrides(
+        legacy,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let resolved = config.rollout_budget.expect("legacy budget should resolve");
+    assert_eq!(
+        resolved.reminder_at_remaining_tokens,
+        vec![9_007_199_254_740_992]
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn load_config_rejects_enabled_rollout_budget_without_limit() -> std::io::Result<()> {
-    for config_toml in [
-        "[features]\nrollout_budget = true\n",
-        "[features.rollout_budget]\nenabled = true\n",
+async fn load_config_rejects_invalid_rollout_budget_limits() -> std::io::Result<()> {
+    for (config_toml, expected_error) in [
+        (
+            "[features]\nrollout_budget = true\n",
+            "features.rollout_budget requires limit_tokens or limit_budget when enabled",
+        ),
+        (
+            "[features.rollout_budget]\nenabled = true\n",
+            "features.rollout_budget requires limit_tokens or limit_budget when enabled",
+        ),
+        (
+            "[features.rollout_budget]\nenabled = true\nlimit_tokens = 100\nlimit_budget = 100.5\n",
+            "features.rollout_budget.limit_tokens and limit_budget cannot both be set",
+        ),
+        (
+            "[features.rollout_budget]\nenabled = false\nlimit_tokens = 100\nlimit_budget = 100.5\n",
+            "features.rollout_budget.limit_tokens and limit_budget cannot both be set",
+        ),
+        (
+            "[features.rollout_budget]\nenabled = true\nlimit_tokens = 0\n",
+            "features.rollout_budget allowance must be finite and positive",
+        ),
+        (
+            "[features.rollout_budget]\nenabled = true\nlimit_budget = inf\n",
+            "features.rollout_budget allowance must be finite and positive",
+        ),
     ] {
         let codex_home = tempdir()?;
         let config_toml: ConfigToml =
@@ -971,13 +1039,10 @@ async fn load_config_rejects_enabled_rollout_budget_without_limit() -> std::io::
             codex_home.abs(),
         )
         .await
-        .expect_err("enabled rollout budget without limit_tokens should be rejected");
+        .expect_err("invalid rollout budget should be rejected");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(
-            err.to_string(),
-            "features.rollout_budget.limit_tokens is required when rollout_budget is enabled"
-        );
+        assert_eq!(err.to_string(), expected_error);
     }
     Ok(())
 }
@@ -1009,14 +1074,14 @@ sleep_tool = true
             },
         ),
     ] {
-        let config = load_current_time_reminder_config(config_toml).await?;
+        let config = load_config_from_toml(config_toml).await?;
         assert!(config.features.enabled(Feature::CurrentTimeReminder));
         assert_eq!(config.current_time_reminder, Some(expected));
     }
     Ok(())
 }
 
-async fn load_current_time_reminder_config(config_toml: &str) -> std::io::Result<Config> {
+async fn load_config_from_toml(config_toml: &str) -> std::io::Result<Config> {
     let codex_home = tempdir()?;
     let config_toml = toml::from_str(config_toml).expect("TOML should deserialize");
     Config::load_from_base_config_with_overrides(

@@ -8,11 +8,12 @@ use super::run_model_request_hooks;
 use super::thread_spawn_subagent_hook_context;
 use super::tool_hook_cwd;
 use crate::client::OpenedModelResponse;
-use crate::client_common::ResponseStream;
+use crate::client_common::SamplingStream;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_hooks::ModelRequestHookEvent;
 use codex_hooks::ModelRequestHookInput;
+use codex_hooks::ModelRequestHookOutcome;
 use codex_hooks::SamplingKind;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::HookCompletedEvent;
@@ -40,7 +41,7 @@ impl SamplingRequest {
         model: &str,
         owner_cancellation: &CancellationToken,
         send: impl Future<Output = Result<OpenedModelResponse>> + Send,
-    ) -> impl Future<Output = Result<ResponseStream>> + Send {
+    ) -> impl Future<Output = Result<SamplingStream>> + Send {
         // Keep the transport and hook state out of the turn's cancellation and retry futures.
         Box::pin(self.open_attempt(session, step, model, owner_cancellation, send))
     }
@@ -52,16 +53,21 @@ impl SamplingRequest {
         model: &str,
         owner_cancellation: &CancellationToken,
         send: impl Future<Output = Result<OpenedModelResponse>>,
-    ) -> Result<ResponseStream> {
+    ) -> Result<SamplingStream> {
+        let send = async {
+            session.check_rollout_budget()?;
+            send.await
+        };
         let sampling_turn = match self.kind {
             SamplingKind::Sampling => Some(Arc::clone(&step.turn)),
             SamplingKind::ForegroundCompaction | SamplingKind::BackgroundCompaction => None,
         };
+        let settlement = Some((Arc::clone(session), Arc::clone(&step.turn)));
         let hooks = hooks_for_model_request(session, step);
         let pre_mode = hooks.execution_mode_for_event(HookEventName::PreModelRequest);
         let post_mode = hooks.execution_mode_for_event(HookEventName::PostModelRequest);
         if pre_mode.is_none() && post_mode.is_none() {
-            return send.await?.deliver(&mut None, sampling_turn);
+            return send.await?.deliver(&mut None, sampling_turn, settlement);
         }
         let subagent = thread_spawn_subagent_hook_context(session, &step.turn);
         let input = ModelRequestHookInput {
@@ -92,7 +98,7 @@ impl SamplingRequest {
         }
         let stream = send
             .await
-            .and_then(|opened| opened.deliver(&mut attempt, sampling_turn));
+            .and_then(|opened| opened.deliver(&mut attempt, sampling_turn, settlement));
         if let Err(error) = &stream
             && let Some(mut attempt) = attempt
             && let Some(hooks) = attempt.start_post_hooks(ModelRequestHookEvent::failed(error))
@@ -113,12 +119,20 @@ struct PostHooks {
 }
 
 impl PostHooks {
-    async fn run(mut self, session: &Arc<Session>, event: ModelRequestHookEvent) {
+    async fn run(
+        mut self,
+        session: &Arc<Session>,
+        event: ModelRequestHookEvent,
+    ) -> ModelRequestHookOutcome {
         self.input.event = event;
-        run_model_request_hooks(session, &self.step, &self.hooks, self.input).await;
+        run_model_request_hooks(session, &self.step, &self.hooks, self.input).await
     }
 
-    async fn run_sync(mut self, session: Arc<Session>, event: ModelRequestHookEvent) {
+    async fn run_sync(
+        mut self,
+        session: Arc<Session>,
+        event: ModelRequestHookEvent,
+    ) -> ModelRequestHookOutcome {
         let (mut done, wait) = oneshot::channel();
         self.input.event = event;
         // Dropping the waiter cancels execution while the task finishes publishing
@@ -132,7 +146,7 @@ impl PostHooks {
             let started = Instant::now();
             emit_hook_started_events(&session, turn, runs.clone()).await;
             let mut finished: Vec<HookCompletedEvent> = Vec::new();
-            let events = tokio::select! {
+            let (events, outcome) = tokio::select! {
                 biased;
                 () = done.closed() => {
                     let completed_at = chrono::Utc::now().timestamp();
@@ -152,14 +166,17 @@ impl PostHooks {
                             run,
                         });
                     }
-                    finished
+                    (finished, ModelRequestHookOutcome::default())
                 }
                 events = self.hooks.run_model_request(self.input, |event| finished.push(event.clone())) => events,
             };
             emit_hook_completed_events(&session, turn, events).await;
-            let _ = done.send(());
+            let _ = done.send(outcome);
         });
-        let _ = wait.await;
+        wait.await.unwrap_or_else(|_| ModelRequestHookOutcome {
+            invalid_price: Some("synchronous hook task exited without reporting its charge".into()),
+            ..Default::default()
+        })
     }
 
     fn schedule(self, session: Arc<Session>, event: ModelRequestHookEvent) {
@@ -193,7 +210,7 @@ impl SamplingAttempt {
     pub(crate) fn start_post_hooks(
         &mut self,
         event: ModelRequestHookEvent,
-    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+    ) -> Option<impl Future<Output = ModelRequestHookOutcome> + Send + 'static> {
         let post = self.post.take()?;
         let session = Arc::clone(&self.session);
         if post.mode == HookExecutionMode::Sync {
