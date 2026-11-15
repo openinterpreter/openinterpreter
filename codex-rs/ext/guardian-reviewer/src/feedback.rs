@@ -2,8 +2,7 @@
 //! The host supplies captured context; records outlive short-lived reviewer sessions.
 
 use crate::GuardianReviewSessionOutcome;
-use crate::parse_guardian_assessment;
-use codex_feedback::record_guardian_review_failure;
+use codex_feedback::GuardianReviewRecord;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::GuardianAssessmentOutcome;
@@ -62,13 +61,13 @@ impl<'a> FailedReviewFeedback<'a> {
             return None;
         }
         let (status, decision) = match outcome {
-            GuardianReviewSessionOutcome::Completed(Ok(Some(decision))) => {
-                match parse_guardian_assessment(Some(decision)) {
+            GuardianReviewSessionOutcome::Completed(Ok(Some(response))) => {
+                match response.assessment() {
                     Ok(assessment) if assessment.outcome == GuardianAssessmentOutcome::Allow => {
                         return None;
                     }
-                    Ok(_) => ("denied", Some(decision.as_str())),
-                    Err(_) => ("invalid_decision", Some(decision.as_str())),
+                    Ok(_) => ("denied", Some(response.raw())),
+                    Err(_) => ("invalid_decision", Some(response.raw())),
                 }
             }
             GuardianReviewSessionOutcome::Completed(Ok(None)) => ("missing_decision", None),
@@ -78,11 +77,13 @@ impl<'a> FailedReviewFeedback<'a> {
             | GuardianReviewSessionOutcome::SessionFailed { .. } => ("failed", None),
             GuardianReviewSessionOutcome::TimedOut => ("timed_out", None),
             GuardianReviewSessionOutcome::Aborted => ("aborted", None),
+            // Updated authorization requires a new review, not failed-decision feedback.
+            GuardianReviewSessionOutcome::StaleAuthorization => return None,
         };
         Some(Self { status, decision })
     }
 
-    pub fn store(self, context: ReviewFeedbackContext<'_>) {
+    pub fn into_record(self, context: ReviewFeedbackContext<'_>) -> Option<GuardianReviewRecord> {
         ReviewFeedbackRecord {
             reviewed_thread_id: context.reviewed_thread_id,
             reviewed_turn_id: context.reviewed_turn_id,
@@ -97,12 +98,12 @@ impl<'a> FailedReviewFeedback<'a> {
             decision: self.decision,
             context_omitted: false,
         }
-        .store();
+        .into_record()
     }
 }
 
 impl ReviewFeedbackRecord<'_> {
-    fn store(mut self) {
+    fn into_record(mut self) -> Option<GuardianReviewRecord> {
         let mut buffer = BoundedBuffer(Vec::new());
         if serde_json::to_writer(&mut buffer, &self).is_err() {
             // Preserve the action and decision even when optional reviewer history is too large.
@@ -112,10 +113,10 @@ impl ReviewFeedbackRecord<'_> {
             buffer = BoundedBuffer(Vec::new());
             if serde_json::to_writer(&mut buffer, &self).is_err() {
                 tracing::warn!("Guardian feedback action and decision exceed the record limit");
-                return;
+                return None;
             }
         }
-        record_guardian_review_failure(self.reviewed_thread_id, buffer.0);
+        Some(GuardianReviewRecord::new(self.reviewed_thread_id, buffer.0))
     }
 }
 

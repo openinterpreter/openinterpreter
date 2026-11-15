@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use codex_connectors::metadata::connector_display_label;
+use codex_features::Features;
 use codex_protocol::models::ResponseItem;
 
 use crate::connectors;
@@ -15,26 +16,28 @@ pub(crate) fn build_plugin_injections(
     mentioned_plugins: &[PluginCapabilitySummary],
     mcp_tools: &[ToolInfo],
     available_connectors: &[connectors::AppInfo],
+    features: &Features,
+    model_messages: codex_prompts::ResolvedModelMessages<'_>,
 ) -> Vec<ResponseItem> {
     if mentioned_plugins.is_empty() {
         return Vec::new();
     }
 
-    // Turn each explicit plugin mention into a developer hint that points the
-    // model at the plugin's visible MCP servers, enabled apps, and skill prefix.
+    let messages = model_messages.selected_plugin();
+    // Turn each explicit plugin mention with available capabilities into a developer hint.
     mentioned_plugins
         .iter()
         .filter_map(|plugin| {
             let available_mcp_servers = mcp_tools
                 .iter()
                 .filter(|tool| {
-                    tool.server_name != CODEX_APPS_MCP_SERVER_NAME
+                    tool.server_name() != CODEX_APPS_MCP_SERVER_NAME
                         && tool
                             .plugin_display_names
                             .iter()
                             .any(|plugin_name| plugin_name == &plugin.display_name)
                 })
-                .map(|tool| tool.server_name.clone())
+                .map(|tool| tool.server_name().to_owned())
                 .collect::<BTreeSet<String>>()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -51,9 +54,15 @@ pub(crate) fn build_plugin_injections(
                 .collect::<BTreeSet<String>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            render_explicit_plugin_instructions(plugin, &available_mcp_servers, &available_apps)
-                .map(PluginInstructions::new)
-                .map(ContextualUserFragment::into)
+            render_explicit_plugin_instructions(
+                plugin,
+                &available_mcp_servers,
+                &available_apps,
+                features,
+                &messages,
+            )
+            .map(PluginInstructions::new)
+            .map(ContextualUserFragment::into)
         })
         .collect()
 }

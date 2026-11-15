@@ -1,3 +1,5 @@
+use linkify::LinkFinder;
+
 /// Describes source-specific terms that should be rewritten in migrated artifacts.
 #[derive(Clone, Copy)]
 pub struct RewriteProfile {
@@ -35,8 +37,35 @@ impl RewriteProfile {
         self.case_sensitive_term_variants
     }
 
-    /// Rewrites source-specific documentation names and product terms to their Codex forms.
+    /// Rewrites source-specific terms outside recognized URLs and email addresses.
     pub fn rewrite(self, content: &str) -> String {
+        let mut finder = LinkFinder::new();
+        finder.url_must_have_scheme(/* url_must_have_scheme */ false);
+        let mut rewritten = String::with_capacity(content.len());
+        let mut start = 0;
+        for link in finder.links(content) {
+            // The .md suffix is also a TLD, but this filename must still migrate,
+            // including references with a :line or :line:column suffix.
+            if link.as_str().split(['?', '#']).next().is_some_and(|path| {
+                let mut parts = path.splitn(3, ':');
+                parts
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(self.doc_file_name))
+                    && parts.all(|part| {
+                        !part.is_empty() && part.as_bytes().iter().all(u8::is_ascii_digit)
+                    })
+            }) {
+                continue;
+            }
+            rewritten.push_str(&self.rewrite_terms(&content[start..link.start()]));
+            rewritten.push_str(link.as_str());
+            start = link.end();
+        }
+        rewritten.push_str(&self.rewrite_terms(&content[start..]));
+        rewritten
+    }
+
+    fn rewrite_terms(self, content: &str) -> String {
         let mut rewritten =
             replace_case_insensitive_with_boundaries(content, self.doc_file_name, "AGENTS.md");
         for from in self.term_variants {

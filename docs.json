@@ -36,11 +36,7 @@
           "docs/portability",
           {
             "group": "Concepts",
-            "pages": [
-              "docs/models",
-              "docs/harness",
-              "docs/subagents"
-            ]
+            "pages": ["docs/models", "docs/harness", "docs/subagents"]
           }
         ]
       },
@@ -93,17 +89,11 @@
           },
           {
             "group": "Extensions",
-            "pages": [
-              "docs/mcp",
-              "docs/plugins",
-              "docs/hooks"
-            ]
+            "pages": ["docs/mcp", "docs/plugins", "docs/hooks"]
           },
           {
             "group": "Performance",
-            "pages": [
-              "docs/speed"
-            ]
+            "pages": ["docs/speed"]
           }
         ]
       },
@@ -128,19 +118,11 @@
       },
       {
         "group": "Project",
-        "pages": [
-          "docs/contributing",
-          "docs/project-license",
-          "docs/license"
-        ]
+        "pages": ["docs/contributing", "docs/project-license", "docs/license"]
       },
       {
         "group": "Reference",
-        "pages": [
-          "docs/install",
-          "docs/windows",
-          "docs/example-config"
-        ]
+        "pages": ["docs/install", "docs/windows", "docs/example-config"]
       }
     ]
   }

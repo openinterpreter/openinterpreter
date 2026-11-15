@@ -146,6 +146,23 @@ async fn turn_interrupt_aborts_running_turn() -> Result<()> {
     assert_eq!(completed.thread_id, thread_id);
     assert_eq!(completed.turn.status, TurnStatus::Interrupted);
 
+    let repeat_id = mcp
+        .send_turn_interrupt_request(TurnInterruptParams { thread_id, turn_id })
+        .await?;
+    let repeat_err = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(repeat_id)),
+    )
+    .await??;
+    assert_eq!(
+        repeat_err.error,
+        JSONRPCErrorError {
+            code: INVALID_REQUEST_ERROR_CODE,
+            message: "no active turn to interrupt".to_string(),
+            data: None,
+        }
+    );
+
     Ok(())
 }
 
@@ -239,6 +256,7 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
     ];
 
     let tmp = TempDir::new()?;
+    let traces = TempDir::new()?;
     let codex_home = tmp.path().join("codex_home");
     std::fs::create_dir(&codex_home)?;
     let working_directory = tmp.path().join("workdir");
@@ -259,6 +277,7 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(&codex_home)
+        .with_env_overrides(&[("CODEX_ROLLOUT_TRACE_ROOT", traces.path().to_str())])
         .build_initialized()
         .await?;
 
@@ -323,6 +342,19 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
     .await??;
     assert_eq!(completed.thread_id, thread.id);
     assert_eq!(completed.turn.status, TurnStatus::Interrupted);
+
+    assert!(mcp.shutdown_gracefully().await?.success());
+    let bundles = std::fs::read_dir(traces.path())?.collect::<std::io::Result<Vec<_>>>()?;
+    let [bundle] = bundles.as_slice() else {
+        anyhow::bail!("expected one trace bundle, got {}", bundles.len());
+    };
+    let trace = codex_rollout_trace::replay_bundle(bundle.path())?;
+    let call = &trace.tool_calls["call_sleep_approval"];
+    assert_eq!(
+        call.execution.status,
+        codex_rollout_trace::ExecutionStatus::Aborted
+    );
+    assert!(call.execution.ended_at_unix_ms >= Some(call.execution.started_at_unix_ms));
 
     Ok(())
 }

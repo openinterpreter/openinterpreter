@@ -45,7 +45,8 @@ pub struct AgentThread {
     pub execution: ExecutionWindow,
     /// Configured model presentation hint. Individual inference calls carry the actual upstream model.
     pub default_model: Option<String>,
-    /// Logical conversation items first observed for this thread, in transcript order.
+    /// Accepted model-visible conversation in transcript order. Unaccepted
+    /// response items remain in the graph, reachable through their inference call.
     pub conversation_item_ids: Vec<ConversationItemId>,
 }
 
@@ -54,6 +55,8 @@ pub struct AgentThread {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum AgentOrigin {
     Root,
+    /// Child session metadata was omitted by a capture limit.
+    Unknown,
     Spawned {
         parent_thread_id: AgentThreadId,
         /// Interaction edge that carried the spawn task.

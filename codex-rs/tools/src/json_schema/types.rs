@@ -29,46 +29,52 @@ pub enum JsonSchemaPrimitiveType {
 #[serde(untagged)]
 pub enum JsonSchemaType {
     Single(JsonSchemaPrimitiveType),
-    Multiple(Vec<JsonSchemaPrimitiveType>),
+    Multiple(Box<[JsonSchemaPrimitiveType]>),
 }
 
 /// Generic JSON-Schema subset needed for our tool definitions.
+///
+/// Stored strings and sequences do not grow, so they do not retain spare capacity.
+/// Optional maps are boxed because most schema nodes do not contain them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct JsonSchema {
+    /// Explicit ordinary MCP server input schema limit; never sent as JSON Schema.
+    #[serde(skip)]
+    pub mcp_input_schema_max_bytes: Option<usize>,
     #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
-    pub schema_ref: Option<String>,
+    pub schema_ref: Option<Box<str>>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<JsonSchemaType>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<Box<str>>,
     /// Responses-only marker for reviewed encrypted tool parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<JsonValue>>,
+    pub enum_values: Option<Box<[JsonValue]>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<JsonSchema>>,
     #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, JsonSchema>>,
+    pub properties: Option<Box<BTreeMap<String, JsonSchema>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub required: Option<Vec<String>>,
+    pub required: Option<Box<[String]>>,
     #[serde(
         rename = "additionalProperties",
         skip_serializing_if = "Option::is_none"
     )]
     pub additional_properties: Option<AdditionalProperties>,
     #[serde(rename = "anyOf", skip_serializing_if = "Option::is_none")]
-    pub any_of: Option<Vec<JsonSchema>>,
+    pub any_of: Option<Box<[JsonSchema]>>,
     #[serde(rename = "oneOf", skip_serializing_if = "Option::is_none")]
-    pub one_of: Option<Vec<JsonSchema>>,
+    pub one_of: Option<Box<[JsonSchema]>>,
     #[serde(rename = "allOf", skip_serializing_if = "Option::is_none")]
-    pub all_of: Option<Vec<JsonSchema>>,
+    pub all_of: Option<Box<[JsonSchema]>>,
     #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
-    pub defs: Option<BTreeMap<String, JsonSchema>>,
+    pub defs: Option<Box<BTreeMap<String, JsonSchema>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub definitions: Option<BTreeMap<String, JsonSchema>>,
+    pub definitions: Option<Box<BTreeMap<String, JsonSchema>>>,
 }
 
 impl JsonSchema {
@@ -76,31 +82,31 @@ impl JsonSchema {
     fn typed(schema_type: JsonSchemaPrimitiveType, description: Option<String>) -> Self {
         Self {
             schema_type: Some(JsonSchemaType::Single(schema_type)),
-            description,
+            description: description.map(String::into_boxed_str),
             ..Default::default()
         }
     }
 
     pub fn any_of(variants: Vec<JsonSchema>, description: Option<String>) -> Self {
         Self {
-            description,
-            any_of: Some(variants),
+            description: description.map(String::into_boxed_str),
+            any_of: Some(variants.into_boxed_slice()),
             ..Default::default()
         }
     }
 
     pub fn one_of(variants: Vec<JsonSchema>, description: Option<String>) -> Self {
         Self {
-            description,
-            one_of: Some(variants),
+            description: description.map(String::into_boxed_str),
+            one_of: Some(variants.into_boxed_slice()),
             ..Default::default()
         }
     }
 
     pub fn all_of(variants: Vec<JsonSchema>, description: Option<String>) -> Self {
         Self {
-            description,
-            all_of: Some(variants),
+            description: description.map(String::into_boxed_str),
+            all_of: Some(variants.into_boxed_slice()),
             ..Default::default()
         }
     }
@@ -133,8 +139,8 @@ impl JsonSchema {
     pub fn string_enum(values: Vec<JsonValue>, description: Option<String>) -> Self {
         Self {
             schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String)),
-            description,
-            enum_values: Some(values),
+            description: description.map(String::into_boxed_str),
+            enum_values: Some(values.into_boxed_slice()),
             ..Default::default()
         }
     }
@@ -142,7 +148,7 @@ impl JsonSchema {
     pub fn array(items: JsonSchema, description: Option<String>) -> Self {
         Self {
             schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Array)),
-            description,
+            description: description.map(String::into_boxed_str),
             items: Some(Box::new(items)),
             ..Default::default()
         }
@@ -155,8 +161,8 @@ impl JsonSchema {
     ) -> Self {
         Self {
             schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object)),
-            properties: Some(properties),
-            required,
+            properties: Some(Box::new(properties)),
+            required: required.map(Vec::into_boxed_slice),
             additional_properties,
             ..Default::default()
         }

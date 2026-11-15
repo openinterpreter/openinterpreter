@@ -20,6 +20,9 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 
+#[path = "app_tool_exposure_strict_tests.rs"]
+mod strict_tests;
+
 struct AppsServer(Vec<ToolExposureSurface>);
 
 impl McpServerContributor<Config> for AppsServer {

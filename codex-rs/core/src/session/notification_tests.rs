@@ -45,14 +45,33 @@ async fn task_finish_preserves_notification_budget_and_queued_user_input() {
     let mut current = turn.initial_settings.as_ref().clone();
     Arc::make_mut(&mut current.model_info).truncation_policy =
         codex_protocol::openai_models::TruncationPolicyConfig::tokens(/*limit*/ 400);
-    turn.next_step_input.store(Arc::new(StepInputs {
-        settings: Arc::new(current),
-        environments: turn.next_step_input.load().environments.clone(),
-    }));
+    turn.next_step_settings.store(Arc::new(current));
 
-    session
-        .on_task_finished(Arc::clone(&turn), /*task_result*/ Ok(None))
-        .await;
+    // Stall recording the first batch, then inject while finalization is in progress.
+    let state = session.state.lock().await;
+    let finish = session.on_task_finished(Arc::clone(&turn), /*task_result*/ Ok(None));
+    let late = vec![notification("late notification".to_string())];
+    tokio::join!(finish, async {
+        while session
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .expect("turn remains active while final recording is blocked")
+            .finishing
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+        // Admission is closed even if recording has not yet reached the history lock.
+        let notice = vec![notification("producer still running".to_string())];
+        assert_eq!(session.inject_if_running(notice.clone()).await, Err(notice));
+        let inject = session.inject_client_response_items(late.clone(), &turn);
+        tokio::pin!(inject);
+        assert!(futures::poll!(inject.as_mut()).is_pending());
+        drop(state);
+        inject.await;
+    });
 
     let expected = vec![
         notification(codex_utils_output_truncation::truncate_text(
@@ -60,6 +79,7 @@ async fn task_finish_preserves_notification_budget_and_queued_user_input() {
             codex_utils_output_truncation::TruncationPolicy::Tokens(120),
         )),
         session.response_item_from_user_input(user_input),
+        late[0].clone(),
     ];
     let history = session.clone_history().await;
     assert_eq!(

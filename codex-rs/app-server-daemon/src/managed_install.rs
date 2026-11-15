@@ -239,20 +239,67 @@ pub(crate) async fn managed_codex_version(codex_bin: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutableIdentity {
-    digest: [u8; 32],
+    pub(crate) digest: [u8; 32],
+    // Distinguish release generations whose executable bytes are identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path_digest: Option<[u8; 32]>,
+}
+
+impl ExecutableIdentity {
+    pub(crate) fn same_contents(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
 }
 
 pub(crate) async fn executable_identity(executable: &Path) -> Result<ExecutableIdentity> {
-    let bytes = fs::read(executable)
-        .await
-        .with_context(|| format!("failed to read executable {}", executable.display()))?;
-    Ok(executable_identity_from_bytes(&bytes))
+    let executable = executable.to_path_buf();
+    // Debug executables can be hundreds of MB. Stream the digest off the async
+    // runtime instead of allocating the whole file and blocking a runtime thread.
+    tokio::task::spawn_blocking(move || {
+        let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
+        let mut identity = std::fs::File::open(&executable)
+            .and_then(executable_identity_from_reader)
+            .with_context(|| format!("failed to read executable {}", executable.display()))?;
+        identity.path_digest = Some(path_digest(&executable));
+        Ok(identity)
+    })
+    .await
+    .context("executable identity task failed")?
+}
+
+pub(crate) fn executable_identity_from_reader(
+    reader: impl std::io::Read,
+) -> std::io::Result<ExecutableIdentity> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(reader)?;
+    Ok(ExecutableIdentity {
+        digest: *hasher.finalize().as_bytes(),
+        path_digest: None,
+    })
 }
 
 pub(crate) fn executable_identity_from_bytes(bytes: &[u8]) -> ExecutableIdentity {
     ExecutableIdentity {
         digest: *blake3::hash(bytes).as_bytes(),
+        path_digest: None,
     }
+}
+
+pub(crate) fn path_digest(path: &Path) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(path.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            hasher.update(&unit.to_le_bytes());
+        }
+    }
+    *hasher.finalize().as_bytes()
 }
 
 fn managed_codex_file_name() -> &'static str {

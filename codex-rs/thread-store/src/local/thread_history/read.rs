@@ -52,6 +52,7 @@ pub(super) struct RolloutHistoryPosition {
 pub(super) struct StoredTurnRow {
     pub position: RolloutHistoryPosition,
     pub turn_id: String,
+    pub root_turn_id: Option<String>,
     pub status: StoredTurnStatus,
     pub error: Option<StoredTurnError>,
     pub started_at: Option<i64>,
@@ -62,19 +63,23 @@ pub(super) struct StoredTurnRow {
     pub summary_items: Vec<StoredThreadItem>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 pub(super) struct StoredSummaryColumns {
     summary_first_user_turn_id: Option<String>,
     summary_first_user_item_id: Option<String>,
     summary_first_user_rollout_ordinal: Option<i64>,
     summary_first_user_updated_at_ordinal: Option<i64>,
     summary_first_user_created_at_ms: Option<i64>,
+    summary_first_user_started_at_ms: Option<i64>,
+    summary_first_user_completed_at_ms: Option<i64>,
     summary_first_user_item_json: Option<String>,
     summary_final_agent_turn_id: Option<String>,
     summary_final_agent_item_id: Option<String>,
     summary_final_agent_rollout_ordinal: Option<i64>,
     summary_final_agent_updated_at_ordinal: Option<i64>,
     summary_final_agent_created_at_ms: Option<i64>,
+    summary_final_agent_started_at_ms: Option<i64>,
+    summary_final_agent_completed_at_ms: Option<i64>,
     summary_final_agent_item_json: Option<String>,
 }
 
@@ -84,6 +89,8 @@ struct StoredSummaryItemColumns {
     rollout_ordinal: Option<i64>,
     updated_at_ordinal: Option<i64>,
     created_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
+    completed_at_ms: Option<i64>,
     item_json: Option<String>,
 }
 
@@ -104,7 +111,9 @@ pub(in crate::local) async fn list_turns(
     )
     .await?;
     validate_page_size(params.page_size)?;
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let pool = store.thread_history_db().await?;
     let page = page_turn_rows(
         pool,
@@ -133,6 +142,7 @@ pub(in crate::local) async fn list_turns(
         };
         turns.push(StoredTurn {
             turn_id: turn.turn_id,
+            root_turn_id: turn.root_turn_id,
             items,
             items_view: params.items_view,
             status: turn.status,
@@ -152,7 +162,7 @@ pub(in crate::local) async fn list_turns(
 
 pub(in crate::local) async fn list_items(
     store: &LocalThreadStore,
-    params: ListItemsParams,
+    mut params: ListItemsParams,
 ) -> ThreadStoreResult<ItemPage> {
     validate_thread_for_paginated_reads(
         store,
@@ -161,8 +171,26 @@ pub(in crate::local) async fn list_items(
         "list_items",
     )
     .await?;
+    if let Some(ids) = &params.item_ids {
+        if params.turn_id.is_none()
+            || params.position.is_some()
+            || params.after_updated_at_ordinal.is_some()
+            || params.before_updated_at_ordinal.is_some()
+            || params.sort_key != crate::ItemSortKey::CreatedAtOrdinal
+            || !(1..=100).contains(&ids.len())
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: "itemIds requires turnId, 1 to 100 IDs, and no cursor or update replay"
+                    .to_string(),
+            });
+        }
+        params.page_size = ids.len();
+        params.sort_direction = crate::SortDirection::Asc;
+    }
     validate_page_size(params.page_size)?;
-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let lineage = store
+        .resolve_rollout_lineage_for_history_page(params.thread_id)
+        .await?;
     let pool = store.thread_history_db().await?;
     let page = page_item_rows(pool, &lineage, &params).await?;
 
@@ -223,7 +251,7 @@ async fn load_inherited_summary_items(
         .transpose()?;
     let rows = sqlx::query(
         r#"
-SELECT turn_id, item_id, updated_at_ordinal, created_at_ms, item_json
+SELECT turn_id, item_id, updated_at_ordinal, created_at_ms, started_at_ms, completed_at_ms, item_json
 FROM thread_items
 WHERE thread_id = ?
   AND turn_id = ?
@@ -302,6 +330,7 @@ pub(super) fn stored_turn_row(row: sqlx::sqlite::SqliteRow) -> ThreadStoreResult
             rollout_ordinal: row.try_get("rollout_ordinal")?,
         },
         turn_id: row.try_get("turn_id")?,
+        root_turn_id: row.try_get("root_turn_id")?,
         status,
         error,
         started_at: row.try_get("started_at")?,
@@ -322,6 +351,8 @@ impl StoredSummaryColumns {
                 rollout_ordinal: self.summary_first_user_rollout_ordinal,
                 updated_at_ordinal: self.summary_first_user_updated_at_ordinal,
                 created_at_ms: self.summary_first_user_created_at_ms,
+                started_at_ms: self.summary_first_user_started_at_ms,
+                completed_at_ms: self.summary_first_user_completed_at_ms,
                 item_json: self.summary_first_user_item_json,
             }
             .into_stored_item()?,
@@ -331,6 +362,8 @@ impl StoredSummaryColumns {
                 rollout_ordinal: self.summary_final_agent_rollout_ordinal,
                 updated_at_ordinal: self.summary_final_agent_updated_at_ordinal,
                 created_at_ms: self.summary_final_agent_created_at_ms,
+                started_at_ms: self.summary_final_agent_started_at_ms,
+                completed_at_ms: self.summary_final_agent_completed_at_ms,
                 item_json: self.summary_final_agent_item_json,
             }
             .into_stored_item()?,
@@ -373,6 +406,8 @@ impl StoredSummaryItemColumns {
                 item_id,
                 updated_at_ordinal: stored_updated_at_ordinal(updated_at_ordinal)?,
                 created_at_ms,
+                started_at_ms: self.started_at_ms,
+                completed_at_ms: self.completed_at_ms,
                 item_json: item_json.into_bytes(),
             },
         )))
@@ -401,6 +436,8 @@ fn stored_thread_item(row: sqlx::sqlite::SqliteRow) -> ThreadStoreResult<StoredT
         item_id: row.try_get("item_id")?,
         updated_at_ordinal,
         created_at_ms: row.try_get("created_at_ms")?,
+        started_at_ms: row.try_get("started_at_ms")?,
+        completed_at_ms: row.try_get("completed_at_ms")?,
         item_json: row.try_get::<String, _>("item_json")?.into_bytes(),
     })
 }

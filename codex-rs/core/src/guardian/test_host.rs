@@ -27,8 +27,12 @@ pub(crate) fn install(session: &Session, config: &Config) {
     );
     let manager = Arc::new(crate::ThreadManager::new(
         config,
-        Arc::clone(&session.services.auth_manager),
-        Arc::clone(&session.services.models_manager),
+        crate::build_startup_models(
+            config,
+            Arc::clone(&session.services.auth_manager),
+            session.installation_id.clone(),
+            crate::test_support::fixed_model_catalog(Arc::clone(&session.services.models_manager)),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         session.services.turn_environments.environment_manager(),
@@ -40,7 +44,6 @@ pub(crate) fn install(session: &Session, config: &Config) {
         crate::passthrough_image_store(),
         Arc::clone(&session.services.thread_store),
         /*agent_graph_store*/ None,
-        session.installation_id.clone(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     ));
@@ -58,7 +61,7 @@ pub(crate) fn install(session: &Session, config: &Config) {
                 let runtime = Arc::clone(&runtime);
                 Box::pin(async move {
                     let history_reset = context.history_reset.clone();
-                    let (mut options, state) = context.thread_options(snapshot).await;
+                    let (mut options, state) = context.thread_options(kind, snapshot).await;
                     if matches!(
                         kind,
                         codex_analytics::GuardianReviewSessionKind::EphemeralForked

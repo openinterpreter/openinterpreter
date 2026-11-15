@@ -52,6 +52,7 @@ pub(crate) enum StatusDetailsCapitalization {
 }
 
 /// Displays a single-line in-progress status with optional wrapped details.
+#[derive(Clone, Debug)]
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
@@ -113,6 +114,11 @@ impl StatusIndicatorWidget {
 
     pub(crate) fn interrupt(&self) {
         self.app_event_tx.interrupt();
+    }
+
+    pub(crate) fn set_motion_preferences(&mut self, tui: &codex_config::types::Tui) {
+        self.animations_enabled = tui.animations;
+        self.effects = tui.effects;
     }
 
     /// Update the animated header label (left of the brackets).

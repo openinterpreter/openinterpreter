@@ -14,7 +14,9 @@ fn composer() -> ChatComposer {
         /*disable_paste_burst*/ true,
     );
     composer.set_status_line_enabled(/*enabled*/ true);
-    composer.set_status_line(Some(Line::from("MODEL · ~/project · Context 20% used")));
+    composer.set_status_line(Some(
+        Line::from("MODEL · ~/project · Context 20% used").into(),
+    ));
     composer
 }
 
@@ -282,6 +284,41 @@ fn transcript_search_keeps_status_and_query_cursor() {
     let (text, cursor) = render(&composer, /*width*/ 48, Some(&footer));
     assert_eq!(cursor, Some((10, text.lines().count() as u16 - 2)));
     assert!(text.contains("MODEL · ~/project · Context 20% used"));
+}
+
+#[test]
+fn long_status_wraps_into_bounded_rows_and_dims_when_unfocused() {
+    let mut composer = composer();
+    composer.set_status_line(Some(
+        Line::from("First detail and second detail and third detail and fourth detail").into(),
+    ));
+    let width = 26;
+    let options = composer.resolve_render_options(ComposerRenderOptions {
+        separate_status_line: true,
+        ..ComposerRenderOptions::default()
+    });
+    let height = composer.desired_height_with_options(width, options);
+    let area = Rect::new(0, 0, width, height);
+    let status = composer.layout_with_options(area, options).status;
+    assert!(status.height > 1, "status must retain multiple rows");
+    assert!(status.height <= 4, "status stays within the footer cap");
+
+    let unfocused = ComposerRenderOptions {
+        unfocused: true,
+        ..options
+    };
+    let mut passive = Buffer::empty(area);
+    composer.render_with_options(area, &mut passive, None, unfocused);
+    let passive_status = composer.layout_with_options(area, unfocused).status;
+    assert!(passive_status.height > 1);
+    let inset = inset_footer_hint_area(passive_status);
+    for y in inset.y..inset.bottom() {
+        assert!(
+            passive[(inset.x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+    }
 }
 
 #[test]

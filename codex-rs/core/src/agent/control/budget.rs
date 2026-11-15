@@ -9,8 +9,16 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::TokenUsage;
 
 impl LocalAgentControl {
-    pub(crate) fn record_rollout_budget_usage(&self, usage: &TokenUsage) -> CodexResult<()> {
-        if self.rollout_budget.record_usage(usage)? {
+    pub(crate) fn record_rollout_budget_usage(
+        &self,
+        usage: Option<&TokenUsage>,
+        hook_charge: codex_hooks::HookCharge,
+    ) -> CodexResult<()> {
+        if self
+            .runtime
+            .rollout_budget
+            .record_usage(usage, hook_charge)?
+        {
             return Err(CodexErr::SessionBudgetExceeded);
         }
         Ok(())
@@ -21,7 +29,9 @@ impl LocalAgentControl {
         thread_id: ThreadId,
         window_id: &str,
     ) -> Option<RolloutBudgetReminder> {
-        self.rollout_budget.pending_reminder(thread_id, window_id)
+        self.runtime
+            .rollout_budget
+            .pending_reminder(thread_id, window_id)
     }
 
     pub(crate) fn mark_budget_reminder_delivered(
@@ -30,7 +40,8 @@ impl LocalAgentControl {
         window_id: &str,
         reminder: RolloutBudgetReminder,
     ) {
-        self.rollout_budget
+        self.runtime
+            .rollout_budget
             .mark_reminder_delivered(thread_id, window_id, reminder);
     }
 }

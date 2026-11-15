@@ -88,6 +88,7 @@ fn rollout_items_from_messages(messages: Vec<ConversationMessage>) -> Vec<Rollou
                 let turn_id = format!("external-import-turn-{user_turn_count}");
                 items.push(RolloutItem::EventMsg(EventMsg::TurnStarted(
                     TurnStartedEvent {
+                        turn_attribution: None,
                         turn_id: turn_id.clone(),
                         root_turn_id: None,
                         trace_id: None,
@@ -116,6 +117,7 @@ fn rollout_items_from_messages(messages: Vec<ConversationMessage>) -> Vec<Rollou
                 last_model_visible_tokens = approx_tokens_from_byte_count_i64(response_item_bytes);
                 items.push(RolloutItem::EventMsg(EventMsg::AgentMessage(
                     AgentMessageEvent {
+                        moderation: None,
                         message: message.text.clone(),
                         phase: None,
                         memory_citation: None,
@@ -139,6 +141,7 @@ fn rollout_items_from_messages(messages: Vec<ConversationMessage>) -> Vec<Rollou
 
 fn external_session_imported_marker_item() -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+        moderation: None,
         message: EXTERNAL_SESSION_IMPORTED_MARKER.to_string(),
         phase: None,
         memory_citation: None,
@@ -149,10 +152,16 @@ fn external_session_imported_marker_item() -> RolloutItem {
 
 fn response_item(message: ConversationMessage) -> ResponseItem {
     let content = match message.role {
-        MessageRole::Assistant => ContentItem::OutputText { text: message.text },
+        MessageRole::Assistant => ContentItem::OutputText {
+            text: message.text,
+            annotations: None,
+            logprobs: None,
+        },
         MessageRole::User => ContentItem::InputText { text: message.text },
     };
     ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: match message.role {
             MessageRole::Assistant => "assistant".to_string(),
@@ -175,6 +184,7 @@ fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
     };
     RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
         info: Some(TokenUsageInfo {
+            last_usage_includes_reasoning: None,
             total_token_usage: usage.clone(),
             last_token_usage: usage,
             model_context_window: None,
@@ -185,6 +195,7 @@ fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
 
 fn turn_complete_item(turn_id: String, completed_at: Option<i64>) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        root_turn_id: None,
         turn_id,
         last_agent_message: None,
         error: None,
@@ -199,6 +210,7 @@ fn turn_complete_item(turn_id: String, completed_at: Option<i64>) -> RolloutItem
 mod tests {
     use super::*;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadItemPayload;
     use codex_app_server_protocol::build_turns_from_rollout_items;
     use codex_rollout::ResponseItemEnvelope;
     use serde_json::Value as JsonValue;
@@ -231,14 +243,15 @@ mod tests {
         assert_eq!(turns[1].items.len(), 2);
         assert_eq!(
             turns[1].items[1],
-            ThreadItem::AgentMessage {
+            ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "item-4".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            }
+            })
         );
     }
 
@@ -265,14 +278,15 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].items.last(),
-            Some(&ThreadItem::AgentMessage {
+            Some(&ThreadItem::untimed(ThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "item-3".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            })
+            }))
         );
         let last_turn_complete = imported
             .rollout_items

@@ -123,16 +123,31 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
 
     // Run server in background
     let server_home = codex_home.clone();
+    let content = codex_http_client::NetworkPolicyController::default();
+    let local = codex_http_client::NetworkPolicyController::default();
+    let local_policy = local.policy();
+    local.publish(
+        local_policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    );
+    let factory = codex_http_client::HttpClientFactory::new(
+        codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+    );
+    let routes = codex_login::AuthRouteConfig::from_http_client_factory(
+        factory.clone().with_network_policy(content.policy()),
+    )
+    .with_local_bootstrap_factory(factory.with_network_policy(local_policy));
 
     let opts = ServerOptions {
         codex_home: server_home,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        auth_route_config: codex_login::test_support::transport_default_auth_route_config(),
+        auth_route_config: routes,
         client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
+        issuer: issuer.clone(),
         port: 0,
         open_browser: false,
         force_state: Some(state),
+        workspace_login: None,
         forced_chatgpt_workspace_id: Some(vec![chatgpt_account_id.to_string()]),
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -146,6 +161,14 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         "auth URL should include forced workspace parameter"
     );
     let login_port = server.actual_port;
+    let callback_url = Url::parse(&server.auth_url)?
+        .query_pairs()
+        .find_map(|(key, value)| (key == "redirect_uri").then(|| value.into_owned()))
+        .expect("auth URL should include a redirect URI");
+    assert_eq!(
+        callback_url,
+        format!("http://127.0.0.1:{login_port}/auth/callback")
+    );
 
     // Simulate browser callback and assert the local success redirect before following it.
     let client = HttpClientBuilder::new()
@@ -179,11 +202,13 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let url = format!(
         "http://127.0.0.1:{login_port}/auth/callback?code=abc&state=test_state_123.onboarding_entrypoint=life_sciences"
     );
+    let url =
+        format!("{callback_url}?code=abc&state=test_state_123.onboarding_entrypoint=life_sciences");
     let resp = client.get(&url).send().await?;
     assert_eq!(resp.status(), 302);
     let success_url = resp.headers()["location"].to_str()?;
     let success_url = Url::parse(success_url)?;
-    assert_eq!(success_url.host_str(), Some("localhost"));
+    assert_eq!(success_url.origin(), Url::parse(&callback_url)?.origin());
     assert_eq!(success_url.path(), "/success");
 
     let success_resp = client.get(success_url).send().await?;
@@ -209,6 +234,12 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     assert_eq!(json["tokens"]["access_token"], "access-123");
     assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
     assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
+    let login_owner_id = json["tokens"]["login_owner_id"].as_str().unwrap();
+    assert!(!login_owner_id.is_empty());
+    assert_eq!(
+        json["tokens"]["oauth_provenance"],
+        serde_json::json!({ "issuer": issuer, "client_id": codex_login::CLIENT_ID })
+    );
 
     // Stop mock issuer
     drop(issuer_handle);
@@ -231,6 +262,7 @@ async fn hosted_login_redirects_to_configured_open_app_url() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some("streamlined_state".to_string()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         login_success_page: LoginSuccessPage::Hosted {
@@ -284,6 +316,7 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -327,6 +360,7 @@ async fn login_server_includes_forced_workspaces_as_one_query_param() -> Result<
         port: 0,
         open_browser: false,
         force_state: Some(state),
+        workspace_login: None,
         forced_chatgpt_workspace_id: Some(vec![
             WORKSPACE_ID_ALLOWED.to_string(),
             WORKSPACE_ID_SECOND_ALLOWED.to_string(),
@@ -371,6 +405,7 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some(state.clone()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -434,6 +469,7 @@ async fn oauth_access_denied_missing_entitlement_blocks_login_with_clear_error()
         port: 0,
         open_browser: false,
         force_state: Some(state.clone()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -505,6 +541,7 @@ async fn oauth_access_denied_unknown_reason_uses_generic_error_page() -> Result<
         port: 0,
         open_browser: false,
         force_state: Some(state.clone()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -630,7 +667,7 @@ async fn falls_back_to_registered_fallback_port_when_default_port_is_in_use() ->
 
     assert_eq!(actual_port, FALLBACK_LOGIN_PORT);
     assert!(auth_url.contains(&format!(
-        "redirect_uri=http%3A%2F%2Flocalhost%3A{FALLBACK_LOGIN_PORT}%2Fauth%2Fcallback"
+        "redirect_uri=http%3A%2F%2F127.0.0.1%3A{FALLBACK_LOGIN_PORT}%2Fauth%2Fcallback"
     )));
 
     Ok(())
@@ -655,6 +692,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         port: 0,
         open_browser: false,
         force_state: Some("cancel_state".to_string()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
@@ -679,6 +717,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         port: login_port,
         open_browser: false,
         force_state: Some("cancel_state_2".to_string()),
+        workspace_login: None,
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,

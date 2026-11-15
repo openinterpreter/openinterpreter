@@ -1,6 +1,7 @@
 use super::CodexErrorInfo;
 use super::ThreadEnvironment;
 use super::ThreadItem;
+use super::ThreadItemPayload;
 use super::ThreadStatus;
 use super::TurnStatus;
 use crate::JsonSchema;
@@ -217,6 +218,9 @@ pub struct Thread {
     pub session_id: String,
     /// Source thread id when this thread was created by forking another thread.
     pub forked_from_id: Option<String>,
+    /// Parent that owns this persisted attached thread, independent of fork or spawn lineage.
+    #[experimental("thread.attachedToThreadId")]
+    pub attached_to_thread_id: Option<String>,
     /// The ID of the parent thread. This will only be set if this thread is a subagent.
     pub parent_thread_id: Option<String>,
     /// Usually the first user message in the thread, if available.
@@ -304,6 +308,7 @@ struct ThreadCompatibility {
     extra: Option<ThreadExtra>,
     session_id: String,
     forked_from_id: Option<String>,
+    attached_to_thread_id: Option<String>,
     parent_thread_id: Option<String>,
     preview: String,
     ephemeral: bool,
@@ -349,6 +354,7 @@ impl<'de> Deserialize<'de> for Thread {
             extra: thread.extra,
             session_id: thread.session_id,
             forked_from_id: thread.forked_from_id,
+            attached_to_thread_id: thread.attached_to_thread_id,
             parent_thread_id: thread.parent_thread_id,
             preview: thread.preview,
             ephemeral: thread.ephemeral,
@@ -386,13 +392,17 @@ impl<'de> Deserialize<'de> for Thread {
 pub struct Turn {
     /// Identifier for this turn. Codex-generated turn IDs are UUIDv7.
     pub id: String,
+    /// ID of the first turn in the chain of work that led to this turn.
+    /// Pass this as `rootTurnId` when starting work on behalf of this turn.
+    /// May be null in older history or a `review/start` response.
+    pub root_turn_id: Option<String>,
     /// Thread items currently included in this turn payload.
     pub items: Vec<ThreadItem>,
     /// Describes how much of `items` has been loaded for this turn.
     #[serde(default)]
     pub items_view: TurnItemsView,
     pub status: TurnStatus,
-    /// Only populated when the Turn's status is failed.
+    /// Error associated with a failed or interrupted turn.
     pub error: Option<TurnError>,
     /// Unix timestamp (in seconds) when the turn started.
     #[ts(type = "number | null")]
@@ -403,6 +413,15 @@ pub struct Turn {
     /// Duration between turn start and completion in milliseconds, if known.
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
+}
+
+impl Turn {
+    /// Iterates over the item payloads in this turn.
+    pub fn item_payloads(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &ThreadItemPayload> + ExactSizeIterator {
+        self.items.iter().map(|item| &item.payload)
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -442,6 +461,9 @@ pub struct MisalignmentErrorDetails {
     pub detailed_explanation: Option<String>,
     /// Instruction to submit as the next turn's user input if continuation is confirmed.
     pub steer: Option<MisalignmentSteer>,
+    /// Opaque server-issued block target. Presence alone does not enable target-based continuation.
+    #[ts(optional = nullable)]
+    pub review_target: Option<String>,
 }
 
 impl fmt::Debug for MisalignmentErrorDetails {
@@ -454,6 +476,7 @@ impl fmt::Debug for MisalignmentErrorDetails {
                 &self.detailed_explanation.is_some(),
             )
             .field("has_steer", &self.steer.is_some())
+            .field("has_review_target", &self.review_target.is_some())
             .finish()
     }
 }
@@ -464,6 +487,7 @@ impl From<CoreMisalignmentErrorDetails> for MisalignmentErrorDetails {
             error_type: value.error_type,
             detailed_explanation: value.detailed_explanation,
             steer: value.steer.map(Into::into),
+            review_target: value.review_target,
         }
     }
 }

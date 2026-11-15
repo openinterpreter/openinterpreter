@@ -1,9 +1,10 @@
-//! Validates provisioning requests against the standard managed configuration layers.
+//! Validates sandbox provisioning against managed policy; registration-only refresh
+//! retains the existing sandbox and is admitted by the registered-runtime transaction.
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use codex_cloud_config::cloud_config_bundle_loader_for_storage_without_cache;
+use codex_cloud_config::chatgpt_config_bundle_loader_for_storage_without_cache;
 use codex_config::ConfigLoadOptions;
 use codex_config::ConfigRequirementsToml;
 use codex_config::WindowsSandboxImplementationToml;
@@ -17,18 +18,37 @@ use tokio::sync::Notify;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::ImpersonateLoggedOnUser;
 
-pub(crate) fn validate_provisioning_settings(
+use crate::ipc::ProvisioningRequest;
+
+struct NonOwningImpersonationToken(HANDLE);
+
+// SAFETY: Windows access token handles are opaque process-wide values that may
+// be shared between threads. This wrapper does not own the token or extend its
+// lifetime.
+unsafe impl Send for NonOwningImpersonationToken {}
+unsafe impl Sync for NonOwningImpersonationToken {}
+
+pub(crate) fn validate_provisioning_request(
     codex_home: &Path,
-    settings: &WindowsSandboxProvisioningSettings,
-    listeners: &WindowsSandboxProxyListeners,
+    request: &ProvisioningRequest,
     impersonation_token: HANDLE,
 ) -> Result<()> {
+    if request.registered_core && request.refresh_only {
+        // The caller is already authenticated. registered::run checks the existing
+        // owner, accounts and unchanged settings under the setup lock; it cannot
+        // provision or repair a sandbox. Backend use still obeys managed config.
+        // Package maintenance must not require another cloud-policy fetch.
+        return Ok(());
+    }
     let impersonation_failure = Arc::new(Notify::new());
     let worker_impersonation_failure = Arc::clone(&impersonation_failure);
+    let impersonation_token = NonOwningImpersonationToken(impersonation_token);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .on_thread_start(move || {
-            if unsafe { ImpersonateLoggedOnUser(impersonation_token) } == 0 {
+            // Capture the wrapper rather than its raw pointer field.
+            let impersonation_token = &impersonation_token;
+            if unsafe { ImpersonateLoggedOnUser(impersonation_token.0) } == 0 {
                 let error = std::io::Error::last_os_error();
                 worker_impersonation_failure.notify_one();
                 panic!(
@@ -55,7 +75,7 @@ pub(crate) fn validate_provisioning_settings(
                 .context("load bootstrap configuration")?;
                 // Use the default cloud-policy endpoint unless managed requirements override it.
                 bootstrap_config.config_toml.chatgpt_base_url = None;
-                let cloud_config_bundle = cloud_config_bundle_loader_for_storage_without_cache(
+                let cloud_config_bundle = chatgpt_config_bundle_loader_for_storage_without_cache(
                     bootstrap_auth_config(codex_home, &bootstrap_config)
                         .context("resolve cloud configuration authentication")?,
                     /*enable_codex_api_key_env*/ false,
@@ -74,19 +94,19 @@ pub(crate) fn validate_provisioning_settings(
                 .await
                 .context("load managed configuration")?;
 
-                Ok::<_, anyhow::Error>(config.config_layer_stack.requirements_toml().clone())
+                Ok::<_, anyhow::Error>(config.config_layer_stack.requirements().clone())
             } => result,
         }
     })?;
 
-    validate_requirements(settings, listeners, &requirements)
+    validate_requirements(&request.settings, &request.listeners, &requirements)
         .context("enforce managed provisioning requirements")
 }
 
 fn validate_requirements(
     settings: &WindowsSandboxProvisioningSettings,
     listeners: &WindowsSandboxProxyListeners,
-    requirements: &ConfigRequirementsToml,
+    requirements: &ConfigRequirements,
 ) -> Result<()> {
     if requirements
         .windows
@@ -97,7 +117,7 @@ fn validate_requirements(
         bail!("managed policy does not permit the elevated Windows sandbox");
     }
 
-    let Some(network) = requirements.network.as_ref() else {
+    let Some(network) = requirements.network.as_ref().map(|network| &network.value) else {
         return Ok(());
     };
     if network.enabled == Some(false)

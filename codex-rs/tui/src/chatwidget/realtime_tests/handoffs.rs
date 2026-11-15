@@ -1,6 +1,7 @@
 //! Voice delegation routes completed answers without exposing private protocol text.
 
 use super::*;
+use codex_app_server_protocol::ThreadItemPayload;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -186,7 +187,8 @@ async fn delegated_answer_with_async_question_opens_the_editor_instead_of_speech
         turn_id,
         user_item("<realtime_delegation><input>choose</input></realtime_delegation>"),
     );
-    let answer = ThreadItem::AgentMessage {
+    let answer = ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "question-answer".into(),
         text: "Which option?".into(),
         phase: Some(MessagePhase::FinalAnswer),

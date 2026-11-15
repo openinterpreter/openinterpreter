@@ -297,6 +297,15 @@ pub(crate) fn current_syntax_theme() -> Theme {
     }
 }
 
+/// Read the active theme for one render without replacing global theme state.
+pub(crate) fn with_syntax_theme<R>(render: impl FnOnce(&Theme) -> R) -> R {
+    let active_theme = theme_lock();
+    let theme = active_theme
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    render(&theme)
+}
+
 /// An explicit diff background, including the ANSI terminal-default marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiffScopeBackground {
@@ -341,6 +350,17 @@ fn diff_scope_backgrounds_for_theme(theme: &Theme) -> DiffScopeBackgrounds {
     DiffScopeBackgrounds { inserted, deleted }
 }
 
+pub(crate) fn foreground_color_for_scopes(
+    highlighter: &Highlighter<'_>,
+    scope_names: &[&str],
+) -> Option<RtColor> {
+    scope_names.iter().find_map(|scope_name| {
+        let scope = Scope::new(scope_name).ok()?;
+        let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
+        convert_syntect_color(foreground)
+    })
+}
+
 /// Extract the background color for a single TextMate scope, if defined.
 fn scope_background(
     highlighter: &Highlighter<'_>,
@@ -366,12 +386,8 @@ pub(crate) fn foreground_style_for_scopes_with_theme(
     theme: &Theme,
     scope_names: &[&str],
 ) -> Option<Style> {
-    let highlighter = Highlighter::new(theme);
-    scope_names.iter().find_map(|scope_name| {
-        let scope = Scope::new(scope_name).ok()?;
-        let fg = highlighter.style_mod_for_stack(&[scope]).foreground?;
-        convert_syntect_color(fg).map(|fg| Style::default().fg(fg))
-    })
+    foreground_color_for_scopes(&Highlighter::new(theme), scope_names)
+        .map(|foreground| Style::default().fg(foreground))
 }
 
 /// Return the configured kebab-case theme name when it resolves; otherwise

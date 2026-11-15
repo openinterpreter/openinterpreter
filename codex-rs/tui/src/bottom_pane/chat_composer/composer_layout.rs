@@ -7,6 +7,64 @@ use crate::render::renderable::Renderable;
 use crate::tui::FrameRequester;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::layout::Size;
+
+pub(crate) struct FooterLayout {
+    cap: u16,
+    wanted_hints: u16,
+    reserved_hints: u16,
+}
+
+pub(crate) struct FooterRows {
+    status: u16,
+    hints: u16,
+}
+
+impl FooterLayout {
+    pub(crate) fn new(
+        workspace_height: Option<u16>,
+        wanted_hints: u16,
+        priority_hint_rows: u16,
+    ) -> Self {
+        Self {
+            cap: workspace_height.map_or(2, |height| (height.saturating_add(2) / 4).clamp(2, 4)),
+            wanted_hints,
+            reserved_hints: wanted_hints.min(priority_hint_rows),
+        }
+    }
+
+    pub(crate) fn status_budget(&self, available: u16) -> u16 {
+        self.cap.min(available).saturating_sub(self.reserved_hints)
+    }
+
+    pub(crate) fn status_bounds(&self, width: u16, available: u16) -> Size {
+        inset_footer_hint_area(Rect::new(0, 0, width, self.status_budget(available))).as_size()
+    }
+
+    pub(crate) fn allocate(&self, available: u16, wanted_status: u16) -> FooterRows {
+        let limit = self.cap.min(available);
+        let reserved_status = wanted_status.min(1).min(self.status_budget(available));
+        let hints = self.wanted_hints.min(limit - reserved_status);
+        FooterRows {
+            status: wanted_status.min(limit - hints),
+            hints,
+        }
+    }
+}
+
+impl FooterRows {
+    pub(crate) fn height(&self) -> u16 {
+        self.status + self.hints
+    }
+
+    pub(crate) fn status_area(&self, area: Rect) -> Rect {
+        Rect {
+            y: area.bottom().saturating_sub(self.height()).max(area.y),
+            height: self.status,
+            ..area
+        }
+    }
+}
 
 impl ChatComposer {
     pub(crate) fn set_voice_strip(
@@ -42,11 +100,12 @@ impl ChatComposer {
         options: ComposerRenderOptions<'_>,
     ) -> ComposerLayout {
         let footer_hint_height = self.footer_hint_height(area.width, options);
-        // Preserve input and hints before allocating the persistent status row.
-        let status_height = self.status_surface_height(options).min(
-            area.height
-                .saturating_sub(footer_hint_height.saturating_add(/*rhs*/ 3)),
-        );
+        // Preserve the draft and hints before assigning bounded wrapped status rows.
+        let available_status = area
+            .height
+            .saturating_sub(footer_hint_height.saturating_add(/*rhs*/ 3))
+            .min(/*footer cap*/ 4);
+        let status_height = self.status_surface_height(area.width, available_status, options);
         let status = Rect {
             y: area
                 .bottom()
@@ -110,6 +169,20 @@ impl ChatComposer {
             /*bottom*/ 1,
             /*right*/ 1u16.saturating_add(options.textarea_right_reserve),
         ));
+        let thumbnail_height = options
+            .image_previews
+            .map_or(0, |images| {
+                images.height(textarea_rect.width, self.attachments.local_images.len())
+            })
+            .min(textarea_rect.height.saturating_sub(1));
+        let thumbnails = Rect {
+            x: textarea_rect.x,
+            y: textarea_rect.y,
+            width: textarea_rect.width,
+            height: thumbnail_height,
+        };
+        textarea_rect.y = textarea_rect.y.saturating_add(thumbnail_height);
+        textarea_rect.height = textarea_rect.height.saturating_sub(thumbnail_height);
         let remote_images_height = self
             .attachments
             .remote_image_lines()
@@ -131,6 +204,7 @@ impl ChatComposer {
             status,
             composer: composer_rect,
             remote_images: remote_images_rect,
+            thumbnails,
             textarea: textarea_rect,
             popup: popup_rect,
             footer: footer_rect,
@@ -184,9 +258,12 @@ impl ChatComposer {
             .unwrap_or(u16::MAX);
         let remote_images_separator = u16::from(remote_images_height > 0);
         self.draft.textarea.desired_height(inner_width)
+            + options.image_previews.map_or(0, |images| {
+                images.height(inner_width, self.attachments.local_images.len())
+            })
             + remote_images_height
             + remote_images_separator
-            + self.status_surface_height(options)
+            + self.status_surface_height(width, /*footer cap*/ 4, options)
             + if self.shortcuts_above_composer(options) {
                 footer_height(&self.hint_footer_props(options), width)
             } else {

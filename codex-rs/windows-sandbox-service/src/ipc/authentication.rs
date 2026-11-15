@@ -20,7 +20,6 @@ use windows_sys::Win32::Storage::FileSystem as filesystem;
 use windows_sys::Win32::System::Pipes as pipes;
 use windows_sys::Win32::System::Threading as threading;
 
-use super::home::OwnedHandle;
 use super::home::prepare_codex_home;
 use super::request::ServiceRequest;
 
@@ -38,7 +37,7 @@ pub(crate) struct ClientIdentity {
 }
 
 pub(super) fn authenticate_client(
-    pipe: HANDLE,
+    pipe: BorrowedHandle<'_>,
     authorized_process: &crate::package_identity::AuthorizedClientProcess,
     sandbox_sid: &[u8],
     request: &ServiceRequest,
@@ -100,14 +99,15 @@ fn authenticate_impersonated_client(
     {
         return Err(std::io::Error::last_os_error()).context("open provisioning client token");
     }
-    let token = OwnedHandle(raw_token);
-    crate::package_identity::authorize_client(authorized_process, token.0)
+    // SAFETY: OpenThreadToken transferred this handle on success.
+    let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
+    crate::package_identity::authorize_client(authorized_process, token.as_raw_handle())
         .context("authorize the packaged Codex provisioning client")?;
     let mut session = 0_u32;
     let mut returned = 0_u32;
     if unsafe {
         security::GetTokenInformation(
-            token.0,
+            token.as_raw_handle(),
             security::TokenSessionId,
             (&raw mut session).cast(),
             size_of::<u32>() as u32,
@@ -124,7 +124,7 @@ fn authenticate_impersonated_client(
     let mut is_sandbox_member = 0;
     if unsafe {
         security::CheckTokenMembership(
-            token.0,
+            token.as_raw_handle(),
             sandbox_sid.as_ptr() as *mut c_void,
             &mut is_sandbox_member,
         )
@@ -202,7 +202,7 @@ fn authenticate_impersonated_client(
         }
     };
     let desktop_installation =
-        crate::installation_record::read_desktop_installation(&codex_home, token.0)
+        crate::installation_record::read_desktop_installation(&codex_home, token.as_raw_handle())
             .inspect_err(|_| {
                 crate::service::log_error(
                     crate::service::EVENT_SERVICE_FAILED,

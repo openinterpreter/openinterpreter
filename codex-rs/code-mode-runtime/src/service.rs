@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeNestedToolCall;
+use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
+use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
 use codex_code_mode_protocol::CodeModeToolKind;
 use codex_code_mode_protocol::DEFAULT_EXEC_YIELD_TIME_MS;
@@ -15,6 +17,7 @@ use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::StartedCell;
+use codex_code_mode_protocol::TerminateRequest;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use codex_code_mode_protocol::WaitToPendingOutcome;
@@ -23,6 +26,8 @@ use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::cell_actor::take_completed_event;
+use crate::output::OutputCollector;
 use crate::session_runtime as runtime;
 use crate::session_runtime::SessionRuntime;
 
@@ -31,7 +36,7 @@ const MIN_YIELD_TIME_FOR_GRACE: Duration = Duration::from_secs(10);
 
 pub struct InProcessCodeModeSession {
     runtime: SessionRuntime,
-    cell_execution_limits: CodeModeSessionCellExecutionLimits,
+    options: CodeModeSessionOptions,
 }
 
 impl InProcessCodeModeSession {
@@ -40,12 +45,24 @@ impl InProcessCodeModeSession {
     }
 
     pub fn with_limits(cell_execution_limits: CodeModeSessionCellExecutionLimits) -> Self {
-        Self {
-            runtime: SessionRuntime::new(),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
+        Self::with_options(
+            CodeModeSessionOptions {
+                cell_execution_limits,
+                ..CodeModeSessionOptions::default()
             },
+            /*task_failure_handler*/ None,
+        )
+    }
+
+    pub fn with_options(
+        mut options: CodeModeSessionOptions,
+        task_failure_handler: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) -> Self {
+        // Heap limits are not enforced by the embedded runtime.
+        options.cell_execution_limits.max_heap_size_bytes = None;
+        Self {
+            runtime: SessionRuntime::new_with_task_failure_handler(task_failure_handler),
+            options,
         }
     }
 
@@ -53,13 +70,13 @@ impl InProcessCodeModeSession {
         task_failure_handler: Arc<dyn Fn(String) + Send + Sync>,
         cell_execution_limits: CodeModeSessionCellExecutionLimits,
     ) -> Self {
-        Self {
-            runtime: SessionRuntime::new_with_task_failure_handler(Some(task_failure_handler)),
-            cell_execution_limits: CodeModeSessionCellExecutionLimits {
-                max_heap_size_bytes: None,
-                ..cell_execution_limits
+        Self::with_options(
+            CodeModeSessionOptions {
+                cell_execution_limits,
+                ..CodeModeSessionOptions::default()
             },
-        }
+            Some(task_failure_handler),
+        )
     }
 
     pub async fn execute(
@@ -67,12 +84,24 @@ impl InProcessCodeModeSession {
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> Result<StartedCell, String> {
+        self.execute_with_preempt(request, delegate, None).await
+    }
+
+    async fn execute_with_preempt(
+        &self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
+    ) -> Result<StartedCell, String> {
         let yield_time_ms = request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS);
+        let max_output_tokens = request.max_output_tokens;
+        let output_truncation = self.options.output_truncation;
         let started = self
             .runtime
             .execute(
-                runtime_request(request),
-                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms)),
+                runtime_request(request, output_truncation),
+                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms))
+                    .with_yield_signal(preempt.unwrap_or_default()),
                 Arc::new(ProtocolDelegate { delegate }),
             )
             .await
@@ -85,7 +114,14 @@ impl InProcessCodeModeSession {
                 .initial_event()
                 .await
                 .map_err(|error| error.to_string())
-                .and_then(|event| runtime_response(&response_cell_id, event));
+                .and_then(|event| {
+                    runtime_response(
+                        &response_cell_id,
+                        event,
+                        output_truncation,
+                        max_output_tokens,
+                    )
+                });
             let _ = response_tx.send(response);
         });
         Ok(StartedCell::from_result_receiver(cell_id, response_rx))
@@ -96,10 +132,11 @@ impl InProcessCodeModeSession {
         request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> Result<ExecuteToPendingOutcome, String> {
+        let max_output_tokens = request.max_output_tokens;
         let started = self
             .runtime
             .execute(
-                runtime_request(request),
+                runtime_request(request, self.options.output_truncation),
                 runtime::ObserveMode::PendingFrontier,
                 Arc::new(ProtocolDelegate { delegate }),
             )
@@ -110,51 +147,86 @@ impl InProcessCodeModeSession {
             .initial_event()
             .await
             .map_err(|error| error.to_string())?;
-        pending_outcome(&cell_id, event)
+        pending_outcome(
+            &cell_id,
+            event,
+            self.options.output_truncation,
+            max_output_tokens,
+        )
     }
 
-    pub async fn wait(&self, request: WaitRequest) -> Result<WaitOutcome, String> {
-        self.begin_wait(request).await.await
+    pub async fn wait(
+        &self,
+        request: WaitRequest,
+        preempt: Option<CancellationToken>,
+    ) -> Result<WaitOutcome, String> {
+        self.begin_wait(request, preempt).await.await
     }
 
     async fn begin_wait(
         &self,
         request: WaitRequest,
+        preempt: Option<CancellationToken>,
     ) -> CodeModeSessionResultFuture<'static, WaitOutcome> {
         let WaitRequest {
             cell_id,
             yield_time_ms,
+            max_output_tokens,
         } = request;
+        let output_truncation = self.options.output_truncation;
         let runtime_cell_id = runtime_cell_id(&cell_id);
         match self
             .runtime
             .begin_observe(
                 &runtime_cell_id,
-                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms)),
+                runtime::ObserveMode::YieldAfter(self.resolve_yield_timeout(yield_time_ms))
+                    .with_yield_signal(preempt.unwrap_or_default()),
             )
             .await
         {
             Ok(pending_event) => Box::pin(async move {
                 match pending_event.event().await {
-                    Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(&cell_id, event)?)),
+                    Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(
+                        &cell_id,
+                        event,
+                        output_truncation,
+                        max_output_tokens,
+                    )?)),
                     Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
-                        Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)))
+                        Ok(WaitOutcome::MissingCell(missing_cell_response(
+                            cell_id,
+                            output_truncation,
+                            max_output_tokens,
+                        )?))
                     }
                     Err(error) => Err(error.to_string()),
                 }
             }),
             Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
-                missing_wait(cell_id)
+                missing_wait(cell_id, output_truncation, max_output_tokens)
             }
             Err(error) => Box::pin(async move { Err(error.to_string()) }),
         }
     }
 
-    pub async fn terminate(&self, cell_id: CellId) -> Result<WaitOutcome, String> {
+    pub async fn terminate(&self, request: TerminateRequest) -> Result<WaitOutcome, String> {
+        let TerminateRequest {
+            cell_id,
+            max_output_tokens,
+        } = request;
         match self.runtime.terminate(&runtime_cell_id(&cell_id)).await {
-            Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(&cell_id, event)?)),
+            Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(
+                &cell_id,
+                event,
+                self.options.output_truncation,
+                max_output_tokens,
+            )?)),
             Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
-                Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)))
+                Ok(WaitOutcome::MissingCell(missing_cell_response(
+                    cell_id,
+                    self.options.output_truncation,
+                    max_output_tokens,
+                )?))
             }
             Err(error) => Err(error.to_string()),
         }
@@ -174,11 +246,18 @@ impl InProcessCodeModeSession {
             .await
         {
             Ok(event) => Ok(WaitToPendingOutcome::LiveCell(pending_outcome(
-                &cell_id, event,
+                &cell_id,
+                event,
+                self.options.output_truncation,
+                /*max_output_tokens*/ None,
             )?)),
-            Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => Ok(
-                WaitToPendingOutcome::MissingCell(missing_cell_response(cell_id)),
-            ),
+            Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
+                Ok(WaitToPendingOutcome::MissingCell(missing_cell_response(
+                    cell_id,
+                    self.options.output_truncation,
+                    /*max_output_tokens*/ None,
+                )?))
+            }
             Err(error) => Err(error.to_string()),
         }
     }
@@ -198,7 +277,8 @@ impl InProcessCodeModeSession {
             yield_time
         };
 
-        self.cell_execution_limits
+        self.options
+            .cell_execution_limits
             .max_yield_time_ms
             .map(Duration::from_millis)
             .map_or(timeout, |limit| timeout.min(limit))
@@ -212,6 +292,10 @@ impl Default for InProcessCodeModeSession {
 }
 
 impl CodeModeSession for InProcessCodeModeSession {
+    fn output_truncation(&self) -> CodeModeOutputTruncation {
+        self.options.output_truncation
+    }
+
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
@@ -220,12 +304,30 @@ impl CodeModeSession for InProcessCodeModeSession {
         Box::pin(InProcessCodeModeSession::execute(self, request, delegate))
     }
 
-    fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
-        Box::pin(InProcessCodeModeSession::wait(self, request))
+    fn execute_with_preempt<'a>(
+        &'a self,
+        request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, StartedCell> {
+        Box::pin(InProcessCodeModeSession::execute_with_preempt(
+            self, request, delegate, preempt,
+        ))
     }
 
-    fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
-        Box::pin(InProcessCodeModeSession::terminate(self, cell_id))
+    fn wait<'a>(
+        &'a self,
+        request: WaitRequest,
+        preempt: Option<CancellationToken>,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+        Box::pin(InProcessCodeModeSession::wait(self, request, preempt))
+    }
+
+    fn terminate<'a>(
+        &'a self,
+        request: TerminateRequest,
+    ) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
+        Box::pin(InProcessCodeModeSession::terminate(self, request))
     }
 
     fn shutdown<'a>(&'a self) -> CodeModeSessionResultFuture<'a, ()> {
@@ -296,8 +398,12 @@ impl runtime::SessionRuntimeDelegate for ProtocolDelegate {
     }
 }
 
-fn runtime_request(request: ExecuteRequest) -> runtime::CreateCellRequest {
+fn runtime_request(
+    request: ExecuteRequest,
+    output_truncation: CodeModeOutputTruncation,
+) -> runtime::CreateCellRequest {
     runtime::CreateCellRequest {
+        output_truncation,
         tool_call_id: request.tool_call_id,
         enabled_tools: request
             .enabled_tools
@@ -330,6 +436,8 @@ fn protocol_cell_id(cell_id: &runtime::CellId) -> CellId {
 fn pending_outcome(
     cell_id: &CellId,
     event: runtime::CellEvent,
+    output_truncation: CodeModeOutputTruncation,
+    max_output_tokens: Option<usize>,
 ) -> Result<ExecuteToPendingOutcome, String> {
     match event {
         runtime::CellEvent::Pending {
@@ -337,11 +445,14 @@ fn pending_outcome(
             pending_tool_call_ids,
         } => Ok(ExecuteToPendingOutcome::Pending {
             cell_id: cell_id.clone(),
-            content_items: content_items.into_iter().map(output_item).collect(),
+            content_items: rendered_items(content_items, output_truncation, max_output_tokens),
             pending_tool_call_ids,
         }),
         event => Ok(ExecuteToPendingOutcome::Completed(runtime_response(
-            cell_id, event,
+            cell_id,
+            event,
+            output_truncation,
+            max_output_tokens,
         )?)),
     }
 }
@@ -349,25 +460,29 @@ fn pending_outcome(
 fn runtime_response(
     cell_id: &CellId,
     event: runtime::CellEvent,
+    output_truncation: CodeModeOutputTruncation,
+    max_output_tokens: Option<usize>,
 ) -> Result<RuntimeResponse, String> {
     match event {
         runtime::CellEvent::Yielded { content_items } => Ok(RuntimeResponse::Yielded {
             cell_id: cell_id.clone(),
-            content_items: content_items.into_iter().map(output_item).collect(),
+            content_items: rendered_items(content_items, output_truncation, max_output_tokens),
             code_mode_host_duration: None,
         }),
         runtime::CellEvent::Completed {
             content_items,
             error_text,
+            result_buffered_for,
         } => Ok(RuntimeResponse::Result {
             cell_id: cell_id.clone(),
-            content_items: content_items.into_iter().map(output_item).collect(),
+            content_items: rendered_items(content_items, output_truncation, max_output_tokens),
             error_text,
+            result_buffered_for,
             code_mode_host_duration: None,
         }),
         runtime::CellEvent::Terminated { content_items } => Ok(RuntimeResponse::Terminated {
             cell_id: cell_id.clone(),
-            content_items: content_items.into_iter().map(output_item).collect(),
+            content_items: rendered_items(content_items, output_truncation, max_output_tokens),
             code_mode_host_duration: None,
         }),
         runtime::CellEvent::Pending { .. } => {
@@ -376,37 +491,41 @@ fn runtime_response(
     }
 }
 
-fn output_item(item: runtime::OutputItem) -> FunctionCallOutputContentItem {
-    match item {
-        runtime::OutputItem::Text { text } => FunctionCallOutputContentItem::InputText { text },
-        runtime::OutputItem::Image { image_url, detail } => {
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: detail.map(|detail| match detail {
-                    runtime::ImageDetail::Auto => ImageDetail::Auto,
-                    runtime::ImageDetail::Low => ImageDetail::Low,
-                    runtime::ImageDetail::High => ImageDetail::High,
-                    runtime::ImageDetail::Original => ImageDetail::Original,
-                }),
-            }
-        }
-        runtime::OutputItem::Audio { audio_url } => {
-            FunctionCallOutputContentItem::InputAudio { audio_url }
-        }
+fn rendered_items(
+    items: OutputCollector,
+    mode: CodeModeOutputTruncation,
+    max_output_tokens: Option<usize>,
+) -> Vec<FunctionCallOutputContentItem> {
+    let items = items.into_collected_output();
+    match mode {
+        CodeModeOutputTruncation::Client => items.into_untruncated_items(),
+        CodeModeOutputTruncation::Server => crate::output::render_output(items, max_output_tokens),
     }
 }
 
-fn missing_cell_response(cell_id: CellId) -> RuntimeResponse {
-    RuntimeResponse::Result {
-        error_text: Some(format!("exec cell {cell_id} not found")),
-        cell_id,
-        content_items: Vec::new(),
-        code_mode_host_duration: None,
-    }
+fn missing_cell_response(
+    cell_id: CellId,
+    mode: CodeModeOutputTruncation,
+    max_output_tokens: Option<usize>,
+) -> Result<RuntimeResponse, String> {
+    let error_text = format!("exec cell {cell_id} not found");
+    let mut output = OutputCollector::new(mode);
+    let event = take_completed_event(&mut output, Some(error_text));
+    runtime_response(&cell_id, event, mode, max_output_tokens)
 }
 
-fn missing_wait(cell_id: CellId) -> CodeModeSessionResultFuture<'static, WaitOutcome> {
-    Box::pin(async move { Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id))) })
+fn missing_wait(
+    cell_id: CellId,
+    mode: CodeModeOutputTruncation,
+    max_output_tokens: Option<usize>,
+) -> CodeModeSessionResultFuture<'static, WaitOutcome> {
+    Box::pin(async move {
+        Ok(WaitOutcome::MissingCell(missing_cell_response(
+            cell_id,
+            mode,
+            max_output_tokens,
+        )?))
+    })
 }
 
 #[cfg(all(test, feature = "v8-runtime"))]
@@ -416,3 +535,7 @@ mod tests;
 #[cfg(all(test, feature = "v8-runtime"))]
 #[path = "service_contract_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+#[path = "service_output_collection_tests.rs"]
+mod output_collection_tests;

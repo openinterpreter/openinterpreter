@@ -2,7 +2,115 @@
 
 use super::super::tests::new_test_composer;
 use super::*;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use pretty_assertions::assert_eq;
+
+#[tokio::test(start_paused = true)]
+async fn draft_handoff_preserves_newline_after_short_unicode_prefix() {
+    let (mut composer, _) = new_test_composer();
+    for key in [KeyCode::Char('猫'), KeyCode::Enter, KeyCode::Char('犬')] {
+        assert_eq!(
+            composer.handle_restricted_key(key.into(), RestrictedInputMode::DraftHandoff),
+            InputResult::None,
+        );
+    }
+    tokio::time::advance(Duration::from_millis(/*millis*/ 100)).await;
+    composer.flush_handoff_paste(tokio::time::Instant::now().into_std());
+    composer.handle_restricted_key(KeyCode::Enter.into(), RestrictedInputMode::DraftHandoff);
+    insta::assert_snapshot!(composer.current_text(), @"猫
+犬");
+
+    let (mut composer, _) = new_test_composer();
+    composer.handle_key_event(KeyCode::Char('猫').into());
+    let (result, _) = composer.handle_key_event(KeyCode::Enter.into());
+    assert!(matches!(result, InputResult::Submitted { text, .. } if text == "猫"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn handoff_edit_discards_stale_command_before_ordinary_enter() {
+    for bracketed_paste in [true, false] {
+        let (mut composer, _) = new_test_composer();
+        if bracketed_paste {
+            composer.handle_paste("/quit".into());
+            assert!(matches!(composer.popups.active, ActivePopup::Command(_)));
+        } else {
+            for ch in "/quit".chars() {
+                composer.handle_restricted_key(
+                    KeyCode::Char(ch).into(),
+                    RestrictedInputMode::DraftHandoff,
+                );
+            }
+            assert!(composer.draft.paste_burst.is_active());
+        }
+
+        composer.handle_restricted_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            RestrictedInputMode::DraftHandoff,
+        );
+        assert_eq!(composer.current_text(), "");
+
+        // A failed handoff can return to ordinary input before a redraw.
+        let (result, _) = composer.handle_key_event(KeyCode::Enter.into());
+        assert_eq!(result, InputResult::None);
+    }
+}
+
+#[test]
+fn offline_delete_reveals_the_edited_row_without_moving_the_caret() {
+    let (mut composer, _) = new_test_composer();
+    let area = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 8,
+    );
+    let options = ComposerRenderOptions {
+        max_height: Some(area.height),
+        ..ComposerRenderOptions::default()
+    };
+    let text = (1..=20)
+        .map(|n| format!("line {n:02} abc"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    composer.set_text_content(text.clone(), Vec::new(), Vec::new());
+    let cursor = text.len() - 2;
+    composer.draft.textarea.set_cursor(cursor);
+    let mut buffer = Buffer::empty(area);
+    composer.render_with_options(area, &mut buffer, /*mask_char*/ None, options);
+    let (x, y) = composer.cursor_pos_with_options(area, options).unwrap();
+    for _ in 0..3 {
+        assert!(composer.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+    // Disconnect cleanup and blocked submits must not count as edits.
+    for key in [KeyCode::Null, KeyCode::Enter, KeyCode::Tab] {
+        composer.handle_restricted_key(key.into(), RestrictedInputMode::Disconnected);
+        let mut buffer = Buffer::empty(area);
+        composer.render_with_options(area, &mut buffer, /*mask_char*/ None, options);
+        assert_eq!(composer.cursor_pos_with_options(area, options), None);
+    }
+    composer.handle_restricted_key(KeyCode::Delete.into(), RestrictedInputMode::Disconnected);
+    let mut buffer = Buffer::empty(area);
+    composer.render_with_options(area, &mut buffer, /*mask_char*/ None, options);
+    assert_eq!(
+        (composer.current_text(), composer.draft.textarea.cursor()),
+        (text.replace("line 20 abc", "line 20 ac"), cursor)
+    );
+    assert!(composer.cursor_pos_with_options(area, options).is_some());
+    let rows = buffer
+        .content
+        .chunks(usize::from(area.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("offline_delete_after_wheel", rows);
+}
 
 #[test]
 fn reconnect_expands_pastes_preserving_images_and_cursor() {

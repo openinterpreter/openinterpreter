@@ -9,7 +9,8 @@
 //!
 //! # Available Status Line Items
 //!
-//! - Model information (name, reasoning level)
+//! - Model information (name, reasoning level, provider)
+//! - Named configuration profile
 //! - Directory paths (current dir, project root)
 //! - Machine hostname
 //! - Git information (branch name)
@@ -58,7 +59,7 @@ pub(crate) enum StatusLineItem {
     #[strum(to_string = "model", serialize = "model-name")]
     ModelName,
 
-    /// Model name with reasoning level suffix.
+    /// Model name with reasoning level and processing tier.
     ModelWithReasoning,
 
     /// Current reasoning level.
@@ -138,8 +139,11 @@ pub(crate) enum StatusLineItem {
     #[strum(to_string = "thread-id", serialize = "session-id")]
     SessionId,
 
-    /// Whether Fast mode is currently active.
+    /// Effective processing tier for the current model.
     FastMode,
+
+    /// Whether Daybreak is enabled for this thread.
+    Daybreak,
 
     /// Whether raw scrollback mode is currently active.
     RawOutput,
@@ -155,6 +159,20 @@ pub(crate) enum StatusLineItem {
 
     /// Latest checklist task progress from `update_plan` (if available).
     TaskProgress,
+
+    /// Named config profile selected for this invocation.
+    Profile,
+
+    /// Model provider ID for the active thread.
+    #[strum(to_string = "provider", serialize = "model-provider")]
+    Provider,
+}
+
+impl serde::Serialize for StatusLineItem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Display emits the canonical config ID even when the item was parsed from an alias.
+        serializer.collect_str(self)
+    }
 }
 
 impl StatusLineItem {
@@ -164,6 +182,10 @@ impl StatusLineItem {
             StatusLineItem::ModelName => "Current model name",
             StatusLineItem::ModelWithReasoning => "Current model name with reasoning level",
             StatusLineItem::Reasoning => "Current reasoning level",
+            StatusLineItem::Profile => {
+                "Config profile selected with --profile (omitted when unset)"
+            }
+            StatusLineItem::Provider => "Model provider for the active thread",
             StatusLineItem::CurrentDir => "Current working directory",
             StatusLineItem::ProjectRoot => "Project name (omitted when unavailable)",
             StatusLineItem::Hostname => "Current machine hostname (omitted when unavailable)",
@@ -203,7 +225,8 @@ impl StatusLineItem {
                 "Estimated current-thread cost in USD (Enterprise workspaces only; omitted when unavailable)"
             }
             StatusLineItem::SessionId => "Current thread identifier (omitted until thread starts)",
-            StatusLineItem::FastMode => "Whether Fast mode is currently active",
+            StatusLineItem::FastMode => "Effective processing tier for the current model",
+            StatusLineItem::Daybreak => "Whether Daybreak is enabled for this thread",
             StatusLineItem::RawOutput => "Whether raw scrollback mode is active",
             StatusLineItem::ThreadName => "Current thread name (omitted when unnamed)",
             StatusLineItem::ThreadTitle => {
@@ -223,6 +246,8 @@ impl StatusLineItem {
             StatusLineItem::ModelName => StatusSurfacePreviewItem::Model,
             StatusLineItem::ModelWithReasoning => StatusSurfacePreviewItem::ModelWithReasoning,
             StatusLineItem::Reasoning => StatusSurfacePreviewItem::Reasoning,
+            StatusLineItem::Profile => StatusSurfacePreviewItem::Profile,
+            StatusLineItem::Provider => StatusSurfacePreviewItem::Provider,
             StatusLineItem::CurrentDir => StatusSurfacePreviewItem::CurrentDir,
             StatusLineItem::ProjectRoot => StatusSurfacePreviewItem::ProjectRoot,
             StatusLineItem::Hostname => StatusSurfacePreviewItem::Hostname,
@@ -245,6 +270,7 @@ impl StatusLineItem {
             StatusLineItem::EstimatedThreadCost => StatusSurfacePreviewItem::EstimatedThreadCost,
             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
             StatusLineItem::FastMode => StatusSurfacePreviewItem::FastMode,
+            StatusLineItem::Daybreak => StatusSurfacePreviewItem::Daybreak,
             StatusLineItem::RawOutput => StatusSurfacePreviewItem::RawOutput,
             StatusLineItem::ThreadName => StatusSurfacePreviewItem::ThreadName,
             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
@@ -334,19 +360,19 @@ impl StatusLineSetupView {
             .list_keymap(list_keymap)
             .items(items)
             .enable_ordering()
-            .on_preview(move |items| {
+            .on_preview_content(move |items| {
                 let use_theme_colors = items
                     .iter()
-                    .find(|item| item.id == STATUS_LINE_USE_THEME_COLORS_ITEM_ID)
-                    .map(|item| item.enabled)
-                    .unwrap_or(true);
-                preview_data.status_line_for_items(
-                    items
-                        .iter()
-                        .filter(|item| item.enabled)
-                        .filter_map(|item| item.id.parse::<StatusLineItem>().ok()),
-                    use_theme_colors,
-                )
+                    .any(|item| item.id == STATUS_LINE_USE_THEME_COLORS_ITEM_ID && item.enabled);
+                preview_data
+                    .status_line_for_items(
+                        items
+                            .iter()
+                            .filter(|item| item.enabled)
+                            .filter_map(|item| item.id.parse::<StatusLineItem>().ok()),
+                        use_theme_colors,
+                    )
+                    .map(Into::into)
             })
             .on_confirm(|ids, app_event| {
                 let use_theme_colors = ids
@@ -400,6 +426,10 @@ impl BottomPaneView for StatusLineSetupView {
         crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List)
     }
 
+    fn accepts_input_when_disconnected(&self) -> bool {
+        true
+    }
+
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {
         self.picker.handle_key_event(key_event);
     }
@@ -428,11 +458,11 @@ impl Renderable for StatusLineSetupView {
 mod tests {
     use super::*;
     use crate::app_event_sender::AppEventSender;
+    use crate::terminal_hyperlinks::HyperlinkLine;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::text::Line;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::app_event::AppEvent;
@@ -677,6 +707,33 @@ mod tests {
     }
 
     #[test]
+    fn picker_previews_the_pr_link_and_preserves_the_color_preference() {
+        let url = "https://example.com/pr/42";
+        for use_theme_colors in [false, true] {
+            let (tx, mut rx) = unbounded_channel();
+            let mut preview = StatusSurfacePreviewData::from_iter([(
+                StatusLineItem::PullRequestNumber.preview_item(),
+                "PR #42",
+            )]);
+            preview.pull_request_url = Some(url.to_owned());
+            let mut view = StatusLineSetupView::new(
+                Some(&[StatusLineItem::PullRequestNumber.to_string()]),
+                use_theme_colors,
+                preview,
+                AppEventSender::new(tx),
+                crate::keymap::RuntimeKeymap::defaults().list,
+            );
+            let output = render_lines(&view, /*width*/ 80);
+            assert!(output.contains(&crate::terminal_hyperlinks::osc8_hyperlink(url, "P")));
+            view.handle_key_event(crossterm::event::KeyCode::Enter.into());
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(AppEvent::StatusLineSetup { use_theme_colors: saved, .. }) if saved == use_theme_colors
+            ));
+        }
+    }
+
+    #[test]
     fn setup_view_snapshot_uses_runtime_preview_values() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let view = StatusLineSetupView::new(
@@ -792,12 +849,7 @@ mod tests {
             .join("\n")
     }
 
-    fn line_text(line: Option<Line<'static>>) -> Option<String> {
-        line.map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
+    fn line_text(content: Option<HyperlinkLine>) -> Option<String> {
+        content.map(|line| line.line.to_string())
     }
 }

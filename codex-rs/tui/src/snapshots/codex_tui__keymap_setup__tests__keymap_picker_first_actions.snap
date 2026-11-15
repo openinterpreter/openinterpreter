@@ -14,7 +14,7 @@ tab: Navigation (21 selectable)
 tab: Agents (10 selectable)
 tab: Approval (8 selectable)
 tab: Debug (1 selectable)
-Open Agents | unbound | Global open_agents Open Agents Open the shared agent-session overview. unbound Default
+Open Agents | unbound | Global open_agents Open Agents Open the agent command center. unbound Default
 Open Transcript | ctrl-t | Global open_transcript Open Transcript Open the transcript overlay. ctrl-t Default
 Find Transcript | f3 | Global find_transcript Find Transcript Find text in the full transcript. f3 Default
 Focus Activity | f4 | Global focus_activity Focus Activity Focus transcript activity groups to expand or collapse their details. f4 Default
@@ -24,6 +24,7 @@ Clear Terminal | ctrl-l | Global clear_terminal Clear Terminal Clear the termina
 Toggle Vim Mode | unbound | Global toggle_vim_mode Toggle Vim Mode Turn Vim composer mode on or off. unbound Default
 Toggle Raw Output | alt-r | Global toggle_raw_output Toggle Raw Output Toggle raw scrollback mode. alt-r Default
 Toggle Side Conversation | ctrl-/ | Global toggle_side_conversation Toggle Side Conversation Switch between a side conversation and its parent. ctrl-/ Default
+Leader | ctrl-x | Global leader Leader Set the prefix used by shared leader shortcuts. ctrl-x Default
 Interrupt Turn | esc | Chat interrupt_turn Interrupt Turn Interrupt the active turn. esc Default
 Decrease Reasoning Effort | alt-,, shift-down | Chat decrease_reasoning_effort Decrease Reasoning Effort Decrease reasoning effort. alt-,, shift-down Default
 Increase Reasoning Effort | alt-., shift-up | Chat increase_reasoning_effort Increase Reasoning Effort Increase reasoning effort. alt-., shift-up Default

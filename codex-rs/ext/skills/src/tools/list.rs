@@ -4,6 +4,7 @@ use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolExecutorFuture;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolSpec;
+use codex_utils_string::take_bytes_at_char_boundary;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,7 +12,6 @@ use serde::Serialize;
 use crate::catalog::SkillCatalogEntry;
 use crate::render::MAX_SKILL_NAME_BYTES;
 use crate::render::truncate_catalog_skill_description;
-use crate::render::truncate_utf8_to_bytes;
 use crate::warnings::bounded_warnings;
 
 use super::MAX_HANDLE_BYTES;
@@ -68,6 +68,10 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ListTool {
         skill_tool_name(TOOL_NAME)
     }
 
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         skill_function_tool::<ListArgs, ListResponse>(
             TOOL_NAME,
@@ -82,14 +86,16 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ListTool {
         Box::pin(async move {
             let args: ListArgs = parse_args(&call)?;
             let response_byte_budget = call.response_byte_budget(MAX_SKILL_RESPONSE_BYTES);
-            let catalog = self.context.catalog(&call.turn_id, args.authority).await;
+            let catalog = self
+                .context
+                .step_state
+                .catalog
+                .select_from_catalog(args.authority);
             let mut omitted_oversized_entry = false;
             let canonical_skills = catalog
                 .entries
                 .into_iter()
-                .filter(|entry| {
-                    entry.is_model_visible() && args.authority.matches(&entry.authority)
-                })
+                .filter(SkillCatalogEntry::is_model_visible)
                 .filter_map(|entry| {
                     let listed = listed_skill(entry);
                     omitted_oversized_entry |= listed.is_none();
@@ -212,6 +218,10 @@ fn single_entry_response_is_bounded(
     .is_ok_and(|size| size <= response_byte_budget)
 }
 
+pub(super) fn listed_name(name: &str) -> &str {
+    take_bytes_at_char_boundary(name, MAX_SKILL_NAME_BYTES)
+}
+
 fn listed_skill(entry: SkillCatalogEntry) -> Option<ListedSkill> {
     let authority = SkillToolAuthority::from_authority(&entry.authority)?;
     if !is_bounded_handle(&entry.authority.id, MAX_HANDLE_BYTES)
@@ -224,7 +234,7 @@ fn listed_skill(entry: SkillCatalogEntry) -> Option<ListedSkill> {
     Some(ListedSkill {
         authority,
         package: entry.id.0,
-        name: truncate_utf8_to_bytes(&entry.name, MAX_SKILL_NAME_BYTES).0,
+        name: listed_name(&entry.name).to_owned(),
         description: truncate_catalog_skill_description(&entry.description).into_owned(),
         main_resource: entry.main_prompt.as_str().to_string(),
     })

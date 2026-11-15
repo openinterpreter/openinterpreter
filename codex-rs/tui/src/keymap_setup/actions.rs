@@ -1,13 +1,13 @@
 //! Catalog and accessors for keymap actions shown by `/keymap`.
 //!
-//! The descriptor table is the single UI-facing inventory of configurable
-//! actions. Each descriptor ties together the config path segment, user-facing
-//! context label, stable action name, and short description used by the picker
-//! and action menu.
+//! The catalog declaration generates both the UI-facing descriptors and the
+//! matching root-config accessors. Each entry ties together the config path,
+//! user-facing context label, stable action name, short description, and
+//! optional feature gate used by the picker and action menu.
 //!
-//! Root-config accessors mirror the descriptor table, while runtime lookups
-//! reuse the inventory owned by [`crate::keymap`]. A catalog action must remain
-//! both writable in `TuiKeymap` and readable from the shared runtime inventory.
+//! Runtime lookups reuse the inventory owned by [`crate::keymap`]. A catalog
+//! action must remain both writable in `TuiKeymap` and readable from the shared
+//! runtime inventory.
 
 use std::collections::BTreeSet;
 
@@ -30,6 +30,31 @@ pub(super) struct KeymapActionDescriptor {
     pub(super) description: &'static str,
     /// Feature required before the action appears in `/keymap`.
     required_feature: Option<KeymapActionFeature>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum KeymapActionFeature {
+    FastMode,
+    MultiBackend,
+    Workspace,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct KeymapActionFilter {
+    pub(crate) fast_mode_enabled: bool,
+    pub(crate) multi_backend_enabled: bool,
+    pub(crate) workspace_enabled: bool,
+}
+
+impl KeymapActionDescriptor {
+    pub(super) fn is_visible(self, filter: KeymapActionFilter) -> bool {
+        match self.required_feature {
+            None => true,
+            Some(KeymapActionFeature::FastMode) => filter.fast_mode_enabled,
+            Some(KeymapActionFeature::MultiBackend) => filter.multi_backend_enabled,
+            Some(KeymapActionFeature::Workspace) => filter.workspace_enabled,
+        }
+    }
 }
 
 const fn action(
@@ -60,25 +85,6 @@ const fn gated_action(
         action,
         description,
         required_feature: Some(required_feature),
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum KeymapActionFeature {
-    FastMode,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct KeymapActionFilter {
-    pub(crate) fast_mode_enabled: bool,
-}
-
-impl KeymapActionDescriptor {
-    pub(super) fn is_visible(self, filter: KeymapActionFilter) -> bool {
-        match self.required_feature {
-            None => true,
-            Some(KeymapActionFeature::FastMode) => filter.fast_mode_enabled,
-        }
     }
 }
 
@@ -244,7 +250,10 @@ pub(super) const KEYMAP_ACTIONS: &[KeymapActionDescriptor] = &[
 /// This is intentionally presentation-only: the returned string must never be
 /// parsed back into an action name, because underscores and casing are part of
 /// the stable config contract.
-pub(super) fn action_label(action: &str) -> String {
+pub(crate) fn action_label(action: &str) -> String {
+    if action == "change_host" {
+        return "Change Where to Run".to_string();
+    }
     action
         .split('_')
         .map(|word| {
@@ -446,6 +455,23 @@ pub(super) fn format_action_binding_summary(
     let specs = specs
         .into_iter()
         .filter(|spec| seen.insert(spec.clone()))
+        .map(|spec| {
+            let Some(completion) = spec.strip_prefix("leader ") else {
+                return spec;
+            };
+            let resolved = runtime_keymap
+                .chords
+                .leader
+                .iter()
+                .filter_map(|prefix| super::binding_to_config_key_spec(*prefix).ok())
+                .map(|prefix| format!("{prefix} {completion}"))
+                .collect::<Vec<_>>();
+            if resolved.is_empty() {
+                format!("{spec} (inactive)")
+            } else {
+                format!("{spec} ({})", resolved.join(", "))
+            }
+        })
         .collect::<Vec<_>>();
     if specs.is_empty() {
         "unbound".to_string()

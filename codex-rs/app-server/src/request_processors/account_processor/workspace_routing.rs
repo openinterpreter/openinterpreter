@@ -97,6 +97,8 @@ pub(super) enum WorkspaceRoutingError {
     BackendIsNotOrigin,
     #[error("required ChatGPT backend conflicts with workspace routing")]
     BackendConflict,
+    #[error("Sign in to a government workspace to use the configured government backend.")]
+    GovernmentWorkspaceRequired,
     #[error("invalid workspace backend URL")]
     InvalidBackendUrl,
     #[error("workspace backend must use an HTTPS origin without credentials")]
@@ -164,10 +166,27 @@ impl AccountRequestProcessor {
             .await
             .map_err(|error| match error {
                 AccountReadError::InvalidAccount(error) => invalid_request(error.to_string()),
+                AccountReadError::Routing(
+                    error @ WorkspaceRoutingError::GovernmentWorkspaceRequired,
+                ) => {
+                    let mut error = invalid_request(error.to_string());
+                    error.data = Some(serde_json::json!({
+                        "reason": "governmentWorkspaceRequired",
+                        "action": "relogin",
+                    }));
+                    error
+                }
                 AccountReadError::Routing(error) => internal_error(error.to_string()),
             })?;
         Ok(Some(
             GetAccountResponse {
+                user_id: matches!(
+                    read.account_state.account.as_ref(),
+                    Some(ProviderAccount::Chatgpt { .. })
+                )
+                .then(|| self.auth_manager.auth_cached())
+                .flatten()
+                .and_then(|auth| auth.get_chatgpt_account_user_id()),
                 account: read.account_state.account.map(Account::from),
                 requires_openai_auth: read.account_state.requires_openai_auth,
                 workspace_routing: read.workspace_routing.map(|routing| {
@@ -450,19 +469,22 @@ fn resolve_routing(
         }
         Some(url)
     };
-    let origin = match (required, discovered) {
+    let selected = match (required, discovered) {
         (Some(required), Some(discovered)) => {
             if required.origin() != discovered.origin() {
                 return Err(WorkspaceRoutingError::BackendConflict.into());
             }
-            required.origin()
+            required
         }
-        (Some(url), None) | (None, Some(url)) => url.origin(),
-        (None, None) => parse_backend_url(effective_base_url)?.origin(),
+        (Some(url), None) | (None, Some(url)) => url,
+        (None, None) => parse_backend_url(effective_base_url)?,
     };
+    if backend == "NO_CONSTRAINT" && selected.host_str() == Some("gov.chatgpt.com") {
+        return Err(WorkspaceRoutingError::GovernmentWorkspaceRequired.into());
+    }
     Ok(WorkspaceRouting {
         chatgpt_account_id: entry.id,
-        backend_origin: origin.ascii_serialization(),
+        backend_origin: selected.origin().ascii_serialization(),
         account_routing_override,
     })
 }

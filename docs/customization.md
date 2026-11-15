@@ -6,15 +6,15 @@ description: Teach Open Interpreter your project, tools, workflows, and preferen
 Open Interpreter customization is layered. Use the smallest durable mechanism
 that fits the job.
 
-| Mechanism | Best for |
-| --------- | -------- |
-| `AGENTS.md` | Project rules, commands, architecture, and conventions. |
-| Config profiles | Model, provider, sandbox, approval, and feature defaults. |
-| Skills | Repeatable workflows with instructions, scripts, and references. |
-| MCP | External tools and data sources. |
-| Hooks | Deterministic policy, logging, and validation scripts. |
-| Subagents | Specialized helper agents for investigation or parallel work. |
-| Memories | Personal cross-session preferences when enabled. |
+| Mechanism       | Best for                                                         |
+| --------------- | ---------------------------------------------------------------- |
+| `AGENTS.md`     | Project rules, commands, architecture, and conventions.          |
+| Config profiles | Model, provider, sandbox, approval, and feature defaults.        |
+| Skills          | Repeatable workflows with instructions, scripts, and references. |
+| MCP             | External tools and data sources.                                 |
+| Hooks           | Deterministic policy, logging, and validation scripts.           |
+| Subagents       | Specialized helper agents for investigation or parallel work.    |
+| Memories        | Personal cross-session preferences when enabled.                 |
 
 ## Recommended Pattern
 

@@ -312,7 +312,7 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
     let parts = content
         .iter()
         .map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 json!({ "type": "text", "text": text })
             }
             ContentItem::InputImage { image, detail } => chat_image_content_part(image, *detail),

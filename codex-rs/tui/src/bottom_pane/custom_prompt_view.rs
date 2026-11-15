@@ -49,6 +49,9 @@ pub(crate) struct CustomPromptView {
     placeholder: String,
     context_label: Option<String>,
     on_submit: PromptSubmitted,
+    submit_label: &'static str,
+    preserve_whitespace: bool,
+    dismiss_after_child_accept: bool,
 
     // UI state
     textarea: TextArea,
@@ -78,6 +81,9 @@ impl CustomPromptView {
             placeholder,
             context_label,
             on_submit,
+            submit_label: "submit",
+            preserve_whitespace: false,
+            dismiss_after_child_accept: false,
             textarea,
             textarea_state: RefCell::new(TextAreaState::default()),
             paste_burst: PasteBurst::default(),
@@ -85,6 +91,19 @@ impl CustomPromptView {
             pending_suggestion: None,
             user_edited: false,
         }
+    }
+
+    /// Keep the prompt open while its submission opens a child view.
+    pub(crate) fn with_child_flow(mut self, submit_label: &'static str) -> Self {
+        self.submit_label = submit_label;
+        self.dismiss_after_child_accept = true;
+        self
+    }
+
+    /// Submit the editor contents without trimming their surrounding whitespace.
+    pub(crate) fn preserve_whitespace(mut self) -> Self {
+        self.preserve_whitespace = true;
+        self
     }
 
     /// Apply the same editor and Vim bindings used by the main composer.
@@ -151,10 +170,17 @@ impl CustomPromptView {
                     return;
                 }
                 if modifiers == KeyModifiers::NONE {
-                    let text = self.textarea.text().trim().to_string();
-                    if !text.is_empty() {
+                    let text = self.textarea.text();
+                    if !text.trim().is_empty() {
+                        let text = if self.preserve_whitespace {
+                            text.to_string()
+                        } else {
+                            text.trim().to_string()
+                        };
                         (self.on_submit)(text);
-                        self.completion = Some(ViewCompletion::Accepted);
+                        if !self.dismiss_after_child_accept {
+                            self.completion = Some(ViewCompletion::Accepted);
+                        }
                     }
                 } else {
                     self.textarea.input(key_event);
@@ -217,6 +243,10 @@ impl BottomPaneView for CustomPromptView {
 
     fn completion(&self) -> Option<ViewCompletion> {
         self.completion
+    }
+
+    fn dismiss_after_child_accept(&self) -> bool {
+        self.dismiss_after_child_accept
     }
 
     fn handle_paste(&mut self, pasted: String) -> bool {

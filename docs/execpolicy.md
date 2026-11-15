@@ -6,11 +6,11 @@ description: Rules that classify commands as safe, risky, or blocked.
 Execution policy is the rule layer underneath the sandbox. It looks at
 each command before it runs and labels it.
 
-| Label   | What it means                                     |
-| ------- | ------------------------------------------------- |
-| `safe`  | Routine, low-risk. Goes through without prompts.  |
-| `unsafe`| Could change state. Subject to approval.          |
-| `forbid`| Always blocked.                                   |
+| Label    | What it means                                    |
+| -------- | ------------------------------------------------ |
+| `safe`   | Routine, low-risk. Goes through without prompts. |
+| `unsafe` | Could change state. Subject to approval.         |
+| `forbid` | Always blocked.                                  |
 
 Open Interpreter ships with a sensible default policy. Most users never
 edit it. You only need this page if you want tighter control or you are

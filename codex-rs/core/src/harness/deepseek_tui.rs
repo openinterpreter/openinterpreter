@@ -104,7 +104,9 @@ fn response_item_text(item: &ResponseItem) -> Option<&str> {
         return None;
     }
     content.iter().find_map(|item| match item {
-        ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
+        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+            Some(text.as_str())
+        }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
     })
 }

@@ -7,10 +7,11 @@
 //!
 //! This module is responsible for the UI-facing lifecycle of a search session: recognizing the
 //! keys that enter and drive search mode, keeping the footer query separate from the textarea
-//! preview, restoring the original draft on cancellation or misses, and translating history search
-//! results into composer-visible state. It deliberately does not decide which history entries
+//! preview, restoring the saved draft on cancellation, and translating history search results into
+//! composer-visible state. It deliberately does not decide which history entries
 //! match, how duplicate results are skipped, or when persistent history should be fetched; those
 //! traversal invariants stay with `ChatComposerHistory`.
+
 //!
 //! A search session starts idle with an empty footer query, so opening Ctrl+R never previews the
 //! latest history entry by itself. Typing or pasting a query restarts traversal from newest to oldest,
@@ -18,6 +19,9 @@
 //! preview as an editable draft, and `Esc` or Ctrl+C restores the exact draft that existed before
 //! search started. Buffered keys are integrated before that snapshot without reclassifying them as
 //! an explicit paste. Only accepting a nonempty preview dismisses any unused Astra sparkle opportunity.
+
+#[path = "history_search_draft.rs"]
+mod history_search_draft;
 
 use std::ops::Range;
 
@@ -49,23 +53,29 @@ use crate::ui_consts::FOOTER_INDENT_COLS;
 /// Active composer-owned state for one Ctrl+R search interaction.
 ///
 /// The session is created only by [`ChatComposer::begin_history_search`] and is cleared only by
-/// accepting, canceling, or replacing the search mode. It stores the original draft and Vim edit
-/// state separately from the footer query so transient previews never destroy in-progress content.
+/// accepting, canceling, or replacing the search mode. It stores the cancellation draft and Vim
+/// edit state separately from the footer query and preview so background edits stay hidden.
 #[derive(Debug)]
 pub(super) struct HistorySearchSession {
-    /// Draft to restore when search is canceled or a query has no match.
+    /// Saved draft to restore on cancellation, including background updates.
     original_draft: ComposerDraft,
+    /// Freeze the fallback only when background edits diverge from the saved draft.
+    preview_draft: Option<ComposerDraft>,
     /// Same-draft Vim edits to restore when a temporary preview is canceled.
     original_vim_history: VimHistory,
     /// Active and completed Vim commands suspended during temporary draft replacement.
     original_vim_state: VimPersistentState,
     /// Footer-owned query text typed or pasted while Ctrl+R search is active.
-    query: String,
+    pub(super) query: String,
     /// User-visible search status used to choose footer hints and composer preview behavior.
     status: HistorySearchStatus,
 }
 
 impl HistorySearchSession {
+    fn preview_draft(&self) -> &ComposerDraft {
+        self.preview_draft.as_ref().unwrap_or(&self.original_draft)
+    }
+
     /// Renders newlines and tabs as visible markers for the footer and cursor placement.
     /// Matching continues to use the original query.
     fn display_query(&self) -> String {
@@ -75,9 +85,9 @@ impl HistorySearchSession {
 
 /// User-visible phase of the active Ctrl+R search session.
 ///
-/// Search keeps the footer query and the composer preview separate: `Idle` leaves the original
-/// draft untouched, `Searching` waits for persistent history, `Match` previews a found entry, and
-/// `NoMatch` restores the original draft while leaving the search input open for more typing.
+/// Search keeps the footer query and composer preview separate: `Idle` shows the frozen fallback
+/// draft, `Searching` waits for persistent history, `Match` previews a found entry, and `NoMatch`
+/// restores the frozen fallback while leaving the search input open for more typing.
 #[derive(Clone, Debug)]
 enum HistorySearchStatus {
     Idle,
@@ -87,8 +97,7 @@ enum HistorySearchStatus {
 }
 
 impl ChatComposer {
-    #[cfg(test)]
-    pub(super) fn history_search_active(&self) -> bool {
+    pub(in crate::bottom_pane) fn history_search_active(&self) -> bool {
         self.history_search.is_some()
     }
 
@@ -133,6 +142,7 @@ impl ChatComposer {
             .textarea
             .swap_vim_persistent_state(&mut original_vim_state);
         self.history_search = Some(HistorySearchSession {
+            preview_draft: None,
             original_draft,
             original_vim_history,
             original_vim_state,
@@ -251,7 +261,7 @@ impl ChatComposer {
         let Some((query, original_draft)) = self
             .history_search
             .as_ref()
-            .map(|search| (search.query.clone(), search.original_draft.clone()))
+            .map(|search| (search.query.clone(), search.preview_draft().clone()))
         else {
             return InputResult::None;
         };
@@ -350,7 +360,7 @@ impl ChatComposer {
                 let original_draft = self
                     .history_search
                     .as_ref()
-                    .map(|search| search.original_draft.clone());
+                    .map(|search| search.preview_draft().clone());
                 if let Some(search) = self.history_search.as_mut() {
                     search.status = if matches!(result, HistorySearchResult::NotFound) {
                         HistorySearchStatus::NoMatch
@@ -419,7 +429,15 @@ impl ChatComposer {
         if !matches!(search.status, HistorySearchStatus::Match) || search.query.is_empty() {
             return Vec::new();
         }
-        Self::case_insensitive_match_ranges(self.draft.textarea.text(), &search.query)
+        let prefix_len = usize::from(self.draft.is_bash_mode);
+        Self::case_insensitive_match_ranges(&self.current_text(), &search.query)
+            .into_iter()
+            .filter_map(|range| {
+                let start = range.start.saturating_sub(prefix_len);
+                let end = range.end.saturating_sub(prefix_len);
+                (start < end).then_some(start..end)
+            })
+            .collect()
     }
 
     fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
@@ -693,6 +711,33 @@ mod tests {
         assert!(composer.history_search_active());
         assert!(composer.draft.textarea.is_empty());
         assert_eq!(composer.footer_mode(), FooterMode::HistorySearch);
+    }
+
+    #[test]
+    fn background_draft_edit_preserves_search_preview_until_cancelled() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_text_content("original draft".to_string(), Vec::new(), Vec::new());
+        composer.begin_history_search();
+        assert!(composer.history_search_active());
+        let preview = composer.current_text();
+
+        composer.edit_stored_draft(|draft| {
+            draft.set_text_content("background update".to_string(), Vec::new(), Vec::new());
+        });
+        assert_eq!(composer.current_text(), preview);
+        assert_eq!(composer.draft_snapshot().text, "background update");
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!composer.history_search_active());
+        assert_eq!(composer.current_text(), "background update");
     }
 
     #[test]
@@ -1010,6 +1055,16 @@ mod tests {
             assert!(!modifier.contains(Modifier::REVERSED));
             assert!(!modifier.contains(Modifier::BOLD));
         }
+
+        composer
+            .history
+            .record_local_submission(HistoryEntry::new("!git status".to_string()));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        for ch in ['!', 'g', 'i', 't'] {
+            let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert_eq!(composer.current_text(), "!git status");
+        assert_eq!(composer.history_search_highlight_ranges(), vec![0..3]);
     }
 
     #[test]

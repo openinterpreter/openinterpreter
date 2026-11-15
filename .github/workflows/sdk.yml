@@ -1,12 +1,16 @@
 name: sdk
 
 on:
+  workflow_call:
   workflow_dispatch:
+
+env:
+  CODEX_BAZEL_GCS_BUCKET: ${{ secrets.CODEX_BAZEL_GCS_BUCKET }}
+  CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER }}
+
 jobs:
   python-sdk-installation:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -35,10 +39,13 @@ jobs:
             '
 
   sdks:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
-    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    # Keep the Bazel CLI build advisory until the public build and cache rollout is verified.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     environment:
       name: bazel
       deployment: false
@@ -63,7 +70,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Prepare Bazel CI
@@ -81,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           # Use the shared CI wrapper so fork PRs fall back cleanly when
-          # BuildBuddy credentials are unavailable. This workflow needs the
+          # This workflow needs the
           # built binaries on disk afterwards, so ask the wrapper to override
           # CI's default remote_download_minimal behavior.
           ./.github/scripts/run-bazel-ci.sh \

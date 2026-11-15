@@ -1,5 +1,5 @@
 <#
-BuildBuddy cache keys include the action and test environment, so Bazel should
+Bazel action cache keys include the action and test environment, so Bazel should
 not inherit the full hosted-runner PATH on Windows. That PATH includes volatile
 tool entries, such as Maven, that can change independently of this repo and
 cause avoidable cache misses.
@@ -8,7 +8,7 @@ This script derives a smaller, cache-stable PATH that keeps the Windows
 toolchain entries Bazel-backed CI tasks need: MSVC and Windows SDK paths,
 MinGW runtime DLL paths for gnullvm-built tests, Git, PowerShell, Node, Python,
 DotSlash, and the standard Windows system directories.
-`setup-bazel-ci` runs this after exporting the MSVC environment, and the script
+`prepare-bazel-ci` runs this after exporting the MSVC environment, and the script
 publishes the result via `GITHUB_ENV` as `CODEX_BAZEL_WINDOWS_PATH` so later
 steps can pass that explicit PATH to Bazel.
 #>

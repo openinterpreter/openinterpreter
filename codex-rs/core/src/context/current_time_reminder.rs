@@ -2,7 +2,11 @@ use chrono::DateTime;
 use chrono::Utc;
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ContentItemNamespace;
+use codex_protocol::models::input_text;
 
 pub(crate) struct CurrentTimeReminder {
     current_time: DateTime<Utc>,
@@ -21,6 +25,10 @@ impl CurrentTimeReminder {
 }
 
 impl ContextualUserFragment for CurrentTimeReminder {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::tool(Some(ContentItemNamespace::Clock))
+    }
+
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("current_time.reminder".to_string())
     }
@@ -37,8 +45,8 @@ impl ContextualUserFragment for CurrentTimeReminder {
         ("<current_time_reminder>", "</current_time_reminder>")
     }
 
-    fn body(&self) -> String {
-        format!("It is {}.", self.formatted_time())
+    fn body(&self) -> ContentItem {
+        input_text(format!("It is {}.", self.formatted_time()))
     }
 }
 
@@ -49,6 +57,10 @@ impl CurrentTimeUnavailable {
 }
 
 impl ContextualUserFragment for CurrentTimeUnavailable {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::tool(Some(ContentItemNamespace::Clock))
+    }
+
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("current_time.unavailable".to_string())
     }
@@ -65,7 +77,7 @@ impl ContextualUserFragment for CurrentTimeUnavailable {
         ("<current_time_unavailable>", "</current_time_unavailable>")
     }
 
-    fn body(&self) -> String {
-        Self::MESSAGE.to_string()
+    fn body(&self) -> ContentItem {
+        input_text(Self::MESSAGE.to_string())
     }
 }

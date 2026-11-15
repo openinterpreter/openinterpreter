@@ -376,9 +376,11 @@ impl ChatWidget {
     }
 
     fn observe_backend_banner_view(&mut self) {
-        let (shown, dismissed) = self.bottom_pane.inline_banner_lifecycle();
-        self.backend_banner_state.shown |= shown;
-        self.backend_banner_state.dismissed |= dismissed;
+        if self.backend_banner_state.presented.is_some() {
+            let (shown, dismissed) = self.bottom_pane.inline_banner_lifecycle();
+            self.backend_banner_state.shown |= shown;
+            self.backend_banner_state.dismissed |= dismissed;
+        }
         self.backend_banner_state.dismissed |= self
             .backend_banner_state
             .picker_dismissed
@@ -416,7 +418,7 @@ impl ChatWidget {
         }
         let is_reserve = banner.is_some_and(|banner| banner.banner_type == LUNA_RESERVE_BANNER);
         let content = banner.map(|banner| {
-            let mut content = banner.actionable_banner();
+            let mut content = banner.actionable_banner(self.clock_format);
             if banner.banner_type == LUNA_RESERVE_BANNER
                 && self.current_model() != LUNA_RESERVE_MODEL
             {
@@ -434,6 +436,10 @@ impl ChatWidget {
             if self
                 .bottom_pane
                 .dismiss_view_by_id(super::rate_limits::RATE_LIMIT_SWITCH_PROMPT_VIEW_ID)
+                && matches!(
+                    self.rate_limit_switch_prompt,
+                    super::RateLimitSwitchPromptState::Shown
+                )
             {
                 // Replacing the view is not the user's decision to dismiss the prompt.
                 self.rate_limit_switch_prompt = super::RateLimitSwitchPromptState::Pending;
@@ -441,6 +447,7 @@ impl ChatWidget {
         }
         self.bottom_pane
             .dismiss_view_by_id(LUNA_RESERVE_RECOVERY_VIEW_ID);
+        self.clear_security_setup_banner();
         match (is_reserve, content) {
             (true, Some(content)) => {
                 self.bottom_pane.set_inline_banner(/*banner*/ None);
@@ -510,6 +517,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn clear_backend_banner(&mut self) {
+        self.clear_security_setup_banner();
         self.backend_banner_state = BackendBannerState::default();
         self.backend_banner_notice_model = None;
         self.bottom_pane

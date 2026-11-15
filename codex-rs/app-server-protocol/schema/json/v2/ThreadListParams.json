@@ -54,6 +54,10 @@
         "null"
       ]
     },
+    "currentAccountOnly": {
+      "description": "Show local history visible to the current ChatGPT account. Defaults to false.",
+      "type": "boolean"
+    },
     "cursor": {
       "description": "Opaque pagination cursor returned by a previous call.",
       "type": [
@@ -71,6 +75,26 @@
         }
       ],
       "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+    },
+    "excludedThreadIds": {
+      "description": "Thread IDs to exclude before applying the result limit. Up to 100 entries; invalid IDs or a larger list are rejected, never truncated. Send the same exclusions on each page. Omitted, null, or empty means no exclusions.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "includedThreadIds": {
+      "description": "Restrict results to up to 100 thread IDs before pagination. Omit or send null for unrestricted results. An empty list matches nothing. Exclusions still apply. Repeat the same IDs on each page. The local store uses indexed metadata for this filter.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "limit": {
       "description": "Optional page size; defaults to a reasonable server-side value.",
@@ -148,7 +172,7 @@
       ]
     },
     "useStateDbOnly": {
-      "description": "If true, return from the state DB without scanning JSONL rollouts to repair thread metadata. Omitted or false preserves scan-and-repair behavior.",
+      "description": "If true, the local store returns indexed metadata without scanning JSONL rollouts for repairs. Requests with `includedThreadIds` always use indexed metadata.",
       "type": "boolean"
     }
   },

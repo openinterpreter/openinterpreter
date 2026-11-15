@@ -1,5 +1,6 @@
 use super::*;
 use crate::PluginGitMode;
+use crate::marketplace_staging::MarketplaceStagingDir;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::LoaderOverrides;
 use codex_config::loader::load_config_layers_state;
@@ -232,8 +233,7 @@ fn upgrade_uses_validated_source_for_git_operations() {
     let normalized_url = url::Url::from_directory_path(remote_repo.path())
         .expect("remote repository URL")
         .to_string();
-    let raw_source = codex_home.path().join("missing-raw-source");
-    let raw_source = raw_source.to_string_lossy().into_owned();
+    let raw_source = "example/good";
     let config = format!(
         r#"
 [marketplaces.good]
@@ -245,12 +245,12 @@ ref = "missing-ref"
     std::fs::write(codex_home.path().join(CONFIG_TOML_FILE), config).expect("write config");
     let marketplace = ConfiguredGitMarketplace {
         name: "good".to_string(),
-        source: raw_source,
+        source: raw_source.to_string(),
         ref_name: Some("missing-ref".to_string()),
         sparse_paths: Vec::new(),
     };
     let normalized_source = MarketplaceSource::Git {
-        url: normalized_url,
+        url: normalized_url.clone(),
         ref_name: Some("HEAD".to_string()),
     };
     let install_root = marketplace_install_root(codex_home.path());
@@ -269,6 +269,12 @@ ref = "missing-ref"
     assert_eq!(
         upgraded_root,
         AbsolutePathBuf::try_from(install_root.join("good")).expect("installed marketplace root")
+    );
+    let snapshot = read_installed_marketplace_snapshot(upgraded_root.as_path(), &marketplace.name);
+    assert!(
+        snapshot
+            .git_reference(upgraded_root.as_path(), &marketplace, &normalized_url)
+            .is_some()
     );
 }
 
@@ -311,6 +317,12 @@ fn up_to_date_fast_path_validates_marketplace_name() {
     .expect_err("mismatched marketplace name must not use the up-to-date fast path");
 
     assert!(err.contains("git clone marketplace source failed"));
+    assert_eq!(
+        std::fs::read_dir(install_root.join(".staging"))
+            .expect("read marketplace staging directory")
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -347,10 +359,9 @@ fn stale_activation_restores_newer_concurrently_installed_marketplace() {
     )
     .expect("write newer installed marketplace metadata");
 
-    let staged_dir = tempfile::Builder::new()
-        .prefix("marketplace-upgrade-")
-        .tempdir_in(&install_root)
-        .expect("create stale upgrade staging directory");
+    let staged_dir =
+        MarketplaceStagingDir::new(&install_root).expect("create stale upgrade staging directory");
+    std::fs::create_dir_all(staged_dir.path()).expect("create stale upgrade checkout");
     std::fs::write(staged_dir.path().join("marker.txt"), "stale snapshot")
         .expect("write stale staged marketplace snapshot");
     super::activation::write_installed_marketplace_metadata(
@@ -362,7 +373,7 @@ fn stale_activation_restores_newer_concurrently_installed_marketplace() {
 
     let err = super::activation::activate_marketplace_root(
         &destination,
-        staged_dir,
+        staged_dir.path(),
         &previous_snapshot,
         || Ok(()),
     )
@@ -384,6 +395,13 @@ fn stale_activation_restores_newer_concurrently_installed_marketplace() {
         &marketplace,
         NEWER_REVISION
     ));
+    drop(staged_dir);
+    assert_eq!(
+        std::fs::read_dir(install_root.join(".staging"))
+            .expect("read marketplace staging directory")
+            .count(),
+        0
+    );
 }
 
 fn config_reloader(codex_home: &Path) -> ConfigLayerReload {
@@ -529,6 +547,66 @@ fn changed_config_rolls_back_marketplace_activation() {
             original_metadata
         );
     }
+}
+
+#[test]
+fn automatic_upgrade_skips_known_name_mismatch_until_the_ref_or_revision_changes() {
+    let codex_home = TempDir::new().unwrap();
+    let home = codex_home.path();
+    let remote = TempDir::new().unwrap();
+    init_marketplace_repo(remote.path(), "renamed");
+    let config = format!(
+        "[marketplaces.original]\nsource_type = 'git'\nsource = {:?}\n",
+        remote.path().to_str().unwrap()
+    );
+    let config_path = home.join(CONFIG_TOML_FILE);
+    std::fs::write(&config_path, &config).unwrap();
+    let reload = config_reloader(home);
+    let upgrade = |mode| {
+        upgrade_configured_git_marketplaces_with_mode(
+            home,
+            &reload().unwrap(),
+            /*marketplace_name*/ None,
+            mode,
+            &reload,
+        )
+    };
+
+    let first = upgrade(PluginGitMode::Automatic);
+    assert_eq!(first.errors.len(), 1);
+    assert!(
+        first.errors[0]
+            .message
+            .contains("upgraded marketplace name `renamed`")
+    );
+
+    // Only a fresh checkout recreates the staging directory.
+    let staging = marketplace_install_root(home).join(".staging");
+    std::fs::remove_dir(&staging).unwrap();
+    assert_eq!(upgrade(PluginGitMode::Automatic).errors, first.errors);
+    assert!(!staging.exists());
+    assert_eq!(upgrade(PluginGitMode::Manual).errors, first.errors);
+    assert!(staging.is_dir());
+
+    // A different ref still needs a checkout even when it points to the same commit.
+    run_git(remote.path(), &["checkout", "-b", "same-revision"]);
+    std::fs::write(&config_path, format!("{config}ref = 'same-revision'\n")).unwrap();
+    std::fs::remove_dir(&staging).unwrap();
+    assert_eq!(upgrade(PluginGitMode::Automatic).errors, first.errors);
+    assert!(staging.is_dir());
+
+    std::fs::write(
+        remote.path().join(".agents/plugins/marketplace.json"),
+        r#"{"name":"original","plugins":[]}"#,
+    )
+    .unwrap();
+    run_git(
+        remote.path(),
+        &["commit", "-am", "restore marketplace name"],
+    );
+    let recovered = upgrade(PluginGitMode::Automatic);
+    assert!(recovered.errors.is_empty());
+    assert_eq!(recovered.upgraded_roots.len(), 1);
 }
 
 fn init_marketplace_repo(repo: &Path, marketplace_name: &str) {

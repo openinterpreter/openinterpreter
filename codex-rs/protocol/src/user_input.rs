@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::models::AudioReference;
 use crate::models::ImageDetail;
 use crate::models::ImageReference;
 
@@ -11,10 +12,11 @@ pub const MAX_USER_INPUT_TEXT_CHARS: usize = 1 << 20;
 
 /// User input
 #[non_exhaustive]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS, JsonSchema)]
+#[derive(derive_more::Debug, Clone, Deserialize, Serialize, PartialEq, TS, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserInput {
     Text {
+        #[debug("{:?} <{} bytes>", &text[..text.floor_char_boundary(/*index*/ 512)], text.len())]
         text: String,
         /// UI-defined spans within `text` that should be treated as special elements.
         /// These are byte ranges into the UTF-8 `text` buffer and are used to render
@@ -39,8 +41,11 @@ pub enum UserInput {
         #[ts(optional)]
         detail: Option<ImageDetail>,
     },
-    /// Pre-encoded audio data URI forwarded to the Responses API.
-    Audio { audio_url: String },
+    /// Audio reference forwarded to the Responses API.
+    Audio {
+        #[serde(flatten)]
+        audio: AudioReference,
+    },
     /// Local audio path converted to an `Audio` data URI during request serialization.
     LocalAudio { path: std::path::PathBuf },
 

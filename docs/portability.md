@@ -25,14 +25,14 @@ that every kind of runtime state already has a universal format.
 
 ## Current Shared Surface
 
-| Capability | Shared surface |
-| ---------- | -------------- |
-| Project instructions | `AGENTS.md` |
-| Project skills | `.agents/skills/` |
-| Personal skills | `~/.agents/skills/` |
-| Tool integrations | Model Context Protocol (MCP) |
-| Editor and client integration | Agent Client Protocol (ACP) |
-| Programmatic execution | Codex-compatible exec protocol |
+| Capability                    | Shared surface                 |
+| ----------------------------- | ------------------------------ |
+| Project instructions          | `AGENTS.md`                    |
+| Project skills                | `.agents/skills/`              |
+| Personal skills               | `~/.agents/skills/`            |
+| Tool integrations             | Model Context Protocol (MCP)   |
+| Editor and client integration | Agent Client Protocol (ACP)    |
+| Programmatic execution        | Codex-compatible exec protocol |
 
 These locations and protocols should work without converting the user's data
 into an Open Interpreter-only representation.

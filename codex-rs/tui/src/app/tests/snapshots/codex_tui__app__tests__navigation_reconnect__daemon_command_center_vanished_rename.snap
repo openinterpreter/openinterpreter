@@ -15,7 +15,7 @@ expression: "render_bottom_popup(&app.chat_widget, 100)"
                                                           │ Model: Unknown
                                                           │
                                                           │ Prompt
-                                                          │ New task
+                                                          │ Selected task
                                                           │
                                                           │
                                                           │

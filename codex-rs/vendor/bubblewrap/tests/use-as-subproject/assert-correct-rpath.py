@@ -5,9 +5,9 @@
 import subprocess
 import sys
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     completed = subprocess.run(
-        ['objdump', '-T', '-x', sys.argv[1]],
+        ["objdump", "-T", "-x", sys.argv[1]],
         stdout=subprocess.PIPE,
     )
     stdout = completed.stdout
@@ -17,10 +17,10 @@ if __name__ == '__main__':
     for line in stdout.splitlines():
         words = line.strip().split()
 
-        if words and words[0] in (b'RPATH', b'RUNPATH'):
-            print(line.decode(errors='backslashreplace'))
+        if words and words[0] in (b"RPATH", b"RUNPATH"):
+            print(line.decode(errors="backslashreplace"))
             assert len(words) == 2, words
-            assert words[1] == b'${ORIGIN}/../lib', words
+            assert words[1] == b"${ORIGIN}/../lib", words
             seen_rpath = True
 
     assert seen_rpath

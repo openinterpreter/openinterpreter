@@ -97,6 +97,7 @@ async fn consumer_roots_include_paginated_archived_descendants_and_keep_missing_
             mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 16,
+            required_human_approval: true,
         })
         .await
         .unwrap();

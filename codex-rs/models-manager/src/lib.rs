@@ -1,15 +1,20 @@
 pub mod cache;
+mod catalog;
 pub mod collaboration_mode_presets;
 pub(crate) mod compatibility_enrichment;
 pub(crate) mod config;
 pub mod manager;
 pub mod model_info;
 pub mod model_presets;
+mod originator;
 pub mod provider_catalog_models;
 pub mod test_support;
 
+pub use catalog::CatalogModel;
+pub use catalog::ModelOrigin;
 pub use codex_protocol::auth::AuthMode;
 pub use config::ModelsManagerConfig;
+pub use originator::ModelCatalogOriginator;
 
 /// Load the bundled model catalog shipped with `codex-models-manager`.
 pub fn bundled_models_response()
@@ -33,6 +38,27 @@ fn client_version_to_whole_for_product(product: codex_product_info::Product) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn originator_partitions_are_explicit_and_round_trip() {
+        for (name, partition) in [
+            ("codex_work_cca", ModelCatalogOriginator::Work),
+            ("codex_work_web", ModelCatalogOriginator::WorkWeb),
+            ("codex_work_desktop", ModelCatalogOriginator::WorkDesktop),
+            ("codex_work_mobile", ModelCatalogOriginator::WorkMobile),
+            ("chatgpt_cca", ModelCatalogOriginator::Chat),
+        ] {
+            assert_eq!(
+                ModelCatalogOriginator::from_originator(name),
+                Some(partition)
+            );
+            assert_eq!(partition.as_str(), name);
+        }
+        assert_eq!(
+            ModelCatalogOriginator::from_originator("unrecognized"),
+            None
+        );
+    }
 
     #[test]
     fn bundled_visible_models_do_not_require_a_newer_codex_client() {

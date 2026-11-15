@@ -118,7 +118,7 @@ async fn backend_banner_fallback_updates_task_settings_and_keeps_notice() -> Res
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
         let queued = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert!(queued.iter().any(|event| matches!(event, AppEvent::OpenUrlInBrowser { url } if url == "https://chatgpt.com/codex/settings/usage")));
+        assert!(queued.iter().any(|event| matches!(event, AppEvent::OpenUrlInBrowser { url } if url == "https://chatgpt.com/settings/usage")));
         let notices = queued
             .iter()
             .filter_map(|event| match event {
@@ -328,9 +328,11 @@ async fn backend_banner_fallback_handles_settings_failure_and_queued_manual_sele
         })
         .await?;
         let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             client,
             crate::app_server_session::ThreadParamsMode::Embedded,
         );
+        assert!(!crate::app::safety_recourse::supports_server(&server));
         while events.try_recv().is_ok() {}
         let pending_turn = if use_reserve && error_code.is_some() {
             app.chat_widget

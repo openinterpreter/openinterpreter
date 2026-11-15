@@ -1,0 +1,123 @@
+---
+source: core/tests/suite/scenarios_partial_answers.rs
+expression: "context_snapshot::format_request_history_snapshot(\"A worker inherits the parent prefix, then receives its own window hint and instructions. Requests are grouped by parent, then child.\",\n&requests, &ContextSnapshotOptions::default().rewrite_known_segments())"
+---
+Scenario: A worker inherits the parent prefix, then receives its own window hint and instructions. Requests are grouped by parent, then child.
+
+## Window 1
+-- request 1 (turn) --
+00:additional_tools/developer (2; hash=83c28a07e06c911d):
+        - namespace/functions; hash=23e0bd95ef50816d
+          - custom/exec
+          - function/wait
+          - function/request_user_input
+          - function/new_context
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+          - function/followup_task
+          - function/interrupt_agent
+          - function/list_agents
+          - function/send_message
+          - function/spawn_agent
+          - function/wait_agent
+01:message/developer:
+    <MODEL_INSTRUCTIONS>
+02:message/developer[3]:
+    [01] Coordinate the investigation.
+    [02] <context_window_guidance>
+        For tasks that may span context windows, use `notes` to maintain a concise checkpoint of the goal, decis... notes, but writes are limited to the current thread. [hash=3eea124e6983e23d]
+
+        It is a good idea to take incremental notes while you work so that you do not miss any important info. Y...ver-run the context window without any documentation. [hash=6d014a8420d908e2]
+
+        If Previous context window id is present in `<context_window>`, it means a context reset occurred and th...tems`, or `search_contents` to locate the item first. [hash=e2d9878e9e72f8c8]
+
+        Treat notes and history as internal bookkeeping. Do not mention them in user-facing messages.
+
+        </context_window_guidance>
+    [03] <PERMISSIONS_INSTRUCTIONS>
+03:function_call_output/agent.thread_hint:Agent name: /root
+    First context window id: <UUID 1>
+    Current context window id: <UUID 1>
+04:message/developer:
+    You are /root. Coordinate the investigation.
+05:message/developer:
+    <MULTI_AGENT_MODE>
+06:message/user:
+    <ENVIRONMENT_CONTEXT>
+07:message/user:
+    Give me both results.
+-- request 2 (turn) --
+08:message/assistant:
+    The first result is ready.
+09:message/assistant:
+    Checking the remaining result.
+10:message/assistant:
+    The second result is ready.
+11:message/user:
+    Have a worker check both results.
+-- request 3 (turn) --
+12:function_call/collaboration.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
+13:function_call_output:{"task_name":"/root/worker"}
+
+## Window 2 (after request 3: input diverged at item 13)
+-- request 4 (turn) --
+00:additional_tools/developer (2; hash=83c28a07e06c911d):
+        - namespace/functions; hash=23e0bd95ef50816d
+          - custom/exec
+          - function/wait
+          - function/request_user_input
+          - function/new_context
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=2c8d6295978dbe63
+          - function/followup_task
+          - function/interrupt_agent
+          - function/list_agents
+          - function/send_message
+          - function/spawn_agent
+          - function/wait_agent
+01:message/developer:
+    <MODEL_INSTRUCTIONS>
+02:message/developer[3]:
+    [01] Coordinate the investigation.
+    [02] <context_window_guidance>
+        For tasks that may span context windows, use `notes` to maintain a concise checkpoint of the goal, decis... notes, but writes are limited to the current thread. [hash=3eea124e6983e23d]
+
+        It is a good idea to take incremental notes while you work so that you do not miss any important info. Y...ver-run the context window without any documentation. [hash=6d014a8420d908e2]
+
+        If Previous context window id is present in `<context_window>`, it means a context reset occurred and th...tems`, or `search_contents` to locate the item first. [hash=e2d9878e9e72f8c8]
+
+        Treat notes and history as internal bookkeeping. Do not mention them in user-facing messages.
+
+        </context_window_guidance>
+    [03] <PERMISSIONS_INSTRUCTIONS>
+03:function_call_output/agent.thread_hint:Agent name: /root
+    First context window id: <UUID 1>
+    Current context window id: <UUID 1>
+04:message/developer:
+    You are /root. Coordinate the investigation.
+05:message/developer:
+    <MULTI_AGENT_MODE>
+06:message/user:
+    <ENVIRONMENT_CONTEXT>
+07:message/user:
+    Give me both results.
+08:message/assistant:
+    The first result is ready.
+09:message/assistant:
+    Checking the remaining result.
+10:message/assistant:
+    The second result is ready.
+11:message/user:
+    Have a worker check both results.
+12:function_call/collaboration.spawn_agent:{"fork_turns":"all","message":"Check both inherited results.","task_name":"worker"}
+13:function_call_output:aborted
+14:message/developer:
+    You are now a newly spawned child agent. The preceding conversation is inherited parent context. Follow ...are not inherited. Report your result to your parent. [hash=0e586a5d405d39db]
+15:message/developer:
+    Check both results independently.
+16:message/developer:
+    You are a worker. Report to your parent.
+17:function_call_output/agent.thread_hint:Agent name: /root/worker
+    First context window id: <UUID 2>
+    Current context window id: <UUID 2>
+18:message/developer:
+    <MULTI_AGENT_MODE>
+19:agent_message

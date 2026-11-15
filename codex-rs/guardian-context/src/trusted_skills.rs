@@ -7,7 +7,9 @@ use crate::SectionError;
 use crate::SectionInput;
 use crate::SectionScope;
 use codex_context_fragments::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::TruncationPolicy;
 use serde_json::json;
 
@@ -20,29 +22,13 @@ pub struct TrustedSkills {
     pub paths: Vec<String>,
 }
 
-impl ContextualUserFragment for TrustedSkills {
-    fn content_kind(&self) -> ContentItemKind {
-        ContentItemKind("guardian.trusted_skills".to_owned())
-    }
+impl TrustedSkills {
+    /// Classification attached to this fragment's rendered text.
+    pub const KIND: &str = "guardian.trusted_skills";
 
-    fn role(&self) -> &'static str {
-        "developer"
-    }
-
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
-
-    fn markers(&self) -> (&'static str, &'static str) {
-        Self::type_markers()
-    }
-
-    fn type_markers() -> (&'static str, &'static str) {
-        ("", "")
-    }
-
-    fn body(&self) -> String {
+    pub(crate) fn render_paths(&self) -> (ContentItem, usize) {
         let mut paths = String::from("[");
+        let mut count = 0;
         let max_path_bytes = TruncationPolicy::Tokens(MAX_TRUSTED_SKILL_TOKENS)
             .byte_budget()
             .saturating_sub(TRUSTED_SKILLS_PREFIX.len());
@@ -60,9 +46,32 @@ impl ContextualUserFragment for TrustedSkills {
             }
             paths.push_str(separator);
             paths.push_str(&encoded_path);
+            count += 1;
         }
         paths.push(']');
-        format!("{TRUSTED_SKILLS_PREFIX}{paths}")
+        (input_text(format!("{TRUSTED_SKILLS_PREFIX}{paths}")), count)
+    }
+}
+
+impl ContextualUserFragment for TrustedSkills {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind(Self::KIND.to_owned())
+    }
+
+    fn role(&self) -> &'static str {
+        "developer"
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+
+    fn body(&self) -> ContentItem {
+        self.render_paths().0
     }
 }
 

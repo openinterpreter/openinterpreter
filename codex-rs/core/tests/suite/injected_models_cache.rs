@@ -18,6 +18,7 @@ use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::cache::ModelsCacheEntry;
 use codex_models_manager::cache::ModelsCacheError;
 use codex_models_manager::cache::ModelsCacheFuture;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
 use codex_models_manager::manager::ModelsEndpointResponse;
@@ -127,14 +128,14 @@ impl ModelsCache for TestModelsCache {
 
 #[derive(Debug)]
 struct TestModelsEndpoint {
-    models: Vec<ModelInfo>,
+    models: Mutex<Vec<ModelInfo>>,
     fetch_count: AtomicUsize,
 }
 
 impl TestModelsEndpoint {
     fn new(models: Vec<ModelInfo>) -> Arc<Self> {
         Arc::new(Self {
-            models,
+            models: Mutex::new(models),
             fetch_count: AtomicUsize::new(0),
         })
     }
@@ -172,7 +173,6 @@ impl ModelsEndpointClient for TestModelsEndpoint {
 fn remote_model(slug: &str) -> ModelInfo {
     ModelInfo {
         visibility: ModelVisibility::List,
-        used_fallback_model_metadata: false,
         ..model_info_from_slug(slug)
     }
 }
@@ -203,7 +203,15 @@ async fn run_agent_with_model(models_manager: SharedModelsManager, model_slug: &
     .await;
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_models_manager(models_manager);
+        .with_models_manager(models_manager)
+        .with_config(|config| {
+            config
+                .features
+                .enable(codex_features::Feature::RuntimeAgentInstances)
+                .expect("test config should allow enabling runtime auth");
+            // Model inference uses a third-party fixture; a custom ChatGPT base must not block startup.
+            config.chatgpt_base_url = "https://custom.example.test/backend-api".to_string();
+        });
     let test = builder.build(&server).await?;
     let available_models = test
         .thread_manager
@@ -246,6 +254,7 @@ async fn run_agent_with_model(models_manager: SharedModelsManager, model_slug: &
         response_mock.single_request().body_json()["model"],
         model_slug
     );
+    assert!(!test.codex_home_path().join("models_cache.json").exists());
     Ok(())
 }
 

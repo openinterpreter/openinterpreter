@@ -43,7 +43,7 @@ fn parent_owned_thread_allows_safe_command_selected_from_prefix() {
 #[test]
 fn left_navigates_only_from_an_empty_prompt() {
     let (mut composer, mut events) = new_test_composer();
-    composer.set_agents_navigation_enabled(/*enabled*/ true);
+    composer.command_center_enabled = true;
     composer.insert_str("ab");
     composer.handle_key_event(KeyCode::Left.into());
     composer.insert_str("!");
@@ -77,7 +77,7 @@ fn left_respects_attachments_pastes_and_other_input_surfaces() {
     ];
     for setup in setups {
         let (mut composer, mut events) = new_test_composer();
-        composer.set_agents_navigation_enabled(/*enabled*/ true);
+        composer.command_center_enabled = true;
         setup(&mut composer);
         composer.handle_key_event(KeyCode::Left.into());
         assert!(
@@ -99,14 +99,14 @@ fn agents_navigation_hint_snapshots() {
             /*width*/ 80,
             /*enhanced_keys_supported*/ false,
             |composer| {
-                composer.set_agents_navigation_enabled(/*enabled*/ true);
+                composer.command_center_enabled = true;
                 match name {
                     "agents_navigation_help" => {
                         composer.handle_key_event(KeyCode::Char('?').into());
                     }
                     "agents_navigation_status" => {
                         composer.set_status_line_enabled(/*enabled*/ true);
-                        composer.set_status_line(Some(Line::from("model · project")));
+                        composer.set_status_line(Some(Line::from("model · project").into()));
                     }
                     _ => {}
                 }
@@ -123,7 +123,7 @@ fn left_respects_editor_and_vim_history_remaps() {
 
     for vim in [false, true] {
         let (mut composer, mut events) = new_test_composer();
-        composer.set_agents_navigation_enabled(/*enabled*/ true);
+        composer.command_center_enabled = true;
         composer.insert_str("previous");
         composer.handle_key_event(KeyCode::Enter.into());
         let mut config = TuiKeymap::default();

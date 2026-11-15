@@ -2,6 +2,10 @@ use super::*;
 use crate::config::ConfigBuilder;
 use crate::plugins::plugins_manager_for_config;
 use crate::skills_load_input_from_config;
+use codex_config::CloudConfigBundleBindingStatus;
+use codex_config::CloudConfigBundlePolicy;
+use codex_config::CloudConfigBundleSnapshot;
+use codex_config::ConfigLayerSource;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_protocol::config_types::ServiceTier;
@@ -186,7 +190,6 @@ async fn apply_role_preserves_unspecified_keys() {
     )])
     .await;
     config.codex_linux_sandbox_exe = Some(PathBuf::from("/tmp/codex-linux-sandbox"));
-    config.main_execve_wrapper_exe = Some(PathBuf::from("/tmp/codex-execve-wrapper"));
     let role_path = write_role_config(
         &home,
         "instructions-only.toml",
@@ -222,10 +225,6 @@ async fn apply_role_preserves_unspecified_keys() {
     assert_eq!(
         config.codex_linux_sandbox_exe,
         Some(PathBuf::from("/tmp/codex-linux-sandbox"))
-    );
-    assert_eq!(
-        config.main_execve_wrapper_exe,
-        Some(PathBuf::from("/tmp/codex-execve-wrapper"))
     );
     assert_eq!(config.base_instructions, base_instructions);
     assert_eq!(config.base_instructions_provenance, provenance);
@@ -432,6 +431,31 @@ writable_roots = ["./sandbox-root"]
 #[tokio::test]
 async fn apply_role_cannot_expand_parent_authority() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let policy = CloudConfigBundlePolicy::default();
+    let mut snapshot = CloudConfigBundleSnapshot {
+        config_server: None,
+        bundle: Ok(None),
+        binding: None,
+    };
+    policy.publish_snapshot(&mut snapshot);
+    let config_server = codex_config::ConfigServer {
+        base_url: "https://policy.example/settings".into(),
+        oauth: None,
+    };
+    let mut requirements = config.config_layer_stack.requirements_toml().clone();
+    requirements.config_server = Some(config_server.clone());
+    config.config_layer_stack = codex_config::ConfigLayerStack::new(
+        config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .cloned()
+            .collect(),
+        config.config_layer_stack.requirements().clone(),
+        requirements,
+    )
+    .expect("parent managed config")
+    .with_cloud_config_binding(snapshot.binding)
+    .with_applied_config_server(Some(config_server));
     config.notify = Some(vec!["parent-notifier".to_string()]);
     for feature in [Feature::MemoryTool, Feature::RequestPermissionsTool] {
         config
@@ -480,6 +504,23 @@ command = "attacker-command"
         .await
         .expect("custom role should apply");
 
+    assert_eq!(
+        config.config_layer_stack.applied_config_server(),
+        parent.config_layer_stack.applied_config_server()
+    );
+
+    policy.observe_remote_bundle(
+        &CloudConfigBundleFixture::enterprise_config("model = 'managed'").into_bundle(),
+    );
+    assert_eq!(
+        config
+            .config_layer_stack
+            .cloud_config_binding()
+            .expect("role should preserve managed policy binding")
+            .read()
+            .status,
+        CloudConfigBundleBindingStatus::Suspended
+    );
     assert_eq!(
         config.developer_instructions.as_deref(),
         Some("Stay focused")
@@ -644,7 +685,11 @@ enabled = false
     let snapshot = skills_service
         .snapshot_for_config(
             &skills_input,
-            Some(Arc::clone(&codex_exec_server::LOCAL_FS)),
+            Some(
+                &codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(
+                    &codex_exec_server::LOCAL_FS,
+                ),
+            ),
         )
         .await;
     let outcome = snapshot.outcome();

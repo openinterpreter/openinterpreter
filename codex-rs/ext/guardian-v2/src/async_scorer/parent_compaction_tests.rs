@@ -104,6 +104,8 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
 
     for item in &mut bounded {
         let envelope_bytes = serde_json::to_vec(&*item)?.len();
+        let framing_tokens = TruncationPolicy::Bytes(envelope_bytes).token_budget();
+        let payload_bytes = (DEFAULT_PARENT_COMPACTION_TOKENS - framing_tokens) * 12;
         let encrypted_content = match item {
             ResponseItem::Compaction {
                 encrypted_content, ..
@@ -114,8 +116,8 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
             } => encrypted_content,
             _ => unreachable!("test fixtures are encrypted compaction items"),
         };
-        *encrypted_content = "a".repeat(max_compaction_bytes - envelope_bytes);
-        assert_eq!(serde_json::to_vec(&*item)?.len(), max_compaction_bytes);
+        *encrypted_content = "a".repeat(payload_bytes);
+        assert!(serde_json::to_vec(&*item)?.len() > max_compaction_bytes);
         assert_eq!(
             encrypted_checkpoint(std::iter::once(&*item), DEFAULT_PARENT_COMPACTION_TOKENS,),
             Ok(Some(item.clone()))
@@ -134,7 +136,7 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
         }
         assert_eq!(
             serde_json::to_vec(&oversized)?.len(),
-            max_compaction_bytes + 1
+            envelope_bytes + payload_bytes + 1
         );
         assert_eq!(
             encrypted_checkpoint(
@@ -164,6 +166,19 @@ fn encrypted_parent_compaction_rejects_oversized_latest_item() -> Result<()> {
         ),
         Err(ParentCompactionError::Oversized),
         "oversized passthrough metadata must not bypass the complete-item limit"
+    );
+
+    let item = ResponseItem::Compaction {
+        id: Some(ResponseItemId::from_server("cmp_wire_limit".to_owned())),
+        encrypted_content: "a"
+            .repeat(TruncationPolicy::Tokens(MAX_MODEL_CONTEXT_ITEM_TOKENS).byte_budget()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(codex_guardian_context::estimate_input_tokens(&item) < MAX_MODEL_CONTEXT_ITEM_TOKENS);
+    assert_eq!(
+        encrypted_checkpoint(std::iter::once(&item), MAX_MODEL_CONTEXT_ITEM_TOKENS),
+        Err(ParentCompactionError::Oversized),
+        "even a checkpoint below the token limit must fit the wire-size limit"
     );
 
     Ok(())

@@ -1,3 +1,19 @@
+//! Registers each typed request with its backend and preserves model-only media in tool outputs.
+
+use crate::backend::Handle;
+use crate::backend::Request;
+use crate::requests::HISTORY;
+use crate::requests::HistoryListItems;
+use crate::requests::HistoryListWindows;
+use crate::requests::HistoryReadItem;
+use crate::requests::HistorySearchContents;
+use crate::requests::NOTES;
+use crate::requests::Namespace;
+use crate::requests::NotesAppendToFile;
+use crate::requests::NotesListFilesByPrefix;
+use crate::requests::NotesReadFile;
+use crate::requests::NotesSearchContents;
+use crate::requests::NotesWriteFile;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::ResponsesApiTool;
 use codex_extension_api::ToolCall;
@@ -13,314 +29,194 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::openai_models::HistoryToolMessages;
+use codex_protocol::openai_models::NotesToolMessages;
+use codex_protocol::openai_models::ToolMessage;
 use codex_tools::JsonToolOutput;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
+use codex_tools::ToolOutputSchema;
+use codex_tools::with_catalog_tool_message;
+use codex_utils_output_truncation::TruncationPolicy;
+use schemars::JsonSchema;
+use schemars::r#gen::SchemaSettings;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-use crate::backend::HistoryNotesBackend;
+type Executor = Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
 
-const HISTORY_NAMESPACE: &str = "history";
-const NOTES_NAMESPACE: &str = "notes";
-const HISTORY_DESCRIPTION: &str = "Recover prior conversation after a context-window reset by listing, reading, and searching normalized history using agent names and the opaque window and item IDs returned by these tools. Pass returned IDs unchanged when filtering or reading an item. Items are ordered by persisted ordinal, then creation time; list and search calls return no matches for an unknown window. Calls use the current agent by default; pass an absolute agent name or one relative to the current agent to inspect another agent. History is read-only and eventually consistent, so newly generated items may take a few seconds to appear. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
-const NOTES_DESCRIPTION: &str = "Read and maintain private notes that survive context-window transitions within this rollout. Paths are virtual, not filesystem paths. Relative file paths use the current agent's <agent_name>/notes directory; cross-agent paths must be absolute. Absolute paths use <agent_name>/notes[/<path>]. Reads, listings, searches, and writes may access other agents' notes. File operations require <path>; path-prefix arguments may be omitted to use the current notes directory. Empty, '.', and '..' path components are unsupported. Shell expansion is not performed, so '~' is treated literally. Note reads reflect successful writes immediately; listings and searches are eventually consistent and may take a few seconds to reflect writes. Every file must remain at or below 1,000,000 UTF-8 bytes; create another file before approaching the limit. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
-const HISTORY_AGENT_NAME_DESCRIPTION: &str = "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent.";
+// Keep the catalog key, tool name, request type and HTTP route in one registration.
+macro_rules! register_tools {
+    ($( $catalog:ident: $messages:ty => $namespace:ident {
+        $( $name:ident: $request:ty $( [parallel = $parallel:literal] )? ),+ $(,)?
+    } ),+ $(,)?) => {
+        $($(impl Request for $request {
+            const NAMESPACE: Namespace = $namespace;
+            const NAME: &'static str = stringify!($name);
+            $(const PARALLEL: bool = $parallel;)?
+        })+)+
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HistoryNotesAction {
-    HistoryListWindows,
-    HistoryListItems,
-    HistoryReadItem,
-    HistorySearchContents,
-    NotesListFilesByPrefix,
-    NotesReadFile,
-    NotesSearchContents,
-    NotesAppendToFile,
-    NotesWriteFile,
+        pub(crate) fn history_notes_tools<B>(
+            backend: B,
+            $($catalog: Option<&$messages>,)+
+        ) -> Vec<Executor>
+        where
+            $($(B: Handle<$request>,)+)+
+        {
+            vec![$($(Arc::new(HistoryNotesTool::<$request, B> {
+                request: PhantomData,
+                backend: backend.clone(),
+                spec: tool_spec::<$request, <B as Handle<$request>>::Output>(
+                    $catalog.and_then(|messages| messages.namespace_description.as_deref()),
+                    $catalog.and_then(|messages| messages.$name.as_ref()),
+                ),
+            }) as Executor,)+)+]
+        }
+    };
 }
 
-impl HistoryNotesAction {
-    pub(crate) const ALL: [Self; 9] = [
-        Self::HistoryListWindows,
-        Self::HistoryListItems,
-        Self::HistoryReadItem,
-        Self::HistorySearchContents,
-        Self::NotesListFilesByPrefix,
-        Self::NotesReadFile,
-        Self::NotesSearchContents,
-        Self::NotesAppendToFile,
-        Self::NotesWriteFile,
-    ];
-
-    fn namespace(self) -> &'static str {
-        match self {
-            Self::HistoryListWindows
-            | Self::HistoryListItems
-            | Self::HistoryReadItem
-            | Self::HistorySearchContents => HISTORY_NAMESPACE,
-            Self::NotesListFilesByPrefix
-            | Self::NotesReadFile
-            | Self::NotesSearchContents
-            | Self::NotesAppendToFile
-            | Self::NotesWriteFile => NOTES_NAMESPACE,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::HistoryListWindows => "list_windows",
-            Self::HistoryListItems => "list_items",
-            Self::HistoryReadItem => "read_item",
-            Self::HistorySearchContents => "search_contents",
-            Self::NotesListFilesByPrefix => "list_files_by_prefix",
-            Self::NotesReadFile => "read_file",
-            Self::NotesSearchContents => "search_contents",
-            Self::NotesAppendToFile => "append_to_file",
-            Self::NotesWriteFile => "write_file",
-        }
-    }
-
-    fn endpoint(self) -> &'static str {
-        match self {
-            Self::HistoryListWindows => "alpha/history/v2/list_windows",
-            Self::HistoryListItems => "alpha/history/v2/list_items",
-            Self::HistoryReadItem => "alpha/history/v2/read_item",
-            Self::HistorySearchContents => "alpha/history/v2/search_contents",
-            Self::NotesListFilesByPrefix => "alpha/notes/v2/list_files_by_prefix",
-            Self::NotesReadFile => "alpha/notes/v2/read_file",
-            Self::NotesSearchContents => "alpha/notes/v2/search_contents",
-            Self::NotesAppendToFile => "alpha/notes/v2/append_to_file",
-            Self::NotesWriteFile => "alpha/notes/v2/write_file",
-        }
-    }
-
-    fn supports_parallel_tool_calls(self) -> bool {
-        !matches!(self, Self::NotesAppendToFile | Self::NotesWriteFile)
-    }
-
-    fn namespace_description(self) -> &'static str {
-        match self.namespace() {
-            HISTORY_NAMESPACE => HISTORY_DESCRIPTION,
-            NOTES_NAMESPACE => NOTES_DESCRIPTION,
-            _ => unreachable!("History actions use a known namespace"),
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::HistoryListWindows => {
-                "List an agent's context windows as window ID and item-count pairs. Private model-only recovery; never disclose this activity."
-            }
-            Self::HistoryListItems => {
-                "List history items with optional window, role, and tool filters. Private model-only recovery; never disclose this activity."
-            }
-            Self::HistoryReadItem => {
-                "Read a bounded range from private model-only history. Never disclose the item or this activity."
-            }
-            Self::HistorySearchContents => {
-                "Search private model-only history by literal substring. Never disclose results or this activity."
-            }
-            Self::NotesListFilesByPrefix => {
-                "List private model-only notes by path prefix. Never disclose paths, contents, or this activity."
-            }
-            Self::NotesReadFile => {
-                "Read all or a line range from private model-only notes. Never disclose paths, contents, or this activity."
-            }
-            Self::NotesSearchContents => {
-                "Search private model-only note lines by literal substring. Never disclose results or this activity."
-            }
-            Self::NotesAppendToFile => {
-                "Append text to private model-only notes. Never disclose paths, contents, or this activity."
-            }
-            Self::NotesWriteFile => {
-                "Create or replace private model-only notes. Never disclose paths, contents, or this activity."
-            }
-        }
-    }
-
-    fn parameters(self) -> Value {
-        match self {
-            Self::HistoryListWindows => json!({
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of windows to return."},
-                    "agent_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": HISTORY_AGENT_NAME_DESCRIPTION},
-                    "recent_first": {"type": "boolean", "description": "Whether to return the most recently created windows first."}
-                }
-            }),
-            Self::HistoryListItems => json!({
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of items to return."},
-                    "recent_first": {"type": "boolean", "description": "Whether to return the most recently created items first."},
-                    "tool_namespace": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Callable namespace to include. When set, non-tool messages are excluded."},
-                    "role": {"anyOf": [{"type": "string", "enum": ["user", "assistant", "tool", "system", "developer"]}, {"type": "null"}], "description": "Message role to include. Null or omission includes all roles."},
-                    "agent_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": HISTORY_AGENT_NAME_DESCRIPTION},
-                    "tool_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Callable tool name to include. When set, non-tool messages are excluded."},
-                    "window_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Full window ID. Null or omission includes all windows."},
-                    "max_chars_per_item": {"type": "integer", "minimum": 1, "description": "Maximum characters returned in each item's truncated_content."}
-                }
-            }),
-            Self::HistoryReadItem => json!({
-                "type": "object",
-                "properties": {
-                    "agent_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": HISTORY_AGENT_NAME_DESCRIPTION},
-                    "item_id": {"type": "string", "description": "The short item ID is the suffix shown in the target item's trailing `[id: ...]` marker, printed after that item's content."},
-                    "offset_chars": {"type": "integer", "minimum": 0, "description": "Zero-based character offset at which reading starts."},
-                    "limit_chars": {"type": "integer", "minimum": 1, "description": "Maximum number of characters to return."},
-                    "window_id": {"type": "string", "description": "Full window ID containing the item."}
-                },
-                "required": ["item_id", "window_id"]
-            }),
-            Self::HistorySearchContents => json!({
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of matching items to return."},
-                    "query": {"type": "string", "encrypted": true, "description": "Case-sensitive literal substring to find in item content."},
-                    "recent_first": {"type": "boolean", "description": "Whether to return the most recently created matches first."},
-                    "tool_namespace": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Callable namespace to include. When set, non-tool messages are excluded."},
-                    "role": {"anyOf": [{"type": "string", "enum": ["user", "assistant", "tool", "system", "developer"]}, {"type": "null"}], "description": "Message role to include. Null or omission includes all roles."},
-                    "agent_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": HISTORY_AGENT_NAME_DESCRIPTION},
-                    "tool_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Callable tool name to include. When set, non-tool messages are excluded."},
-                    "window_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Full window ID. Null or omission includes all windows."}
-                },
-                "required": ["query"]
-            }),
-            Self::NotesListFilesByPrefix => json!({
-                "type": "object",
-                "properties": {
-                    "prefix": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Note path prefix to list."},
-                    "max_results": {"type": "integer", "minimum": 1, "description": "Maximum number of files to return."},
-                    "file_order_by": {"type": "string", "enum": ["name", "created_at", "updated_at"], "description": "Field used to order files."},
-                    "file_order": {"type": "string", "enum": ["ascending", "descending"], "description": "Direction used to order files."}
-                }
-            }),
-            Self::NotesReadFile => json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Note file path to read."},
-                    "start_line": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "First line to return, inclusive and 1-based. Negative values count backward from the final line."},
-                    "stop_line": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "Last line to return, inclusive and 1-based. Negative values count backward from the final line."}
-                },
-                "required": ["path"]
-            }),
-            Self::NotesSearchContents => json!({
-                "type": "object",
-                "properties": {
-                    "max_matches_per_file": {"type": "integer", "minimum": 1, "description": "Maximum number of matching lines returned per file."},
-                    "query": {"type": "string", "encrypted": true, "description": "Case-sensitive literal substring to find in note lines."},
-                    "recent_file_first": {"type": "boolean", "description": "Whether to order matching files by creation time, newest first."},
-                    "max_files": {"type": "integer", "minimum": 1, "description": "Maximum number of matching files returned."},
-                    "path_prefix": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Note path prefix to search."}
-                },
-                "required": ["query"]
-            }),
-            Self::NotesAppendToFile => json!({
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "encrypted": true, "description": "Text appended exactly as provided."},
-                    "path": {"type": "string", "description": "Note file path to append to."}
-                },
-                "required": ["text", "path"]
-            }),
-            Self::NotesWriteFile => json!({
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "encrypted": true, "description": "Complete replacement text for the file."},
-                    "path": {"type": "string", "description": "Note file path to create or replace."}
-                },
-                "required": ["text", "path"]
-            }),
-        }
-    }
+register_tools! {
+    history: HistoryToolMessages => HISTORY {
+        list_windows: HistoryListWindows,
+        list_items: HistoryListItems,
+        read_item: HistoryReadItem,
+        search_contents: HistorySearchContents,
+    },
+    notes: NotesToolMessages => NOTES {
+        list_files_by_prefix: NotesListFilesByPrefix,
+        read_file: NotesReadFile,
+        search_contents: NotesSearchContents,
+        append_to_file: NotesAppendToFile [parallel = false],
+        write_file: NotesWriteFile [parallel = false],
+    },
 }
 
-pub(crate) struct HistoryNotesTool {
-    action: HistoryNotesAction,
-    backend: HistoryNotesBackend,
-    session_id: String,
-    current_agent_name: String,
+pub(crate) fn schema<T: JsonSchema>(option_add_null_type: bool) -> Value {
+    let schema = SchemaSettings::draft2019_09()
+        .with(|settings| {
+            settings.inline_subschemas = true;
+            settings.option_add_null_type = option_add_null_type;
+        })
+        .into_generator()
+        .into_root_schema_for::<T>()
+        .schema;
+    json!(schema)
 }
 
-impl HistoryNotesTool {
-    pub(crate) fn new(
-        action: HistoryNotesAction,
-        backend: HistoryNotesBackend,
-        session_id: String,
-        current_agent_name: String,
-    ) -> Self {
-        Self {
-            action,
-            backend,
-            session_id,
-            current_agent_name,
-        }
+#[expect(
+    clippy::expect_used,
+    reason = "the bundled request schemas are derived from fixed, documented types"
+)]
+fn tool_spec<R: Request, S: ToolResponse>(
+    namespace_description: Option<&str>,
+    message: Option<&ToolMessage>,
+) -> ToolSpec {
+    let mut parameters = parse_tool_input_schema(&schema::<R>(/*option_add_null_type*/ false))
+        .expect("valid history and notes request schema");
+    // Schemars sorts required keys. The published note write schemas put text before path.
+    if let Some(required) = &mut parameters.required {
+        required.sort_by_key(|name| name != "text");
     }
-
-    async fn handle_call(
-        &self,
-        call: ToolCall<'_>,
-    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
-        let arguments = call.function_arguments()?;
-        let arguments = if arguments.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(arguments)
-                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?
-        };
-        let result = self
-            .backend
-            .call(
-                self.action.endpoint(),
-                &self.session_id,
-                &self.current_agent_name,
-                arguments,
-                call.truncation_policy,
-            )
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-
-        Ok(Box::new(HistoryNotesToolOutput::new(result)?))
-    }
+    let description = parameters
+        .description
+        .take()
+        .expect("history and notes requests have descriptions")
+        .into_string();
+    let tool = ResponsesApiTool {
+        name: R::NAME.to_string(),
+        description,
+        strict: false,
+        parameters,
+        output_schema: S::output_schema(),
+        defer_loading: None,
+    };
+    let tool = S::with_catalog_message(tool, message);
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: R::NAMESPACE.name.to_string(),
+        description: namespace_description
+            .unwrap_or(R::NAMESPACE.description)
+            .to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(tool)],
+    })
 }
 
-impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
+struct HistoryNotesTool<R, B> {
+    request: PhantomData<R>,
+    backend: B,
+    spec: ToolSpec,
+}
+
+impl<'call, R: Request, B: Handle<R>> ToolExecutor<ToolCall<'call>> for HistoryNotesTool<R, B> {
     fn tool_name(&self) -> ToolName {
-        ToolName::namespaced(self.action.namespace(), self.action.name())
+        ToolName::namespaced(R::NAMESPACE.name, R::NAME)
     }
 
     fn spec(&self) -> ToolSpec {
-        ToolSpec::Namespace(ResponsesApiNamespace {
-            name: self.action.namespace().to_string(),
-            description: self.action.namespace_description().to_string(),
-            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
-                name: self.action.name().to_string(),
-                description: self.action.description().to_string(),
-                strict: false,
-                parameters: parse_tool_input_schema(&self.action.parameters()).unwrap_or_else(
-                    |error| panic!("History tool input schema should parse: {error}"),
-                ),
-                output_schema: None,
-                defer_loading: None,
-            })],
-        })
+        self.spec.clone()
     }
 
     fn exposure(&self) -> ToolExposure {
-        ToolExposure::DirectModelOnly
+        B::EXPOSURE
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
-        self.action.supports_parallel_tool_calls()
+        R::PARALLEL
     }
 
     fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
     where
         'call: 'a,
     {
-        Box::pin(self.handle_call(call))
+        Box::pin(async move {
+            let input = parse_arguments(call.function_arguments()?)?;
+            let response = self
+                .backend
+                .handle(call.truncation_policy, input)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+            response.into_tool_output(call.truncation_policy)
+        })
+    }
+}
+
+fn parse_arguments<T: DeserializeOwned>(arguments: &str) -> Result<T, FunctionCallError> {
+    serde_json::from_str(if arguments.trim().is_empty() {
+        "{}"
+    } else {
+        arguments
+    })
+    .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+}
+
+/// Supplies the advertised output schema and renders a backend response for the model.
+pub(crate) trait ToolResponse {
+    fn output_schema() -> Option<ToolOutputSchema> {
+        None
+    }
+
+    fn with_catalog_message(
+        tool: ResponsesApiTool,
+        message: Option<&ToolMessage>,
+    ) -> ResponsesApiTool {
+        with_catalog_tool_message(tool, message)
+    }
+
+    fn into_tool_output(
+        self,
+        budget: TruncationPolicy,
+    ) -> Result<Box<dyn ToolOutput>, FunctionCallError>;
+}
+
+impl ToolResponse for Value {
+    fn into_tool_output(
+        self,
+        _budget: TruncationPolicy,
+    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+        Ok(Box::new(HistoryNotesToolOutput::new(self)?))
     }
 }
 

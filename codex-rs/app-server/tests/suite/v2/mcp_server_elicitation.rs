@@ -64,7 +64,7 @@ use rmcp::model::MetaObject;
 use rmcp::model::PrimitiveSchemaDefinition;
 use rmcp::model::RequestMetaObject;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::ServerRequest as McpServerRequest;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
@@ -200,6 +200,7 @@ async fn assert_standard_form_elicitation_round_trip(
             thread_id: fixture.thread_id.clone(),
             turn_id: Some(fixture.turn_id.clone()),
             server_name: "codex_apps".to_string(),
+            environment_id: None,
             request: McpServerElicitationRequest::Form {
                 meta: None,
                 message: ELICITATION_MESSAGE.to_string(),
@@ -246,6 +247,7 @@ async fn mcp_server_openai_form_elicitation_round_trip() -> Result<()> {
             thread_id: fixture.thread_id.clone(),
             turn_id: Some(fixture.turn_id.clone()),
             server_name: "codex_apps".to_string(),
+            environment_id: None,
             request: McpServerElicitationRequest::OpenAiForm {
                 meta: None,
                 message: OPENAI_FORM_MESSAGE.to_string(),
@@ -285,6 +287,7 @@ async fn mcp_server_openai_elicitation_form_round_trip() -> Result<()> {
             thread_id: fixture.thread_id.clone(),
             turn_id: Some(fixture.turn_id.clone()),
             server_name: "codex_apps".to_string(),
+            environment_id: None,
             request: McpServerElicitationRequest::OpenAiElicitationForm {
                 meta: Some(json!({ "example/request": "template-picker" })),
                 message: OPENAI_FORM_MESSAGE.to_string(),
@@ -521,6 +524,7 @@ async fn initialize_websocket_client(
                 version: "0.1.0".to_string(),
             },
             capabilities: Some(InitializeCapabilities {
+                required_human_approval: false,
                 experimental_api: true,
                 extensions: supports_openai_form_elicitation
                     .then(|| HashMap::from([("openai/form".to_string(), serde_json::json!({}))])),
@@ -1048,8 +1052,8 @@ impl ServerHandler for ElicitationAppsMcpServer {
         Ok(self.get_info())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_06_18)
     }
 

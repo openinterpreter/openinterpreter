@@ -53,7 +53,7 @@ impl OrchestratorSkillProvider {
 impl SkillProvider for OrchestratorSkillProvider {
     fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
         Box::pin(async move {
-            let Some(client) = query.mcp_resources else {
+            let Some(client) = query.mcp_resources.as_ref() else {
                 return Ok(SkillCatalog::default());
             };
             if !client.has_server(CODEX_APPS_MCP_SERVER_NAME).await {
@@ -180,7 +180,7 @@ impl SkillProvider for OrchestratorSkillProvider {
     ) -> SkillProviderFuture<'a, SkillReadResult> {
         Box::pin(async move {
             if request.authority
-                != SkillAuthority::new(SkillSourceKind::Orchestrator, CODEX_APPS_MCP_SERVER_NAME)
+                != SkillAuthority::new(SkillSourceKind::Cloud, CODEX_APPS_MCP_SERVER_NAME)
             {
                 return Err(SkillProviderError::new(format!(
                     "orchestrator skill provider cannot read authority {}",
@@ -193,7 +193,10 @@ impl SkillProvider for OrchestratorSkillProvider {
                 ));
             }
 
-            let Some(client) = request.mcp_resources.as_ref() else {
+            let super::SkillReadContext::Cloud {
+                mcp_resources: Some(client),
+            } = &request.context
+            else {
                 return Err(SkillProviderError::new(
                     "session MCP resource client is not configured",
                 ));
@@ -272,7 +275,7 @@ fn catalog_entry_from_resource(resource: &Resource) -> Option<SkillCatalogEntry>
 
     let mut entry = SkillCatalogEntry::new(
         SkillPackageId(uri.to_string()),
-        SkillAuthority::new(SkillSourceKind::Orchestrator, CODEX_APPS_MCP_SERVER_NAME),
+        SkillAuthority::new(SkillSourceKind::Cloud, CODEX_APPS_MCP_SERVER_NAME),
         name,
         description,
         SkillResourceId::new(main_prompt),

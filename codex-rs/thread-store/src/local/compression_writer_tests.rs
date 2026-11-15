@@ -49,6 +49,7 @@ fn resume(thread_id: ThreadId, path: &Path, home: &Path) -> ResumeThreadParams {
         thread_id,
         rollout_path: Some(path.to_path_buf()),
         history: None,
+        history_revision: None,
         include_archived: true,
         metadata: ThreadPersistenceMetadata {
             cwd: Some(home.to_path_buf()),
@@ -183,7 +184,7 @@ async fn metadata_updates_share_ownership_and_resume_compressed_rollouts() -> Te
     expected.git = None;
     assert_eq!(
         json!(items.last()),
-        json!(Some(RolloutItem::SessionMeta(expected.clone())))
+        json!(Some(RolloutItem::SessionMeta(Box::new(expected.clone()))))
     );
 
     age(&path)?;
@@ -194,7 +195,7 @@ async fn metadata_updates_share_ownership_and_resume_compressed_rollouts() -> Te
     let (items, _, _) = RolloutRecorder::load_rollout_items(&path).await?;
     assert_eq!(
         json!(items.last()),
-        json!(Some(RolloutItem::SessionMeta(expected)))
+        json!(Some(RolloutItem::SessionMeta(Box::new(expected))))
     );
     Ok(())
 }

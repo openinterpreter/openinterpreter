@@ -3,9 +3,35 @@
 
 use super::*;
 use crate::bottom_pane::QuestionSubmission;
+use crate::tui::MouseCapture;
 use codex_protocol::items::AsyncUserInputQuestion;
 
 impl ChatWidget {
+    pub(crate) fn mouse_capture(&self, owned_screen: bool) -> MouseCapture {
+        if owned_screen
+            && !self.bottom_pane.has_active_modal()
+            && self
+                .bottom_pane
+                .questions
+                .as_ref()
+                .is_some_and(|q| q.expanded)
+        {
+            MouseCapture::Disabled
+        } else {
+            MouseCapture::Inherit
+        }
+    }
+
+    pub(super) fn take_question_drafts(&mut self) -> Option<Vec<String>> {
+        if matches!(
+            self.pending_notification,
+            Some(Notification::AsyncQuestion { .. })
+        ) {
+            self.pending_notification = None;
+        }
+        self.bottom_pane.take_question_drafts()
+    }
+
     pub(super) fn add_async_questions(
         &mut self,
         message_id: &str,
@@ -123,7 +149,7 @@ impl ChatWidget {
                 }
                 let main = self.bottom_pane.composer_draft_snapshot();
                 let accepted = if queued
-                    || self.input_queue.suppress_queue_autosend
+                    || self.input_queue.submissions_paused()
                     || self.is_plan_streaming_in_tui()
                     || self.input_queue.user_turn_pending_start
                         && !self.turn_lifecycle.agent_turn_running
@@ -152,6 +178,7 @@ impl ChatWidget {
                     let cursor = main.cursor;
                     self.restore_composer_state(ThreadComposerState {
                         text: main.text,
+                        shell_mode: None,
                         text_elements: main.text_elements,
                         local_images: main.local_images,
                         remote_image_urls: main.remote_image_urls,

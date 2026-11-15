@@ -39,11 +39,11 @@ The `description` controls when the skill is selected, so make it specific.
 
 ## Locations
 
-| Path | Scope |
-| ---- | ----- |
-| `.agents/skills/` | Repository or directory-local skills |
-| `~/.agents/skills/` | Personal skills |
-| Bundled skills | Built-in workflows |
+| Path                | Scope                                |
+| ------------------- | ------------------------------------ |
+| `.agents/skills/`   | Repository or directory-local skills |
+| `~/.agents/skills/` | Personal skills                      |
+| Bundled skills      | Built-in workflows                   |
 
 Local skills take priority over personal and bundled skills when names collide.
 

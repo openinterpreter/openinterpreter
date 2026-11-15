@@ -13,6 +13,7 @@ use crate::ConfigLayerMetadata;
 use crate::ConfigLayerSource;
 use crate::ProfileV2Name;
 use crate::shell_environment_policy::validate_shell_environment_policy_filter_config;
+use crate::types::AppsConfigToml;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -43,6 +44,8 @@ impl From<LoaderOverrides> for ConfigLoadOptions {
 pub struct LoaderOverrides {
     /// Optional configuration file supplied with the installed Codex package.
     pub packaged_defaults_path: Option<AbsolutePathBuf>,
+    /// Working directory to use when a client request supplies none.
+    pub default_cwd: Option<AbsolutePathBuf>,
     pub user_config_path: Option<AbsolutePathBuf>,
     pub user_config_profile: Option<ProfileV2Name>,
     pub managed_config_path: Option<PathBuf>,
@@ -69,6 +72,7 @@ impl LoaderOverrides {
         let base = std::env::temp_dir().join("codex-config-tests");
         Self {
             packaged_defaults_path: None,
+            default_cwd: None,
             user_config_path: None,
             user_config_profile: None,
             managed_config_path: Some(base.join("managed_config.toml")),
@@ -243,8 +247,11 @@ impl ConfigLayerEntry {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigLayerStack {
+    cloud_config_binding: Option<crate::CloudConfigBundleBinding>,
+    mcp_ema_cancellation: crate::McpEmaCancellation,
+    applied_config_server: Option<std::sync::Arc<crate::ConfigServer>>,
     /// Cached TOML projection derived only from `requirements_toml`.
     /// Construction validates provider definitions and reports serialization errors,
     /// so `effective_config()` can replace complete entries without a fallible conversion.
@@ -259,8 +266,8 @@ pub struct ConfigLayerStack {
 
     /// Raw requirements data as loaded from requirements.toml/MDM/legacy
     /// sources. This preserves the original allow-lists so they can be
-    /// surfaced via APIs.
-    requirements_toml: ConfigRequirementsToml,
+    /// surfaced via APIs. Keep it off the stack of futures that carry a config.
+    requirements_toml: Box<ConfigRequirementsToml>,
 
     /// Whether execpolicy should skip `.rules` files from user and project config-layer folders.
     ignore_user_and_project_exec_policy_rules: bool,
@@ -271,6 +278,22 @@ pub struct ConfigLayerStack {
     /// `Some(vec![])` means it checked and found nothing to report.
     startup_warnings: Option<Vec<String>>,
     pub(crate) is_projectless: bool,
+    pub project_trust: Option<crate::loader::ProjectTrustDecision>,
+}
+
+impl PartialEq for ConfigLayerStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.applied_config_server == other.applied_config_server
+            && self.model_provider_requirements == other.model_provider_requirements
+            && self.layers == other.layers
+            && self.requirements == other.requirements
+            && self.requirements_toml == other.requirements_toml
+            && self.ignore_user_and_project_exec_policy_rules
+                == other.ignore_user_and_project_exec_policy_rules
+            && self.startup_warnings == other.startup_warnings
+            && self.is_projectless == other.is_projectless
+            && self.project_trust == other.project_trust
+    }
 }
 
 impl ConfigLayerStack {
@@ -284,15 +307,43 @@ impl ConfigLayerStack {
         let model_provider_requirements = Some(crate::model_provider_requirements::to_config(
             &requirements_toml,
         )?);
-        Ok(Self {
+        let stack = Self {
+            cloud_config_binding: None,
+            mcp_ema_cancellation: crate::McpEmaCancellation::default(),
+            applied_config_server: None,
             model_provider_requirements,
             layers,
             requirements,
-            requirements_toml,
+            requirements_toml: Box::new(requirements_toml),
             ignore_user_and_project_exec_policy_rules: false,
             startup_warnings: None,
             is_projectless: false,
-        })
+            project_trust: None,
+        };
+        stack.validate_project_mitm_profiles()?;
+        Ok(stack)
+    }
+
+    pub fn validate_project_mitm_profiles(&self) -> std::io::Result<()> {
+        crate::loader::validate_project_mitm_profiles(
+            self.layers_low_to_high()
+                .map(|layer| (&layer.name, &layer.config)),
+            self.requirements_toml
+                .permissions
+                .iter()
+                .flat_map(|permissions| {
+                    permissions.profiles.iter().map(|(name, profile)| {
+                        (
+                            name.clone(),
+                            profile.extends.clone(),
+                            profile
+                                .network
+                                .as_ref()
+                                .is_some_and(|network| network.mitm.is_some()),
+                        )
+                    })
+                }),
+        )
     }
 
     pub fn with_user_and_project_exec_policy_rules_ignored(
@@ -305,6 +356,65 @@ impl ConfigLayerStack {
 
     pub fn ignore_user_and_project_exec_policy_rules(&self) -> bool {
         self.ignore_user_and_project_exec_policy_rules
+    }
+
+    pub fn with_cloud_config_binding(
+        mut self,
+        binding: Option<crate::CloudConfigBundleBinding>,
+    ) -> Self {
+        self.cloud_config_binding = binding;
+        self
+    }
+
+    pub fn cloud_config_binding(&self) -> Option<&crate::CloudConfigBundleBinding> {
+        self.cloud_config_binding.as_ref()
+    }
+
+    pub fn with_mcp_ema_cancellation(mut self, cancellation: crate::McpEmaCancellation) -> Self {
+        self.mcp_ema_cancellation = cancellation;
+        self
+    }
+
+    pub fn mcp_ema_cancellation(&self) -> &crate::McpEmaCancellation {
+        &self.mcp_ema_cancellation
+    }
+
+    pub fn with_applied_config_server(
+        mut self,
+        service_config: Option<crate::ConfigServer>,
+    ) -> Self {
+        self.applied_config_server = service_config.map(std::sync::Arc::new);
+        self
+    }
+
+    pub fn applied_config_server(&self) -> Option<&crate::ConfigServer> {
+        self.applied_config_server.as_deref()
+    }
+
+    /// Require configuration from the configured service before starting a session.
+    pub fn ensure_config_server_applied(&self) -> std::io::Result<()> {
+        if self.requirements_toml.config_server.as_ref() != self.applied_config_server() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Required managed configuration has not been loaded; authenticate and reload configuration before starting a session",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Retains session layers while adopting current MCP, plugin, and feature restrictions.
+    /// Rejected refreshes must not restore an earlier policy on the next user reload.
+    pub fn with_mcp_requirements_from(&self, incoming: &Self) -> Self {
+        let mut stack = self.clone();
+        stack.requirements.mcp_servers = incoming.requirements.mcp_servers.clone();
+        stack.requirements.plugins = incoming.requirements.plugins.clone();
+        stack.requirements.feature_requirements =
+            incoming.requirements.feature_requirements.clone();
+        stack.requirements_toml.mcp_servers = incoming.requirements_toml.mcp_servers.clone();
+        stack.requirements_toml.plugins = incoming.requirements_toml.plugins.clone();
+        stack.requirements_toml.feature_requirements =
+            incoming.requirements_toml.feature_requirements.clone();
+        stack
     }
 
     pub(crate) fn with_startup_warnings(mut self, startup_warnings: Vec<String>) -> Self {
@@ -422,6 +532,9 @@ impl ConfigLayerStack {
         }
         Ok(Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
+            mcp_ema_cancellation: self.mcp_ema_cancellation.clone(),
+            applied_config_server: self.applied_config_server.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
@@ -429,7 +542,66 @@ impl ConfigLayerStack {
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
             is_projectless: self.is_projectless,
+            project_trust: self.project_trust.clone(),
         })
+    }
+
+    /// Adds local session configuration while retaining independently owned runtime snapshots.
+    pub fn with_session_config(mut self, config: TomlValue) -> std::io::Result<Self> {
+        let index = self.layers.partition_point(|layer| {
+            layer.name.precedence() <= ConfigLayerSource::SessionFlags.precedence()
+        });
+        self.layers.insert(
+            index,
+            ConfigLayerEntry::new(ConfigLayerSource::SessionFlags, config),
+        );
+        validate_enabled_config_layers(&self.layers)?;
+        self.validate_project_mitm_profiles()?;
+        Ok(self)
+    }
+
+    pub fn with_session_plugins(self, plugins: TomlValue) -> std::io::Result<Self> {
+        self.with_session_section("plugins", plugins)
+    }
+
+    /// Replaces the session's connector settings. An empty table restores inheritance.
+    pub fn with_session_apps(self, apps: TomlValue) -> std::io::Result<Self> {
+        // Validate the override but keep its original TOML so omitted fields inherit.
+        apps.clone()
+            .try_into::<AppsConfigToml>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        self.with_session_section("apps", apps)
+    }
+
+    fn with_session_section(mut self, key: &str, value: TomlValue) -> std::io::Result<Self> {
+        let session_index = self.layers.iter().rposition(|layer| {
+            layer.name == ConfigLayerSource::SessionFlags && !layer.is_disabled()
+        });
+        if let Some(session_index) = session_index {
+            for (index, layer) in self.layers.iter_mut().enumerate() {
+                if layer.name != ConfigLayerSource::SessionFlags || layer.is_disabled() {
+                    continue;
+                }
+                let mut config = layer.config.clone();
+                let table = config.as_table_mut().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "session config must be a table",
+                    )
+                })?;
+                if index == session_index {
+                    table.insert(key.to_owned(), value.clone());
+                } else if table.remove(key).is_none() {
+                    continue;
+                }
+                *layer = ConfigLayerEntry::new(ConfigLayerSource::SessionFlags, config);
+            }
+        } else {
+            return self.with_session_config(TomlValue::Table(
+                [(key.to_owned(), value)].into_iter().collect(),
+            ));
+        }
+        Ok(self)
     }
 
     /// Returns a new stack with the user layer copied from `other`, preserving
@@ -458,6 +630,9 @@ impl ConfigLayerStack {
         }
         Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
+            mcp_ema_cancellation: self.mcp_ema_cancellation.clone(),
+            applied_config_server: self.applied_config_server.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
@@ -465,6 +640,7 @@ impl ConfigLayerStack {
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
             is_projectless: self.is_projectless,
+            project_trust: self.project_trust.clone(),
         }
     }
 
@@ -475,7 +651,7 @@ impl ConfigLayerStack {
     pub fn effective_config(&self) -> TomlValue {
         let mut merged = TomlValue::Table(toml::map::Map::new());
         for layer in self.layers_low_to_high() {
-            merge_toml_values(&mut merged, &layer.config);
+            merge_toml_values(&mut merged, &layer.name.effective_values(&layer.config));
         }
         if let Some(requirements) = &self.model_provider_requirements {
             crate::model_provider_requirements::apply(&mut merged, requirements);
@@ -506,7 +682,8 @@ impl ConfigLayerStack {
         let mut provider_paths = vec!["features.network_proxy.credentials.".to_string()];
 
         for layer in self.layers_low_to_high() {
-            let config = normalized_with_key_aliases(&layer.config, &[]);
+            let config =
+                normalized_with_key_aliases(&layer.name.effective_values(&layer.config), &[]);
             if let Some(profiles) = config.get("profiles").and_then(TomlValue::as_table) {
                 provider_paths.extend(
                     profiles
@@ -523,7 +700,14 @@ impl ConfigLayerStack {
             );
         }
 
-        if let Some(layer) = self.layers_low_to_high().next_back() {
+        let needs_effective_origin = |path: &str| {
+            path == "tui.status_line_provider"
+                || path.starts_with("tui.status_line_provider.")
+                || provider_paths.iter().any(|prefix| path.starts_with(prefix))
+        };
+        if origins.keys().any(|path| needs_effective_origin(path))
+            && let Some(layer) = self.layers_low_to_high().next_back()
+        {
             let effective = self.effective_config();
             let mut effective_origins = HashMap::new();
             record_origins(
@@ -534,8 +718,7 @@ impl ConfigLayerStack {
                 &include,
             );
             origins.retain(|path, _| {
-                !provider_paths.iter().any(|prefix| path.starts_with(prefix))
-                    || effective_origins.contains_key(path)
+                !needs_effective_origin(path) || effective_origins.contains_key(path)
             });
         }
 

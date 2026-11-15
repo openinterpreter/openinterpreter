@@ -1,0 +1,18 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&panel, 100)"
+---
+
+  Configuration
+  Changes save automatically
+
+   Appearance   Notifications   Input   Sessions   Text selection
+
+  Notifications         [ ] Off              Let your terminal notify you when a turn finishes or a…
+  Notify when           Unavailable          Turn on notifications to choose when they appear
+› Test notification     Send in 5s           Send in 5 seconds so you can switch apps before the no…
+
+
+
+
+  left/right group · / search · enter test · esc clear search/close

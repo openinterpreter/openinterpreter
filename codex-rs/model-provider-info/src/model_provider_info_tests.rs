@@ -156,6 +156,11 @@ base_url = "http://localhost:11434/v1"
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: None,
+        project_id: None,
+        location: None,
+        credential_file: None,
+        include_internal_metadata: false,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -193,6 +198,11 @@ query_params = { api-version = "2025-04-01-preview" }
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: None,
+        project_id: None,
+        location: None,
+        credential_file: None,
+        include_internal_metadata: false,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -234,6 +244,11 @@ supports_standalone_web_search = true
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: true,
+        capabilities: None,
+        project_id: None,
+        location: None,
+        credential_file: None,
+        include_internal_metadata: false,
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -290,6 +305,8 @@ fn codex_backend_routes_require_codex_base_url() {
         (None, true),
         (Some(CHATGPT_CODEX_BASE_URL), true),
         (Some("https://chatgpt-staging.com/backend-api/codex/"), true),
+        (Some("https://backend.example.com/api/codex"), false),
+        (Some("https://backend.example.com/api/codex/"), false),
         (Some("https://proxy.example.com/v1"), false),
     ] {
         let provider = ModelProviderInfo::create_openai_provider(base_url.map(str::to_owned));
@@ -422,6 +439,11 @@ fn test_create_amazon_bedrock_provider() {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: None,
+            project_id: None,
+            location: None,
+            credential_file: None,
+            include_internal_metadata: false,
         }
     );
 }
@@ -430,7 +452,6 @@ fn test_create_amazon_bedrock_provider() {
 fn test_create_amazon_bedrock_runtime_provider() {
     let mut expected = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     expected.name = "Amazon Bedrock Runtime".to_string();
-    expected.http_headers = None;
 
     assert_eq!(
         ModelProviderInfo::create_amazon_bedrock_runtime_provider(/*aws*/ None),
@@ -463,7 +484,10 @@ fn test_create_amazon_bedrock_runtime_provider_with_aws_configuration() {
                 credential_export: None,
                 auth_refresh: None,
             }),
-            None,
+            Some(maplit::hashmap! {
+                AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string() =>
+                    AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE.into(),
+            }),
             false,
         )
     );
@@ -483,18 +507,25 @@ fn provider_auth_for_test() -> ModelProviderAuthInfo {
 }
 
 #[test]
-fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
-    let api_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
-        .to_api_provider(/*auth_mode*/ None)
-        .expect("Amazon Bedrock provider should build API provider");
+fn test_amazon_bedrock_providers_add_mantle_client_agent_header() {
+    for provider in [
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+        ModelProviderInfo::create_amazon_bedrock_runtime_provider(/*aws*/ None),
+    ] {
+        let api_provider = provider
+            .to_api_provider(/*auth_mode*/ None)
+            .expect("Amazon Bedrock provider should build API provider");
 
-    assert_eq!(
-        api_provider
-            .headers
-            .get(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE)
-    );
+        assert_eq!(
+            api_provider
+                .headers
+                .get(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE),
+            "provider: {}",
+            provider.name
+        );
+    }
 }
 
 #[test]
@@ -622,7 +653,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
             aws: Some(ModelProviderAwsAuthInfo {
-                profile: Some("codex-bedrock".to_string()),
+                profile: None,
                 region: Some("us-west-2".to_string()),
                 credential_export: None,
                 auth_refresh: Some(auth_refresh.clone()),
@@ -636,7 +667,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
         .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
         .expect("Amazon Bedrock provider should be built in")
         .aws = Some(ModelProviderAwsAuthInfo {
-        profile: Some("codex-bedrock".to_string()),
+        profile: None,
         region: Some("us-west-2".to_string()),
         credential_export: None,
         auth_refresh: Some(auth_refresh),
@@ -773,6 +804,103 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
         ),
         Ok(expected)
     );
+}
+
+#[test]
+fn test_merge_configured_model_providers_applies_gcp_transport_overrides() {
+    let auth = provider_auth_for_test();
+    let credential_file = std::env::current_dir().unwrap().join("adc.json");
+    let configured_model_providers = std::collections::HashMap::from([(
+        GCP_PROVIDER_ID.to_string(),
+        ModelProviderInfo {
+            base_url: Some("https://vertex.example.com/v1".to_string()),
+            project_id: Some("configured-project".to_string()),
+            location: Some("us-east4".to_string()),
+            auth: Some(auth.clone()),
+            credential_file: Some(credential_file.clone()),
+            http_headers: Some(maplit::hashmap! {
+                "x-example-header".to_string() => "value".into(),
+            }),
+            ..ModelProviderInfo::default()
+        },
+    )]);
+
+    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    let provider = expected
+        .get_mut(GCP_PROVIDER_ID)
+        .expect("GCP provider should be built in");
+    provider.base_url = Some("https://vertex.example.com/v1".to_string());
+    provider.project_id = Some("configured-project".to_string());
+    provider.location = Some("us-east4".to_string());
+    provider.auth = Some(auth);
+    provider.credential_file = Some(credential_file);
+    provider.http_headers = Some(maplit::hashmap! {
+        "x-example-header".to_string() => "value".into(),
+    });
+
+    assert_eq!(
+        merge_configured_model_providers(
+            built_in_model_providers(/*openai_base_url*/ None),
+            configured_model_providers,
+        ),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn test_merge_configured_model_providers_applies_gcp_endpoint_override() {
+    let configured_model_providers = std::collections::HashMap::from([(
+        GCP_PROVIDER_ID.to_string(),
+        ModelProviderInfo {
+            base_url: Some("https://vertex.example.com/v1".to_string()),
+            ..ModelProviderInfo::default()
+        },
+    )]);
+    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    expected
+        .get_mut(GCP_PROVIDER_ID)
+        .expect("GCP provider should be built in")
+        .base_url = Some("https://vertex.example.com/v1".to_string());
+
+    assert_eq!(
+        merge_configured_model_providers(
+            built_in_model_providers(/*openai_base_url*/ None),
+            configured_model_providers,
+        ),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn test_merge_configured_gcp_rejects_relative_credential_file() {
+    for credential_file in ["", "adc.json", "../adc.json"] {
+        let provider = ModelProviderInfo {
+            credential_file: Some(credential_file.into()),
+            ..ModelProviderInfo::create_gcp_provider()
+        };
+        assert_eq!(
+            provider.validate(),
+            Err("provider credential_file must be an absolute path".to_string()),
+        );
+
+        let overrides = HashMap::from([(
+            GCP_PROVIDER_ID.to_string(),
+            ModelProviderInfo {
+                credential_file: Some(credential_file.into()),
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(
+            merge_configured_model_providers(
+                built_in_model_providers(/*openai_base_url*/ None),
+                overrides,
+            ),
+            Err(
+                "model_providers.gcp provider credential_file must be an absolute path".to_string()
+            ),
+        );
+    }
 }
 
 #[test]

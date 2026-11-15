@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::cache_system_proxy_route_for_test;
@@ -19,17 +20,20 @@ use wiremock::matchers::path;
 
 use super::*;
 
-#[test]
-fn client_preserves_supplied_http_client_factory_policy() {
+#[tokio::test]
+async fn client_preserves_supplied_factory_and_typed_policy_denial() {
+    let controller = codex_http_client::NetworkPolicyController::default();
     let client = Client::new(
         "https://example.test",
-        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
+        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy)
+            .with_network_policy(controller.policy()),
     );
-
     assert_eq!(
         client.http.outbound_proxy_policy(),
         OutboundProxyPolicy::RespectSystemProxy
     );
+    let denied = client.get_config_bundle().await;
+    assert!(matches!(denied, Err(RequestError::Policy(_))));
 }
 
 #[test]
@@ -116,7 +120,8 @@ async fn migrated_requests_preserve_query_auth_and_json_body() {
     )
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "request-token".to_string(),
-    )));
+    )))
+    .unwrap();
 
     let tasks = client
         .list_tasks(
@@ -192,6 +197,7 @@ fn fallback_client(base_url: &str) -> Client {
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "bootstrap-token".to_string(),
     )))
+    .unwrap()
     .with_chatgpt_account_id("workspace-123")
     .with_user_agent("bootstrap-test")
 }
@@ -345,4 +351,92 @@ async fn bootstrap_get_recovers_from_stalled_body_before_cloud_startup_timeout()
         .expect("proxy retry must fit inside the cloud startup budget")
         .expect("cloud bundle via proxy");
     proxy.verify().await;
+}
+
+#[tokio::test]
+async fn bootstrap_gets_preserve_network_policy_with_fallback_enabled() {
+    let issuer = MockServer::start().await;
+    let proxy = MockServer::start().await;
+    for endpoint in ["config/bundle", "accounts/check"] {
+        cache_system_proxy_route_for_test(
+            &format!("{}/api/codex/{endpoint}", issuer.uri()),
+            proxy.uri(),
+        );
+    }
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let client = Client::new(
+        issuer.uri(),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+            .with_system_proxy_fallback()
+            .with_network_policy(controller.policy()),
+    );
+    assert!(matches!(
+        client.get_config_bundle().await,
+        Err(RequestError::Policy(_))
+    ));
+    assert!(matches!(
+        client.get_accounts_check().await,
+        Err(RequestError::Policy(_))
+    ));
+    assert_eq!(
+        issuer.received_requests().await.unwrap_or_default().len(),
+        0
+    );
+    assert_eq!(proxy.received_requests().await.unwrap_or_default().len(), 0);
+}
+
+#[tokio::test]
+async fn bootstrap_gets_retry_post_connect_failure_with_system_proxy() {
+    if run_without_environment_proxies(
+        "client::request_tests::bootstrap_gets_retry_post_connect_failure_with_system_proxy",
+    ) {
+        return;
+    }
+    for endpoint in ["accounts/check", "config/bundle"] {
+        let issuer = TcpListener::bind(("127.0.0.1", 0)).expect("bind dropping issuer");
+        let issuer_url = format!("http://{}", issuer.local_addr().expect("issuer address"));
+        let issuer_thread = std::thread::spawn(move || {
+            let (stream, _) = issuer.accept().expect("accept bootstrap GET");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read request headers");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                lines.push(line);
+            }
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("drop connection before response headers");
+            lines
+        });
+        let proxy = MockServer::start().await;
+        let endpoint_path = format!("/api/codex/{endpoint}");
+        cache_system_proxy_route_for_test(&format!("{issuer_url}{endpoint_path}"), proxy.uri());
+        Mock::given(method("GET"))
+            .and(path(&endpoint_path))
+            .and(header("authorization", "Bearer bootstrap-token"))
+            .and(header("chatgpt-account-id", "workspace-123"))
+            .and(header("user-agent", "bootstrap-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let client = fallback_client(&issuer_url);
+        let result = client
+            .exec_bootstrap_get(&format!("{issuer_url}{endpoint_path}"))
+            .await;
+        let requests = issuer_thread.join().expect("dropping issuer finishes");
+        assert_eq!(requests[0], format!("GET {endpoint_path} HTTP/1.1\r\n"));
+        assert_eq!(
+            result.expect("retry the idempotent bootstrap GET through the permitted system route"),
+            ("{}".to_string(), "application/json".to_string())
+        );
+        proxy.verify().await;
+    }
 }

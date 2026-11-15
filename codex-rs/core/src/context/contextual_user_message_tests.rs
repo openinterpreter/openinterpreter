@@ -7,6 +7,7 @@ use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseItem;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -47,7 +48,8 @@ fn renders_agents_instructions_with_legacy_directory_header() {
             directory: Some("/tmp".to_string()),
             text: "body".to_string(),
         }
-        .render(),
+        .render()
+        .expect_text(),
         "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
     );
 }
@@ -59,7 +61,8 @@ fn renders_agents_instructions_without_directory_header() {
             directory: None,
             text: "body".to_string(),
         }
-        .render(),
+        .render()
+        .expect_text(),
         "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
     );
 }
@@ -77,7 +80,7 @@ fn detects_internal_model_context_fragment() {
         InternalContextSource::from_static("extension"),
         "Internal steering.",
     );
-    let text = fragment.render();
+    let text = fragment.render().expect_text();
 
     assert_eq!(
         fragment.content_kind(),
@@ -131,7 +134,7 @@ fn contextual_user_fragment_is_dyn_compatible() {
     ));
 
     assert_eq!(
-        fragment.render(),
+        fragment.render().expect_text(),
         "<codex_internal_context source=\"extension\">\nInternal steering.\n</codex_internal_context>"
     );
 }
@@ -145,10 +148,13 @@ fn ignores_regular_user_text() {
 
 #[test]
 fn detects_hook_prompt_fragment_and_roundtrips_escaping() {
-    let message = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
-        r#"Retry with "waves" & <tides>"#,
-        "hook-run-1",
-    )])
+    let message = build_hook_prompt_message(
+        &[HookPromptFragment::from_single_hook(
+            r#"Retry with "waves" & <tides>"#,
+            "hook-run-1",
+        )],
+        &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+    )
     .expect("hook prompt message");
 
     let ResponseItem::Message { content, .. } = message else {
@@ -171,6 +177,7 @@ fn detects_hook_prompt_fragment_and_roundtrips_escaping() {
         vec![HookPromptFragment {
             text: r#"Retry with "waves" & <tides>"#.to_string(),
             hook_run_id: "hook-run-1".to_string(),
+            metadata: Default::default(),
         }],
     );
     assert!(!text.contains("&quot;waves&quot; & <tides>"));

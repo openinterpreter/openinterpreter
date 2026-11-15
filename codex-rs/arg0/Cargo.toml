@@ -20,9 +20,9 @@ codex-exec-server = { workspace = true }
 codex-install-context = { workspace = true }
 codex-linux-sandbox = { workspace = true }
 codex-sandboxing = { workspace = true }
-codex-shell-escalation = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-home-dir = { workspace = true }
+codex-utils-pty = { workspace = true }
 dotenvy = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -32,4 +32,5 @@ codex-windows-sandbox = { workspace = true }
 pathdiff = { workspace = true }
 
 [dev-dependencies]
+codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }

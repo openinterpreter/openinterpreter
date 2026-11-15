@@ -1,0 +1,18 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&panel, 140)"
+---
+
+  Configuration
+  Changes save automatically
+
+   Appearance   Notifications   Input   Sessions   Text selection
+
+› Keyboard shortcuts    Configure ›          Browse actions and remap their keys
+  Start in Vim mode     [ ] Off              Start new composers in Vim mode and use /vim for the current composer
+  Paste detection       [x] On               Recognize pasted-text bursts and keep multiline input together
+
+
+
+
+  left/right group · / search · enter open · esc clear search/close

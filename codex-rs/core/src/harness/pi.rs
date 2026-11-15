@@ -270,7 +270,8 @@ fn message_content(content: &[ContentItem]) -> Option<String> {
     let mut text = String::new();
     for item in content {
         match item {
-            ContentItem::InputText { text: value } | ContentItem::OutputText { text: value } => {
+            ContentItem::InputText { text: value }
+            | ContentItem::OutputText { text: value, .. } => {
                 text.push_str(value);
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}

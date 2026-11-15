@@ -10,7 +10,7 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_core::config::ConfigBuilder;
 use codex_core::resolve_installation_id;
 use codex_exec_server::EnvironmentManager;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_utils_cli::CliConfigOverrides;
 
@@ -101,7 +101,7 @@ pub async fn run_main(
     let environment_manager = Arc::new(
         EnvironmentManager::from_codex_home(
             config.codex_home.clone(),
-            Some(ExecServerRuntimePaths::from_optional_paths(
+            Some(ExecServerRuntimeOptions::from_optional_paths(
                 arg0_paths.codex_self_exe.clone(),
                 arg0_paths.codex_linux_sandbox_exe.clone(),
             )?),

@@ -16,4 +16,13 @@ limit?: number | null,
  * Controls how much MCP inventory data to fetch for each server.
  * Defaults to `Full` when omitted.
  */
-detail?: McpServerStatusDetail | null, threadId?: string | null, };
+detail?: McpServerStatusDetail | null, threadId?: string | null,
+/**
+ * Limit discovery to one server. With a thread ID, reuse that thread's MCP connection.
+ */
+serverName?: string | null,
+/**
+ * Select this environment's registration. Requires `serverName` and `threadId`.
+ * When omitted, a named request uses the same server as older clients.
+ */
+environmentId?: string | null, };

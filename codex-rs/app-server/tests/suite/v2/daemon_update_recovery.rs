@@ -4,7 +4,6 @@ use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
 use super::connection_handling_websocket::create_config_toml;
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 use app_test_support::create_final_assistant_message_sse_response;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -801,18 +800,18 @@ async fn connect_default_daemon_client(socket_path: &Path) -> Result<WebSocketSt
     connect_daemon_client(socket_path, InitializeCapabilities::default()).await
 }
 
-async fn connect_daemon_client(
+pub(super) async fn connect_daemon_client(
     socket_path: &Path,
     capabilities: InitializeCapabilities,
 ) -> Result<WebSocketStream<UnixStream>> {
     connect_initialized(socket_path, capabilities, "daemon_recovery_test", "0.1.0").await
 }
 
-fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
+pub(super) fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
     let binary = codex_utils_cargo_bin::cargo_bin("codex-app-server")?;
     Ok(Command::new(binary)
         .args(["--listen", &format!("unix://{}", socket_path.display())])
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .arg("--disable-plugin-startup-tasks-for-tests")
         .env("CODEX_HOME", home)
         .arg("--managed-daemon")
         .env(
@@ -888,7 +887,7 @@ async fn connect_initialized(
     Ok(websocket)
 }
 
-async fn request(
+pub(super) async fn request(
     websocket: &mut WebSocketStream<UnixStream>,
     id: i64,
     method: &str,

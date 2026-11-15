@@ -1,0 +1,5 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: text
+---
+Text::from(Line::from_iter([Span::from("1. ").light_blue(), Span::from("plain "), Span::from("plain").fg(Color::Reset).underlined(), Span::from(" ("), Span::from("https://example.com").fg(Color::Reset).underlined(), Span::from(")"), Span::from(" "), Span::from("code").fg(Color::Rgb(166, 227, 161)), Span::from(" "), Span::from("code").fg(Color::Reset).underlined(), Span::from(" ("), Span::from("https://example.com").fg(Color::Reset).underlined(), Span::from(")")]))

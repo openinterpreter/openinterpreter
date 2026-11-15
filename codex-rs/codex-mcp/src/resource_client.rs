@@ -283,11 +283,11 @@ impl McpResourceClient {
     ) -> Result<McpResourcePage> {
         let params =
             cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
-        let result = self
-            .runtime
-            .latest_connections()
-            .list_resources(server, params)
-            .await?;
+        let connections = self.runtime.latest_connections();
+        let key = connections
+            .resolve_server_name(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        let result = connections.list_resources(key, params).await?;
         let resources = result
             .resources
             .into_iter()
@@ -304,17 +304,27 @@ impl McpResourceClient {
         &self,
         params: CodexAppsResourceListParams,
     ) -> Result<McpResourcePage> {
+        let catalog = matches!(params.mime_type.as_str(), "mcp/plugin" | "mcp/skill");
         let params = serde_json::to_value(params)
             .context("failed to serialize Codex Apps resource params")?;
         let connections = self.runtime.latest_host_owned_codex_apps_connections()?;
-        let (managed, timeout) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
-            .await?;
-        let result = managed
-            .client
-            .send_custom_request_with_timeout("resources/list", Some(params), timeout)
-            .await
-            .context("resources/list failed for `codex_apps`")?;
+        let list = async move |client: Arc<RmcpClient>, timeout| {
+            client
+                .send_custom_request_with_timeout("resources/list", Some(params), timeout)
+                .await
+                .context("resources/list failed for `codex_apps`")
+        };
+        let result =
+            if catalog && let Some((connection, timeout)) = connections.early_apps_discovery() {
+                connection
+                    .with_early_apps_client(&self.runtime, timeout, list)
+                    .await?
+            } else {
+                let (managed, timeout) = connections
+                    .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
+                    .await?;
+                list(managed.client, timeout).await?
+            };
         let result = match result {
             ServerResult::ListResourcesResult(result) => result,
             ServerResult::CustomResult(result) => result
@@ -338,8 +348,7 @@ impl McpResourceClient {
         let params = ReadResourceRequestParams::new(uri.to_string());
         let result = self
             .runtime
-            .latest_connections()
-            .read_resource(server, params)
+            .latest_read_resource(server, /*environment_id*/ None, params)
             .await?;
         let contents = result
             .contents

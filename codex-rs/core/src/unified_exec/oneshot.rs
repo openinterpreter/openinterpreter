@@ -81,6 +81,8 @@ impl UnifiedExecProcessManager {
                             {
                                 process.fail_and_terminate(err.to_string());
                             }
+                            // An exited remote shell can still have open output pipes.
+                            process.cancellation_token().cancel();
                             let _ = execution.await;
                         } else {
                             drop(execution);

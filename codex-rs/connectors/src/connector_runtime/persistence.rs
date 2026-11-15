@@ -62,6 +62,8 @@ pub(crate) fn load_cached_connector_runtime_for_identity<T: ConnectorRuntimePayl
     (cache.schema_version == CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION).then_some(
         ConnectorRuntimeSnapshot {
             tools: cache.tools,
+            tool_list_meta: cache.tool_list_meta.map(Arc::new),
+            discovery_scope: cache.discovery_scope,
             refreshed_at: modified_at,
             generation: 0,
             tools_version: 0,
@@ -80,6 +82,8 @@ where
     let bytes = serde_json::to_vec_pretty(&CodexAppsToolsDiskCache {
         schema_version: CODEX_APPS_TOOLS_CACHE_SCHEMA_VERSION,
         tools: snapshot.tools.clone(),
+        tool_list_meta: snapshot.tool_list_meta.as_deref().cloned(),
+        discovery_scope: snapshot.discovery_scope.clone(),
     })
     .context("failed to serialize connector runtime cache")?;
     write_codex_apps_cache_file(&cache_path, "runtime", bytes)
@@ -206,6 +210,10 @@ fn write_codex_apps_cache_file(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAppsToolsDiskCache<T> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_list_meta: Option<serde_json::Value>,
+    #[serde(default)]
+    discovery_scope: Vec<String>,
     schema_version: u8,
     tools: Arc<[T]>,
 }
@@ -216,7 +224,7 @@ struct CodexAppsServerInfoDiskCache {
     server_info: McpServerInfo,
 }
 
-fn sha1_hex(s: &str) -> String {
+pub(super) fn sha1_hex(s: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(s.as_bytes());
     let sha1 = hasher.finalize();
@@ -233,6 +241,8 @@ pub(crate) fn write_cached_codex_apps_tools_for_test<T>(
 {
     let snapshot = ConnectorRuntimeSnapshot {
         tools: tools.into(),
+        tool_list_meta: None,
+        discovery_scope: Vec::new(),
         refreshed_at: SystemTime::now(),
         generation: 0,
         tools_version: 0,
@@ -265,6 +275,8 @@ where
 {
     let snapshot = ConnectorRuntimeSnapshot {
         tools: tools.into(),
+        tool_list_meta: None,
+        discovery_scope: Vec::new(),
         refreshed_at: SystemTime::now(),
         generation: 0,
         tools_version: 0,

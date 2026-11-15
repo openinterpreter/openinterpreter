@@ -1,0 +1,95 @@
+---
+source: core/tests/suite/scenarios_indirect_namespace_prefixes.rs
+expression: "context_snapshot::format_request_history_snapshot(\"Function prefixes annotate direct and indirect tools; namespace prefixes annotate embedded namespace docs, loaded namespaces, and flat indirect entries. A model switch clears both without changing dispatch.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
+---
+Scenario: Function prefixes annotate direct and indirect tools; namespace prefixes annotate embedded namespace docs, loaded namespaces, and flat indirect entries. A model switch clears both without changing dispatch.
+
+## Window 1
+Settings:
+  include: ["reasoning.encrypted_content"]
+  model: "gpt-5.5"
+  parallel_tool_calls: true
+  prompt_cache_key: "<PROMPT_CACHE_KEY 1>"
+  reasoning: {"effort":"medium"}
+  store: false
+  stream: true
+  text: {"verbosity":"low"}
+  tool_choice: "auto"
+  tools (4; hash=1873c769e1ecc1e6):
+    - custom/exec: Exec guidance.  Run JavaScript code to orchestrate/compose tool calls - Evaluates the provided Ja...; hash=4b18b0a399fb90e1
+    - function/wait: Waits on a yielded `exec` cell and returns new output or completion. - Use `wait` only after `exe...; args=[cell_id, max_tokens, terminate, yield_time_ms]; hash=6692d8f6c55be489
+    - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
+    - web_search; hash=e214d4db1bc49e89
+-- request 1 (turn) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/developer:
+    Coordinate sub-agents.
+03:message/developer:
+    <MULTI_AGENT_MODE>
+04:message/user:
+    <ENVIRONMENT_CONTEXT>
+05:message/user:
+    Find echo, call it, and list the agents.
+-- request 2 (turn) --
+06:custom_tool_call/exec:
+    const descriptions = ["view_image", "collaboration__list_agents", "mcp__reports_one__echo"]
+      .map(name => ALL_TOOLS.find(t => t.name === name).description);
+    const report = await tools.mcp__reports_one__echo({message: "ping"});
+    const agents = await tools.collaboration__list_agents({});
+    text({descriptions, echo: report.structuredContent.echo, agent: agents.agents[0].agent_name});
+
+07:custom_tool_call_output:Script completed
+    Wall time <DURATION> seconds
+    Output:
+     | {"descriptions":["Functions context.\\n\\nImage guidance.\\n\\nView a local image file from the filesystem w...>>; };\\n```"],"echo":"ECHOING: ping","agent":"/root"} [hash=e3b76c8d361418c6]
+
+## Window 2 (after request 2)
+Settings: relative to window 1
+  model: "prefixes-cleared"
+  tools (4; hash=7831e6ce06adc804):
+    ~ custom/exec: Run JavaScript code to orchestrate/compose tool calls - Evaluates the provided JavaScript code in...; hash=b2642100ba673aff
+-- request 3 (turn) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+02:message/developer:
+    Coordinate sub-agents.
+03:message/developer:
+    <MULTI_AGENT_MODE>
+04:message/user:
+    <ENVIRONMENT_CONTEXT>
+05:message/user:
+    Find echo, call it, and list the agents.
+06:custom_tool_call/exec:
+    const descriptions = ["view_image", "collaboration__list_agents", "mcp__reports_one__echo"]
+      .map(name => ALL_TOOLS.find(t => t.name === name).description);
+    const report = await tools.mcp__reports_one__echo({message: "ping"});
+    const agents = await tools.collaboration__list_agents({});
+    text({descriptions, echo: report.structuredContent.echo, agent: agents.agents[0].agent_name});
+
+07:custom_tool_call_output:Script completed
+    Wall time <DURATION> seconds
+    Output:
+     | {"descriptions":["Functions context.\\n\\nImage guidance.\\n\\nView a local image file from the filesystem w...>>; };\\n```"],"echo":"ECHOING: ping","agent":"/root"} [hash=e3b76c8d361418c6]
+08:message/assistant:
+    Done.
+09:message/developer:
+    <MODEL_SWITCH>
+10:message/user:
+    Find echo again, call it, and list the agents.
+-- request 4 (turn) --
+11:custom_tool_call/exec:
+    const descriptions = ["view_image", "collaboration__list_agents", "mcp__reports_one__echo"]
+      .map(name => ALL_TOOLS.find(t => t.name === name).description);
+    const report = await tools.mcp__reports_one__echo({message: "ping"});
+    const agents = await tools.collaboration__list_agents({});
+    text({descriptions, echo: report.structuredContent.echo, agent: agents.agents[0].agent_name});
+
+12:custom_tool_call_output:Script completed
+    Wall time <DURATION> seconds
+    Output:
+     | {"descriptions":["View a local image file from the filesystem when visual inspection is needed. Use this...>>; };\\n```"],"echo":"ECHOING: ping","agent":"/root"} [hash=dafcf2a1f1aff990]

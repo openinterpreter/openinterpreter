@@ -83,6 +83,7 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
         address: "local".into(),
         version: "v0.153.0".into(),
         is_local_daemon: true,
+        is_managed_daemon: false,
     });
     app.initialize_server_version_notice("0.154.0", Some("0.153.0"));
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
@@ -215,6 +216,7 @@ async fn unavailable_daemon_menu_offers_guidance_without_update_actions() {
         address: "ws://example.test:1234".into(),
         version: "v0.153.0".into(),
         is_local_daemon: false,
+        is_managed_daemon: false,
     });
     app.open_daemon_menu();
     insta::assert_snapshot!(

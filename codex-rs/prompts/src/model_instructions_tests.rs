@@ -2,7 +2,6 @@
 
 use super::*;
 use codex_protocol::openai_models::ConfigShellToolType;
-use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::TruncationPolicyConfig;
@@ -16,7 +15,6 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         default_reasoning_level: None,
         supported_reasoning_levels: vec![],
         reasoning_control: Default::default(),
-        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::UnifiedExec,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -29,6 +27,7 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         upgrade: None,
         model_messages,
         include_skills_usage_instructions: false,
+        supports_reasoning_summaries: false,
         include_plugin_usage_instructions: false,
         include_apps_usage_instructions: false,
         supports_reasoning_summary_parameter: true,
@@ -37,6 +36,7 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         default_verbosity: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: None,
@@ -46,7 +46,6 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         effective_context_window_percent: 95,
         experimental_supported_tools: vec![],
         input_modalities: vec![],
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -63,15 +62,10 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
 }
 
 #[test]
-fn renders_literal_templates_with_legacy_personality_inputs() {
+fn renders_literal_templates() {
     let template = "Hello {{ personality }}\n\n# Personality\n\nFixed instructions";
     let model = test_model(Some(ModelMessages {
         instructions_template: Some(template.to_string()),
-        instructions_variables: Some(ModelInstructionsVariables {
-            personality_default: Some("default".to_string()),
-            personality_friendly: Some("friendly".to_string()),
-            personality_pragmatic: Some("pragmatic".to_string()),
-        }),
         ..Default::default()
     }));
     assert_eq!(

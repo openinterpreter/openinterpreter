@@ -11,12 +11,11 @@ use uuid::Uuid;
 
 #[derive(Debug, Default)]
 pub(super) struct UserVerificationRequests {
-    pending: HashMap<(String, RequestId), PendingVerification>,
+    pending: HashMap<(String, String, RequestId), PendingVerification>,
 }
 
 #[derive(Debug)]
 struct PendingVerification {
-    thread_id: String,
     params: UserVerificationVerifyParams,
     attempt: Option<Uuid>,
     cancelled: CancellationToken,
@@ -37,6 +36,7 @@ impl Drop for PendingVerification {
 impl UserVerificationRequests {
     pub(super) fn note_request(
         &mut self,
+        thread_id: &str,
         request_id: &RequestId,
         params: &McpServerElicitationRequestParams,
     ) {
@@ -48,9 +48,12 @@ impl UserVerificationRequests {
         } = &params.request
         {
             self.pending.insert(
-                (params.server_name.clone(), request_id.clone()),
+                (
+                    thread_id.to_string(),
+                    params.server_name.clone(),
+                    request_id.clone(),
+                ),
                 PendingVerification {
-                    thread_id: params.thread_id.clone(),
                     params: UserVerificationVerifyParams {
                         title: title.clone(),
                         description: description.clone(),
@@ -65,12 +68,15 @@ impl UserVerificationRequests {
 
     pub(super) fn begin(
         &mut self,
+        thread_id: &str,
         server_name: &str,
         request_id: &RequestId,
     ) -> Option<UserVerificationAttempt> {
-        let pending = self
-            .pending
-            .get_mut(&(server_name.to_string(), request_id.clone()))?;
+        let pending = self.pending.get_mut(&(
+            thread_id.to_string(),
+            server_name.to_string(),
+            request_id.clone(),
+        ))?;
         if pending.attempt.is_some() {
             return None;
         }
@@ -85,31 +91,40 @@ impl UserVerificationRequests {
 
     pub(super) fn is_pending(
         &self,
+        thread_id: &str,
         server_name: &str,
         request_id: &RequestId,
         attempt: Uuid,
     ) -> bool {
         self.pending
-            .get(&(server_name.to_string(), request_id.clone()))
+            .get(&(
+                thread_id.to_string(),
+                server_name.to_string(),
+                request_id.clone(),
+            ))
             .is_some_and(|pending| pending.attempt == Some(attempt))
     }
 
-    pub(super) fn remove(&mut self, server_name: &str, request_id: &RequestId) {
-        self.pending
-            .remove(&(server_name.to_string(), request_id.clone()));
+    pub(super) fn remove(&mut self, thread_id: &str, server_name: &str, request_id: &RequestId) {
+        self.pending.remove(&(
+            thread_id.to_string(),
+            server_name.to_string(),
+            request_id.clone(),
+        ));
     }
 
     pub(super) fn cancel_thread(&mut self, thread_id: &str) -> Vec<(String, RequestId)> {
-        let discarded_keys = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.thread_id == thread_id)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for (server_name, request_id) in &discarded_keys {
-            self.remove(server_name, request_id);
-        }
-        discarded_keys
+        let mut discarded = Vec::new();
+        self.pending
+            .retain(|(pending_thread_id, server_name, request_id), _| {
+                if pending_thread_id == thread_id {
+                    discarded.push((server_name.clone(), request_id.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+        discarded
     }
 
     pub(super) fn clear(&mut self) {

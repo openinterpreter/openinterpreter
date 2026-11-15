@@ -162,9 +162,11 @@ impl LegacyAppPathString {
 
     /// Infers the path convention of an absolute API path from its spelling.
     ///
-    /// Relative paths and ambiguous spellings return `None`. In particular,
-    /// slash-prefixed paths are treated as POSIX even when they could also be
-    /// interpreted as slash-delimited Windows UNC paths.
+    /// Two leading separators select Windows UNC or namespace syntax, including
+    /// forward and mixed slashes, independently of the current host. This favors
+    /// UNC paths over ambiguous double-slash POSIX paths. Call [`Self::to_path_uri`]
+    /// with an explicit POSIX convention to preserve that interpretation.
+    /// Relative paths return `None`; inferred prefixes still require validation.
     pub fn infer_absolute_path_convention(&self) -> Option<PathConvention> {
         let bytes = self.0.as_bytes();
         let has_windows_drive_root = matches!(
@@ -172,7 +174,12 @@ impl LegacyAppPathString {
             [drive, b':', separator, ..]
                 if drive.is_ascii_alphabetic() && is_windows_separator_byte(*separator)
         );
-        if has_windows_drive_root || self.0.starts_with(r"\\") {
+        let has_windows_unc_root = matches!(
+            bytes,
+            [first, second, ..]
+                if is_windows_separator_byte(*first) && is_windows_separator_byte(*second)
+        );
+        if has_windows_drive_root || has_windows_unc_root {
             Some(PathConvention::Windows)
         } else if self.0.starts_with('/') {
             Some(PathConvention::Posix)
@@ -255,10 +262,8 @@ fn render_windows_opaque_fallback(path_bytes: &[u8]) -> Option<String> {
     if !path_bytes.len().is_multiple_of(2) {
         return None;
     }
-    let path_wide = path_bytes
-        .chunks_exact(2)
-        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-        .collect::<Vec<_>>();
+    let (units, _) = path_bytes.as_chunks();
+    let path_wide: Vec<_> = units.iter().copied().map(u16::from_le_bytes).collect();
 
     // Windows absolute paths either have a rooted drive prefix (`C:\\`) or a
     // rooted namespace/UNC prefix (`\\server`, `\\.\\`, or `\\?\\`).

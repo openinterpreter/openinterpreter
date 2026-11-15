@@ -33,6 +33,9 @@ use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
+use windows_sys::Win32::Foundation::ERROR_LOGON_FAILURE;
+use windows_sys::Win32::Foundation::ERROR_PASSWORD_EXPIRED;
+use windows_sys::Win32::Foundation::ERROR_PASSWORD_MUST_CHANGE;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_ACCOUNTDISABLE;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
 use windows_sys::Win32::Security::LOGON32_LOGON_INTERACTIVE;
@@ -54,6 +57,18 @@ pub struct SandboxCreds {
     pub username: String,
     pub password: String,
 }
+
+/// Windows rejected the stored sandbox password; credential-file and policy errors are distinct.
+#[derive(Debug)]
+pub struct SandboxAccountCredentialMismatch;
+
+impl std::fmt::Display for SandboxAccountCredentialMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Windows rejected the stored sandbox account password")
+    }
+}
+
+impl std::error::Error for SandboxAccountCredentialMismatch {}
 
 /// Returns true when the on-disk setup artifacts exist and match the current
 /// setup version.
@@ -194,7 +209,7 @@ pub fn logon_existing_sandbox_account(
         "sandbox account record does not match the managed account"
     );
     let password = crate::to_wide(decode_password(&record)?);
-    let mut token = 0;
+    let mut token = std::ptr::null_mut();
     if unsafe {
         LogonUserW(
             crate::to_wide(account.username()).as_ptr(),

@@ -14,8 +14,8 @@ workspace = true
 
 [dependencies]
 codex-network-proxy = { workspace = true }
-codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
+codex-utils-redacted-string = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }

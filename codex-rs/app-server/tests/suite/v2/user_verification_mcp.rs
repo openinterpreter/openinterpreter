@@ -156,7 +156,12 @@ async fn user_verification_mcp_round_trip_requires_proof_in_full_access() -> Res
                 OPENAI_ELICITATION_EXTENSION_ID.to_string(),
                 json!({"userVerification": {}}),
             )]),
-            environments: Some(vec![test.executor_environment().selection().clone()]),
+            environments: Some(vec![
+                test.executor_environment()
+                    .selection()
+                    .clone()
+                    .into_request(),
+            ]),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?
@@ -166,6 +171,7 @@ async fn user_verification_mcp_round_trip_requires_proof_in_full_access() -> Res
         caller
             .call_mcp_tool(
                 CODEX_APPS_MCP_SERVER_NAME,
+                /*environment_id*/ None,
                 "verify_action",
                 /*arguments*/ None,
                 /*meta*/ None,

@@ -53,7 +53,6 @@ const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
 /// V2 fork modes, roles, and unset/blank overrides expose their agreed instruction precedence.
 #[test_case("no history"; "no history")]
 #[test_case("full history"; "full history")]
-#[test_case("bounded history"; "bounded history")]
 #[test_case("configured role without instructions"; "configured role without instructions")]
 #[test_case("unset override"; "unset override")]
 #[test_case("blank override"; "blank override")]
@@ -61,14 +60,12 @@ const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
 #[test_case("explicit configured role"; "explicit configured role")]
 #[test_case("full history configured role"; "full history configured role")]
 #[test_case("implicit configured default"; "implicit configured default")]
-#[test_case("bounded implicit configured default"; "bounded implicit configured default")]
 #[test_case("full fork skips default role"; "full fork skips default role")]
 #[tokio::test]
 async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     case: &str,
 ) -> Result<()> {
     let fork_turns = match case {
-        "bounded history" | "bounded implicit configured default" => Some("1"),
         "no history" | "explicit configured role" | "implicit configured default" => Some("none"),
         _ => None,
     };
@@ -81,8 +78,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let configured_override = match case {
         "unset override"
         | "full history configured role"
-        | "configured role without instructions"
-        | "bounded implicit configured default" => None,
+        | "configured role without instructions" => None,
         "blank override" => Some("   "),
         "full history" => Some("  child-only developer instructions  "),
         _ => Some(CHILD_INSTRUCTIONS),
@@ -98,7 +94,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             | "explicit configured role"
             | "full history configured role"
             | "implicit configured default"
-            | "bounded implicit configured default"
             | "full fork skips default role"
     );
     let role_has_instructions = matches!(
@@ -106,7 +101,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         "explicit configured role"
             | "full history configured role"
             | "implicit configured default"
-            | "bounded implicit configured default"
             | "full fork skips default role"
     );
     let expected = match case {
@@ -114,8 +108,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         "blank override" => None,
         "explicit configured role"
         | "full history configured role"
-        | "implicit configured default"
-        | "bounded implicit configured default" => Some(ROLE_INSTRUCTIONS),
+        | "implicit configured default" => Some(ROLE_INSTRUCTIONS),
         _ => Some(CHILD_INSTRUCTIONS),
     };
     const PARENT_PROMPT: &str = "spawn the instruction override worker";
@@ -151,7 +144,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         &server,
         |request: &wiremock::Request| {
             let body = String::from_utf8_lossy(&request.body);
-            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL_ID)
+            body.contains(CHILD_PROMPT) && body.contains(r#"\"agent_name\":\"/root/worker\""#)
         },
         responses::sse(vec![
             responses::ev_response_created("child-work"),
@@ -163,7 +156,8 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            String::from_utf8_lossy(&request.body).contains(SPAWN_CALL_ID)
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains(SPAWN_CALL_ID) && body.contains(r#"\"agent_name\":\"/root\""#)
         },
         responses::sse(vec![
             responses::ev_response_created("parent-complete"),
@@ -270,10 +264,18 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             )
         })
         .collect::<Vec<_>>();
-    let expected_instruction_texts = match expected {
-        Some(instructions) => vec![instructions],
-        None => Vec::new(),
-    };
+    // Full forks retain the parent's instructions before appending child overrides.
+    let mut expected_instruction_texts = Vec::new();
+    if fork_turns.is_none()
+        && let Some(parent) = parent
+    {
+        expected_instruction_texts.push(parent);
+    }
+    if case != "unset override"
+        && let Some(instructions) = expected
+    {
+        expected_instruction_texts.push(instructions);
+    }
     assert_eq!(
         instruction_texts, expected_instruction_texts,
         "{case}: child received unexpected developer instructions"
@@ -286,9 +288,13 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     Ok(())
 }
 
-/// A full-history worker fork replaces parent instructions inside persisted compacted history.
+/// Compacted full forks preserve the prefix by default and support explicit instruction filtering.
+#[test_case("preserved"; "preserved")]
+#[test_case("filtered"; "filtered")]
 #[tokio::test]
-async fn compacted_full_history_fork_replaces_parent_developer_instructions() -> Result<()> {
+async fn compacted_full_history_fork_applies_child_developer_instructions(
+    case: &str,
+) -> Result<()> {
     const COMPACT_SETUP_PROMPT: &str = "prepare the parent for compaction";
     const COMPACT_PROMPT: &str = "summarize the compacted parent";
     const COMPACTED_SUMMARY: &str = "preserved compacted parent summary";
@@ -306,7 +312,7 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
                 responses::ev_function_call(SETUP_CALL_ID, "unsupported_tool", "{}"),
                 responses::ev_completed_with_tokens(
                     "parent-before-compaction",
-                    /*total_tokens*/ 96,
+                    /*total_tokens*/ 96_000,
                 ),
             ]),
             responses::sse(vec![
@@ -347,7 +353,8 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
         &server,
         |request: &wiremock::Request| {
             let body = String::from_utf8_lossy(&request.body);
-            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL_ID)
+            body.contains(CHILD_PROMPT)
+                && body.contains(r#"\"agent_name\":\"/root/compacted_worker\""#)
         },
         responses::sse(vec![
             responses::ev_response_created("compacted-child-work"),
@@ -359,7 +366,8 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
     responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            String::from_utf8_lossy(&request.body).contains(SPAWN_CALL_ID)
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains(SPAWN_CALL_ID) && body.contains(r#"\"agent_name\":\"/root\""#)
         },
         responses::sse(vec![
             responses::ev_response_created("compacted-parent-complete"),
@@ -370,14 +378,18 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
     .await;
 
     let codex_home = TempDir::new()?;
+    let mut feature_config = format!(
+        "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
+    );
+    if case == "filtered" {
+        feature_config.push_str("\npreserve_fork_prefix = false");
+    }
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
         .with_root_config(&format!(
-            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100\nmodel_auto_compact_token_limit = 90\ncompact_prompt = {COMPACT_PROMPT:?}"
+            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100000\nmodel_auto_compact_token_limit = 90000\ncompact_prompt = {COMPACT_PROMPT:?}"
         ))
-        .with_extra_config(&format!(
-            "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
-        ))
+        .with_extra_config(&feature_config)
         .write(codex_home.path())?;
     write_models_cache(codex_home.path()).await?;
 
@@ -458,19 +470,18 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
         "the full-history child should inherit the compacted parent summary"
     );
     let child_developer_texts = child_request.message_input_texts("developer");
+    let instructions = child_developer_texts
+        .iter()
+        .map(String::as_str)
+        .filter(|text| matches!(*text, PARENT_INSTRUCTIONS | CHILD_INSTRUCTIONS))
+        .collect::<Vec<_>>();
     assert_eq!(
-        child_developer_texts
-            .iter()
-            .filter(|text| text.as_str() == CHILD_INSTRUCTIONS)
-            .count(),
-        1,
-        "the child should receive its configured developer instructions exactly once"
-    );
-    assert!(
-        child_developer_texts
-            .iter()
-            .all(|text| text != PARENT_INSTRUCTIONS),
-        "the child should not inherit parent instructions from compacted history"
+        instructions,
+        if case == "filtered" {
+            vec![CHILD_INSTRUCTIONS]
+        } else {
+            vec![PARENT_INSTRUCTIONS, CHILD_INSTRUCTIONS]
+        }
     );
 
     Ok(())
@@ -635,7 +646,7 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
         ));
     }
     MockResponsesConfig::new(&server.uri())
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_root_config(&format!(
             "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_reasoning_effort = \"high\""
         ))
@@ -650,7 +661,7 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
             .await?;
         let ThreadStartResponse { thread, .. } = app_server
             .start_thread(ThreadStartParams {
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 history_mode: Some(history_mode),
                 ..Default::default()
             })

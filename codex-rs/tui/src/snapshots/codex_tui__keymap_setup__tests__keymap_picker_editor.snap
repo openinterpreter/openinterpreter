@@ -1,0 +1,39 @@
+---
+source: tui/src/keymap_setup.rs
+expression: "render_picker(params, 120)"
+---
+
+  Keymap
+  Inline editor movement and editing shortcuts.
+  17 actions.
+
+   All   Common   Customized (0)   Unbound (5)   App   Composer   Editor   Vim   Navigation   Agents   Approval      ›
+
+  Type to search shortcuts
+
+› Editor         Insert Newline           ctrl-j, ctrl-m, enter, shift-enter, alt-enter
+  Editor         Move Left                left, ctrl-b
+  Editor         Move Right               right, ctrl-f
+  Editor         Move Up                  up, ctrl-p
+  Editor         Move Down                down, ctrl-n
+  Editor         Move Word Left           alt-b, alt-left, ctrl-left
+  Editor         Move Word Right          alt-f, alt-right, ctrl-right
+  Editor         Move Line Start          home, ctrl-a, super-left
+  Editor         Move Line End            end, ctrl-e, super-right
+  Editor         Delete Backward          backspace, shift-backspace, ctrl-h
+  Editor         Delete Forward           delete, shift-delete, ctrl-d
+  Editor         Delete Backward Word     alt-backspace, ctrl-backspace, ctrl-shift-backspace, ctrl-w, ctrl-alt-h
+  Editor         Delete Forward Word      alt-delete, ctrl-delete, ctrl-shift-delete, alt-d
+  Editor         Kill Line Start          ctrl-u, super-backspace
+  Editor       - Kill Whole Line          unbound
+  Editor         Kill Line End            ctrl-k
+  Editor         Yank                     ctrl-y
+
+
+
+
+
+
+
+
+  left/right group · enter edit shortcut · * custom · - unbound · esc close

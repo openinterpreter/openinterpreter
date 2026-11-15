@@ -46,9 +46,14 @@ fn layouts_refresh_for_width_animation_and_mutable_frames() {
                 &history,
                 width,
                 CellPresentation {
+                    summarized: false,
                     separated: false,
+                    shares_prompt_background: false,
+                    turn_tip_space: false,
                     expanded: false,
                     disclosure: false,
+                    detailed: false,
+                    image_protocol: None,
                 },
                 || TextLayout::new(history.transcript_hyperlink_lines(width), width),
             )
@@ -100,9 +105,14 @@ fn recent_entries_are_reused_and_old_entries_are_evicted() {
             &history,
             /*width*/ 20,
             CellPresentation {
+                summarized: false,
                 separated: false,
+                shares_prompt_background: false,
+                turn_tip_space: false,
                 expanded: false,
                 disclosure: false,
+                detailed: false,
+                image_protocol: None,
             },
             || {
                 TextLayout::new(
@@ -118,9 +128,14 @@ fn recent_entries_are_reused_and_old_entries_are_evicted() {
             &history,
             /*width*/ 20,
             CellPresentation {
+                summarized: false,
                 separated: false,
+                shares_prompt_background: false,
+                turn_tip_space: false,
                 expanded: false,
                 disclosure: false,
+                detailed: false,
+                image_protocol: None,
             },
             || {
                 TextLayout::new(

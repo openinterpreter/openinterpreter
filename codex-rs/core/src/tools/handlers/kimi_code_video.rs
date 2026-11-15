@@ -1,5 +1,6 @@
-use codex_http_client::build_reqwest_client_with_custom_ca;
+use codex_http_client::HttpClientBuilder;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use http::header::CONTENT_TYPE;
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
@@ -67,17 +68,20 @@ pub(super) async fn handle(
         .unwrap_or("video");
     let boundary = format!("----open-interpreter-kimi-video-{}", Uuid::new_v4());
     let body = multipart_body(&boundary, filename, mime_type, data);
-    let client =
-        build_reqwest_client_with_custom_ca(reqwest::Client::builder()).unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "failed to build Kimi video upload client");
-            reqwest::Client::new()
-        });
+    #[allow(deprecated)]
+    let client = HttpClientBuilder::new()
+        .without_request_logging()
+        .build_with_transport_default_proxy_and_custom_ca_fallback();
     let request = client
         .post(format!("{}/files", base_url.trim_end_matches('/')))
         .timeout(MEDIA_UPLOAD_TIMEOUT)
-        .headers(auth.to_auth_headers())
+        .headers(auth.to_auth_headers().map_err(|error| {
+            FunctionCallError::RespondToModel(format!(
+                "Failed to prepare video upload authorization: {error}"
+            ))
+        })?)
         .header(
-            reqwest::header::CONTENT_TYPE,
+            CONTENT_TYPE,
             format!("multipart/form-data; boundary={boundary}"),
         )
         .body(body);

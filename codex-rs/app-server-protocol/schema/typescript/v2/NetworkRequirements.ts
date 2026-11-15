@@ -6,9 +6,13 @@ import type { NetworkUnixSocketPermission } from "./NetworkUnixSocketPermission"
 
 export type NetworkRequirements = { enabled: boolean | null, httpPort: number | null, socksPort: number | null, allowUpstreamProxy: boolean | null, dangerouslyAllowNonLoopbackProxy: boolean | null, dangerouslyAllowAllUnixSockets: boolean | null,
 /**
- * Canonical network permission map for `experimental_network`.
+ * Canonical managed network permission map.
  */
 domains: { [key in string]?: NetworkDomainPermission } | null,
+/**
+ * Host patterns routed to network approval before ordinary allow rules.
+ */
+reviewDomains: Array<string> | null,
 /**
  * When true, only managed allowlist entries are respected while managed
  * network enforcement is active.
@@ -23,7 +27,7 @@ allowedDomains: Array<string> | null,
  */
 deniedDomains: Array<string> | null,
 /**
- * Canonical unix socket permission map for `experimental_network`.
+ * Canonical managed unix socket permission map.
  */
 unixSockets: { [key in string]?: NetworkUnixSocketPermission } | null,
 /**

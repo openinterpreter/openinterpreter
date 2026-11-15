@@ -32,7 +32,7 @@ async fn startup_enter_confirms_one_visible_draft_and_escape_cancels() {
         "keep this startup draft with more text"
     );
     let draft = pump.bottom_pane.composer_draft_snapshot();
-    pump.session_action = StartupDraftSessionAction::NewFromCommandCenter;
+    pump.session_action = StartupDraftSessionAction::NewWhileRunning;
     pump.handle_event(&mut tui, TuiEvent::Key(KeyEvent::from(KeyCode::Enter)))
         .expect("command-center startup stays edit-only");
     assert!(!pump.take_submission_intent());
@@ -140,6 +140,7 @@ async fn startup_submission_thread_change_preserves_only_editable_text() {
         codex_protocol::ThreadId::new(),
     ] {
         let selection = SessionSelection::Resume(crate::resume_picker::SessionTarget {
+            backend_id: crate::backend_id::BackendId::new(),
             path: None,
             thread_id: destination,
             cwd: None,

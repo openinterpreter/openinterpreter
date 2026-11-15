@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::history_cell;
+use codex_app_server_protocol::ThreadItemPayload;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
@@ -249,7 +250,7 @@ async fn focus_loss_stops_edge_drag_and_preserves_selection_after_focus_returns(
 #[tokio::test]
 async fn opening_find_retains_the_selected_mutable_revision() -> Result<()> {
     let cell = history_cell::DynamicToolCallCell::from_item(
-        codex_app_server_protocol::ThreadItem::DynamicToolCall {
+        codex_app_server_protocol::ThreadItemPayload::DynamicToolCall {
             id: "tool".into(),
             namespace: None,
             tool: "inspect".into(),
@@ -518,7 +519,6 @@ fn transcript_overlay_absorbs_older_tail_into_live_without_duplicate_cells() {
     let header: Arc<dyn HistoryCell> = Arc::new(history_cell::SessionHeaderHistoryCell::new(
         "test model".to_owned(),
         /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
         std::path::PathBuf::from("/project"),
         "test",
     ));

@@ -1,14 +1,23 @@
 use super::*;
 use crate::sandboxing::SandboxPermissions;
+use codex_direct_tool_timing::ToolBatchTiming;
 use codex_network_proxy::BlockedRequestArgs;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_utils_critical_path::CriticalPath;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::test_path_buf;
 use futures::poll;
 use pretty_assertions::assert_eq;
+use std::future::poll_fn;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Wake;
+use std::task::Waker;
 use std::time::Duration;
 use test_case::test_case;
 use tokio::time::timeout;
@@ -405,19 +414,53 @@ async fn sync_session_approved_hosts_to_replaces_existing_target_hosts() {
     );
 }
 
+#[test_case(PendingApprovalDecision::AllowOnce, 1; "approve once wakes one waiter")]
+#[test_case(PendingApprovalDecision::Deny, 1; "denial wakes one waiter")]
+#[test_case(PendingApprovalDecision::AllowForSession, 3; "session grant wakes all waiters")]
 #[tokio::test]
-async fn pending_waiters_receive_owner_decision() {
-    let pending = Arc::new(PendingHostApproval::new());
-
-    let waiter = {
-        let pending = Arc::clone(&pending);
-        tokio::spawn(async move { pending.wait_for_decision().await })
+async fn manual_prompt_wakeups(decision: PendingApprovalDecision, expected: usize) {
+    let (session, turn, _events) = crate::session::tests::make_session_and_context_with_rx().await;
+    let service = &session.services.network_approval;
+    let owner = |id: &str| {
+        let host = HostApprovalKey {
+            environment_id: "local".to_string(),
+            host: "example.com".to_string(),
+            protocol: "https",
+            port: 443,
+        };
+        let key = pending_key(host, &turn.sub_id, id);
+        let (pending, _) = service.get_or_create_pending_approval(key.clone());
+        PendingHostApprovalOwner::new(service, key, pending, /*execution_cancellation*/ None)
     };
+    let mut first = owner("first");
+    first
+        .review_user_prompt(
+            &session,
+            &turn,
+            /*timing_call_id*/ None,
+            "denied",
+            std::future::ready(ApprovalResolution::user(ReviewDecision::Approved)),
+        )
+        .await;
+    let mut owners = ["second", "third", "fourth"].map(owner);
+    let mut waiters = owners.each_mut().map(|owner| {
+        Box::pin(owner.review_user_prompt(
+            &session,
+            &turn,
+            /*timing_call_id*/ None,
+            "denied",
+            std::future::pending(),
+        ))
+    });
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+    for waiter in &mut waiters {
+        assert!(waiter.as_mut().poll(&mut cx).is_pending());
+    }
 
-    pending.set_decision(PendingApprovalDecision::AllowOnce);
-
-    let decision = waiter.await.expect("waiter should complete");
-    assert_eq!(decision, PendingApprovalDecision::AllowOnce);
+    first.complete(decision);
+    assert_eq!(wakes.0.load(Ordering::Relaxed), expected);
 }
 
 #[tokio::test]
@@ -626,7 +669,7 @@ async fn register_call_with_default_shell_trigger(
             turn_id: "turn-1".to_string(),
             tool_name: ToolName::plain("exec_command"),
             trigger: GuardianNetworkAccessTrigger {
-                call_id: "call-1".to_string(),
+                call_id: registration_id.to_string(),
                 tool_name: "exec_command".to_string(),
                 command: vec!["curl".to_string(), "https://example.com".to_string()],
                 cwd: PathUri::from_abs_path(&test_path_buf("/tmp").abs()),

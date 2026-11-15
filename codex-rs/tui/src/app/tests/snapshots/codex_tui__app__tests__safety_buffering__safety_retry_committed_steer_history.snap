@@ -1,5 +1,6 @@
 ---
 source: tui/src/app/tests/safety_buffering.rs
+assertion_line: 960
 expression: rendered_retry
 ---
 › Handle the safety-buffered request

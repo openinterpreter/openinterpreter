@@ -1,8 +1,10 @@
 use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
+use crate::key_hint::KeyBinding;
 use crate::keymap::KeymapContextSet;
 use crate::render::renderable::Renderable;
+use crate::terminal_program_status::ProgramStatusKind;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use crossterm::event::KeyEvent;
 use std::time::Instant;
@@ -16,15 +18,65 @@ pub(crate) enum ViewCompletion {
     Cancelled,
 }
 
+/// How a view is placed over the preceding view in the bottom-pane stack.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ViewPresentation {
+    #[default]
+    Inline,
+    Centered,
+}
+
 /// Trait implemented by every view that can be shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
+    /// Centered views preserve the preceding view as their backdrop.
+    fn presentation(&self) -> ViewPresentation {
+        ViewPresentation::Inline
+    }
+
+    /// Refresh an open configuration panel, including one below a child editor.
+    /// Returns whether this view contains a configuration panel.
+    fn update_config_panel(&mut self, _update: &crate::config_panel::ConfigPanelUpdate) -> bool {
+        false
+    }
+
+    /// Acknowledge that a queued configuration editor has opened.
+    fn config_editor_opened(&mut self) {}
+
+    /// Mark a queued editor activation inactive after a non-key interaction.
+    fn interrupt_config_editor_transition(&mut self) {}
+
     /// Handle a key event while the view is active. A redraw is always
     /// scheduled after this call.
     fn handle_key_event(&mut self, _key_event: KeyEvent) {}
 
+    /// Handle a configured action while preserving the physical key that triggered it.
+    fn handle_key_event_with_activation_key(
+        &mut self,
+        key_event: KeyEvent,
+        _activation_key: Option<KeyBinding>,
+    ) {
+        self.handle_key_event(key_event);
+    }
+
+    /// Observe a press or repeat while another view is on top without handling it as input.
+    fn observe_key_event_while_covered(
+        &mut self,
+        _key_event: KeyEvent,
+        _activation_key: KeyBinding,
+    ) {
+    }
+
+    /// Observe key releases that the bottom pane otherwise filters before view dispatch.
+    fn handle_key_release(&mut self, _key_event: KeyEvent) {}
+
     /// Return the keymap contexts whose handlers are active in this view.
     fn keymap_contexts(&self) -> KeymapContextSet {
         KeymapContextSet::default()
+    }
+
+    /// Whether this local-only view can continue handling input while disconnected.
+    fn accepts_input_when_disconnected(&self) -> bool {
+        false
     }
 
     /// Return `true` if the view has finished and should be removed.
@@ -53,6 +105,19 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Actual item index for list-based views that want to preserve selection
     /// across external refreshes.
     fn selected_index(&self) -> Option<usize> {
+        None
+    }
+
+    /// Current toggle values for list items that preserve local choices across refreshes.
+    fn selection_toggle_states(&self) -> Vec<Option<super::SelectionToggleState>> {
+        Vec::new()
+    }
+
+    /// Mark one previously emitted toggle action as complete.
+    fn complete_selection_toggle(&mut self, _index: usize) {}
+
+    /// Current query for searchable list views that preserve filtering across refreshes.
+    fn search_query(&self) -> Option<&str> {
         None
     }
 
@@ -117,6 +182,11 @@ pub(crate) trait BottomPaneView: Renderable {
         false
     }
 
+    /// The patch whose inline review should end when this prompt is answered.
+    fn current_patch_approval(&self) -> Option<&super::ApplyPatchApprovalRequest> {
+        None
+    }
+
     /// Try to handle approval request; return the original value if not
     /// consumed.
     fn try_consume_approval_request(
@@ -163,6 +233,13 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Codex needs user input.
     fn terminal_title_requires_action(&self) -> bool {
         false
+    }
+
+    /// Classify interactive requests that prevent the agent from continuing.
+    ///
+    /// Ordinary settings and navigation views do not block a running agent.
+    fn program_status_blocked_kind(&self) -> Option<ProgramStatusKind> {
+        None
     }
 
     /// Return the next time-based redraw this view needs while it is active.

@@ -43,10 +43,15 @@ pub struct CodeCell {
     pub runtime_status: CodeCellRuntimeStatus,
     pub initial_response_at_unix_ms: Option<i64>,
     pub initial_response_seq: Option<RawEventSeq>,
+    pub initial_response_status: Option<CodeCellRuntimeStatus>,
+    pub raw_initial_response_payload_id: Option<RawPayloadId>,
+    pub raw_result_payload_id: Option<RawPayloadId>,
     pub yielded_at_unix_ms: Option<i64>,
     pub yielded_seq: Option<RawEventSeq>,
     pub source_js: String,
     pub nested_tool_call_ids: Vec<ToolCallId>,
+    /// Wait dispatches confirmed by the host. Older traces did not record that confirmation,
+    /// so an empty list does not prove nobody waited on the cell.
     pub wait_tool_call_ids: Vec<ToolCallId>,
 }
 
@@ -120,6 +125,12 @@ pub struct ToolCall {
     pub model_visible_call_id: Option<ModelVisibleCallId>,
     /// Code-mode runtime's internal tool invocation ID, if this call came from JS.
     pub code_mode_runtime_tool_id: Option<CodeModeRuntimeToolId>,
+    /// Cell started by this outer exec dispatch, if a matching cell was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_code_cell_id: Option<CodeCellId>,
+    /// Runtime handle confirmed by the Code Mode host, even if the cell source is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_wait_runtime_cell_id: Option<String>,
     pub thread_id: AgentThreadId,
     /// Runtime activation that started the tool. Background work may outlive this turn.
     pub started_by_codex_turn_id: Option<CodexTurnId>,
@@ -169,6 +180,8 @@ pub enum ToolCallKind {
     ExecCommand,
     WriteStdin,
     ApplyPatch,
+    /// Resolved backend identity from an MCP runtime invocation. The callable
+    /// namespace/name may differ and remain in the summary and raw invocation.
     Mcp {
         server: String,
         tool: String,
@@ -210,7 +223,7 @@ pub enum ToolCallSummary {
     },
 }
 
-/// Reusable terminal process/session returned by the runtime.
+/// One terminal process lifetime, including its command and subsequent polls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalSession {
     pub terminal_id: TerminalId,
@@ -225,7 +238,7 @@ pub struct TerminalSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalOperation {
     pub operation_id: TerminalOperationId,
-    /// Runtime terminal/process ID. `None` is legal only while the operation that creates it is starting.
+    /// Reduced session identity, distinct from the recyclable runtime process ID.
     pub terminal_id: Option<TerminalId>,
     pub tool_call_id: ToolCallId,
     pub kind: TerminalOperationKind,

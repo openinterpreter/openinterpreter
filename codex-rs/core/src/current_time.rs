@@ -12,11 +12,12 @@ use codex_protocol::ThreadId;
 
 use crate::config::CurrentTimeReminderConfig;
 
-pub type TimeFuture<'a> = Pin<Box<dyn Future<Output = Result<DateTime<Utc>>> + Send + 'a>>;
 pub type SleepFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+pub type TimeFuture<'a> = Pin<Box<dyn Future<Output = Result<DateTime<Utc>>> + Send + 'a>>;
 
 /// Host integration boundary for reading and waiting on the current time.
 pub trait TimeProvider: Send + Sync {
+    /// Reads the host clock, which may require an asynchronous client request.
     fn current_time(&self, thread_id: ThreadId) -> TimeFuture<'_>;
 
     /// Waits for the given duration on this provider's clock.
@@ -53,3 +54,7 @@ pub(crate) fn resolve_time_provider(
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "current_time_tests.rs"]
+mod tests;

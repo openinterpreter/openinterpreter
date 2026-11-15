@@ -316,10 +316,12 @@ async fn capture_reaches_remote_rtp_and_mute_discards_queued_and_partial_audio()
             .header
             .timestamp
             .wrapping_sub(before[0].header.timestamp);
+        assert_eq!(clock_gap % 960, 0);
         let expected_gap = (resumed.duration_since(start).as_secs_f64() * 48_000.0) as u32;
-        // Allow 1 ms for sample rounding without imposing a wall-clock throughput requirement.
+        // Real gaps advance by whole packets, keeping wall time within one
+        // packet without imposing a wall-clock throughput requirement.
         assert!(
-            clock_gap.abs_diff(expected_gap) <= 48,
+            clock_gap.abs_diff(expected_gap) <= 960,
             "received RTP clock gap: {clock_gap}, expected {expected_gap}"
         );
         assert_eq!(

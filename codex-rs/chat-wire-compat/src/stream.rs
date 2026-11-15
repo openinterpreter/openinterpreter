@@ -142,8 +142,10 @@ pub(crate) fn spawn_chat_stream(
         tool_kinds,
     ));
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id: None,
+        interrupt: None,
     }
 }
 
@@ -290,7 +292,11 @@ async fn process_chat_sse(
                                     role: "assistant".to_string(),
                                     content: vec![ContentItem::OutputText {
                                         text: String::new(),
+                                        annotations: None,
+                                        logprobs: None,
                                     }],
+                                    status: None,
+                                    encrypted_content: None,
                                     phase: None,
                                     internal_chat_message_metadata_passthrough: None,
                                 })))
@@ -429,6 +435,7 @@ async fn finalize_and_complete(
                 codex_rollout_budget_units: None,
             }),
             usage_metadata: None,
+            reasoning_removals: None,
             end_turn: None,
         }))
         .await
@@ -449,7 +456,11 @@ async fn finalize_assistant_message(
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: state.assistant_text.clone(),
+                annotations: None,
+                logprobs: None,
             }],
+            status: None,
+            encrypted_content: None,
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         })))
@@ -516,6 +527,8 @@ async fn finalize_tool_calls_until(
         let item = match tool_kinds.get(&name) {
             Some(ToolOutputKind::Function) => ResponseItem::FunctionCall {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 name,
                 namespace: None,
                 arguments: tool_call.arguments,
@@ -528,6 +541,8 @@ async fn finalize_tool_calls_until(
                 namespace,
             }) => ResponseItem::FunctionCall {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 name: output_name.clone(),
                 namespace: Some(namespace.clone()),
                 arguments: tool_call.arguments,
@@ -546,6 +561,7 @@ async fn finalize_tool_calls_until(
                 };
                 ResponseItem::CustomToolCall {
                     id: None,
+                    encrypted_content: None,
                     status: None,
                     call_id,
                     name,
@@ -556,6 +572,8 @@ async fn finalize_tool_calls_until(
             }
             None => ResponseItem::FunctionCall {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 name,
                 namespace: None,
                 arguments: tool_call.arguments,

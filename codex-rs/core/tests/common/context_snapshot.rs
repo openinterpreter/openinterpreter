@@ -23,6 +23,18 @@ mod text;
 
 const MAX_SNAPSHOT_LINE_CHARS: usize = 160;
 
+/// Canonicalize independent JSON output lines before truncation can make key order observable.
+/// Non-JSON lines, including ordinary prose in snapshot descriptions, stay unchanged.
+pub fn normalize_json_lines(text: &str) -> String {
+    text.lines()
+        .map(|line| match serde_json::from_str::<Value>(line) {
+            Ok(value) => value.to_string(),
+            Err(_) => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ContextSnapshotOptions {
     rewrite_known_segments: bool,

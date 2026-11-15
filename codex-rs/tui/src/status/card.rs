@@ -2,17 +2,17 @@ use crate::history_cell::CompositeHistoryCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::plain_lines;
-use crate::history_cell::with_border_with_inner_width;
 use crate::legacy_core::config::Config;
 use crate::line_truncation::line_width;
 use crate::style::accent_color;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
 use crate::version::CODEX_CLI_VERSION;
-use crate::width::display_width;
 use chrono::DateTime;
 use chrono::Local;
 use codex_app_server_protocol::AskForApproval;
+use codex_model_provider::provider_uses_first_party_auth_path;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_product_info::Product;
 use codex_protocol::ThreadId;
@@ -34,7 +34,6 @@ use std::path::PathBuf;
 use super::account::StatusAccountDisplay;
 use super::format::FieldFormatter;
 use super::format::push_label;
-use super::format::truncate_line_to_width;
 use super::helpers::compose_account_display;
 use super::helpers::compose_model_display;
 use super::helpers::format_directory_display;
@@ -50,12 +49,11 @@ use super::rate_limits::render_status_limit_progress_bar;
 use super::remote_connection::RemoteConnectionStatus;
 use super::thread_usage::StatusThreadUsage;
 use crate::wrapping::RtOptions;
-use crate::wrapping::adaptive_wrap_lines;
 use crate::wrapping::word_wrap_lines;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
 
 #[derive(Debug, Clone)]
 struct StatusContextWindowData {
@@ -145,6 +143,7 @@ struct StatusHistoryCell {
     token_usage: StatusTokenUsageData,
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
     thread_usage: StatusThreadUsage,
+    plan_type: Option<PlanType>,
 }
 
 #[cfg(test)]
@@ -326,13 +325,15 @@ impl StatusHistoryCell {
                 .map(|effort| effort.to_string())
                 .unwrap_or_else(|| "none".to_string());
             config_entries.push(("reasoning effort", effort_value));
-            config_entries.push((
-                "reasoning summaries",
-                config
-                    .model_reasoning_summary
-                    .map(|summary| summary.to_string())
-                    .unwrap_or_else(|| "auto".to_string()),
-            ));
+            if remote_connection.is_none() {
+                config_entries.push((
+                    "reasoning summaries",
+                    config
+                        .model_reasoning_summary
+                        .map(|summary| summary.to_string())
+                        .unwrap_or_else(|| "auto".to_string()),
+                ));
+            }
         }
         let (model_name, model_details) = compose_model_display(model_name, &config_entries);
         let approval = config_entries
@@ -353,7 +354,27 @@ impl StatusHistoryCell {
             workspace_root_suffix.as_deref(),
         );
         let show_chatgpt_usage_link = requires_openai_auth;
-        let account = compose_account_display(account_display);
+        let mut account = compose_account_display(account_display);
+        let workspace_matches_provider = if remote_connection.is_some() {
+            // A connected server owns the provider definitions; only the built-in ID is certain.
+            model_provider
+                .as_deref()
+                .is_none_or(|provider| provider == OPENAI_PROVIDER_ID)
+        } else {
+            config
+                .model_providers
+                .get(
+                    model_provider
+                        .as_deref()
+                        .unwrap_or(&config.model_provider_id),
+                )
+                .is_some_and(provider_uses_first_party_auth_path)
+        };
+        if !workspace_matches_provider
+            && let Some(StatusAccountDisplay::ChatGpt { workspace, .. }) = &mut account
+        {
+            *workspace = None;
+        }
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());
         let default_usage = TokenUsage::default();
@@ -402,6 +423,7 @@ impl StatusHistoryCell {
             agents_summary,
             rate_limit_state,
             thread_usage,
+            plan_type: _plan_type,
         }
     }
 
@@ -734,21 +756,15 @@ fn status_approval_label(
 
 impl StatusHistoryCell {
     fn content_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(vec![
-            Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from(Product::current().display_name()).bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
-        ]));
-
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
             return Vec::new();
         }
+        let mut lines = Vec::new();
+        let available_width = available_inner_width;
 
         let account_value = self.account.as_ref().map(|account| match account {
-            StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
+            StatusAccountDisplay::ChatGpt { email, plan, .. } => match (email, plan) {
                 (Some(email), Some(plan)) => format!("{email} ({plan})"),
                 (Some(email), None) => email.clone(),
                 (None, Some(plan)) => plan.clone(),
@@ -761,6 +777,11 @@ impl StatusHistoryCell {
                 )
             }
         });
+
+        let workspace = match &self.account {
+            Some(StatusAccountDisplay::ChatGpt { workspace, .. }) => workspace.as_deref(),
+            _ => None,
+        };
 
         let mut labels: Vec<String> = vec!["Model", "Directory", "Permissions", "Agents.md"]
             .into_iter()
@@ -786,6 +807,9 @@ impl StatusHistoryCell {
         if account_value.is_some() {
             push_label(&mut labels, &mut seen, "Account");
         }
+        if workspace.is_some() {
+            push_label(&mut labels, &mut seen, "ChatGPT workspace");
+        }
         if thread_name.is_some() {
             push_label(&mut labels, &mut seen, "Thread name");
         }
@@ -806,27 +830,8 @@ impl StatusHistoryCell {
         self.thread_usage.push_labels(&mut labels, &mut seen);
 
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
-        let value_width = formatter.value_width(available_inner_width);
+        let value_width = formatter.value_width(available_width);
 
-        let note_first_line = Line::from(vec![
-            Span::from("Visit ").fg(accent_color()),
-            CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
-            Span::from(" for up-to-date").fg(accent_color()),
-        ]);
-        let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").fg(accent_color()),
-        ]);
-        let note_lines = adaptive_wrap_lines(
-            [note_first_line, note_second_line],
-            RtOptions::new(available_inner_width),
-        );
-        lines.push(Line::from(Vec::<Span<'static>>::new()));
-        // The ChatGPT usage page only applies to providers backed by OpenAI auth;
-        // providers like Bedrock manage limits and billing elsewhere.
-        if self.show_chatgpt_usage_link {
-            lines.extend(note_lines);
-            lines.push(Line::from(Vec::<Span<'static>>::new()));
-        }
         if let Some(remote_connection) = self.remote_connection.as_ref() {
             let value = if remote_connection.is_local_daemon {
                 Line::from("Local background server")
@@ -854,7 +859,7 @@ impl StatusHistoryCell {
             model_spans.push(Span::from(")").dim());
         }
 
-        let directory_value = format_directory_display(&self.directory, Some(value_width));
+        let directory_value = format_directory_display(&self.directory, /*max_width*/ None);
 
         lines.push(formatter.line("Model", model_spans));
         if let Some(model_provider) = self.model_provider.as_ref() {
@@ -866,6 +871,9 @@ impl StatusHistoryCell {
 
         if let Some(account_value) = account_value {
             lines.push(formatter.line("Account", vec![Span::from(account_value)]));
+        }
+        if let Some(workspace) = workspace {
+            lines.push(formatter.line("ChatGPT workspace", vec![Span::from(workspace.to_owned())]));
         }
 
         if let Some(thread_name) = thread_name {
@@ -893,32 +901,83 @@ impl StatusHistoryCell {
             lines.push(formatter.line("Context window", spans));
         }
 
-        lines.extend(self.rate_limit_lines(&rate_limit_state, available_inner_width, &formatter));
-        let thread_usage_lines = self.thread_usage.lines(&formatter, value_width);
+        lines.extend(self.rate_limit_lines(&rate_limit_state, available_width, &formatter));
+        let thread_usage_lines = self
+            .thread_usage
+            .lines(&formatter, value_width, self.plan_type);
         if !thread_usage_lines.is_empty() {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
             lines.extend(thread_usage_lines);
         }
 
-        lines
+        // Leave room for the two-column title mark even in a tiny terminal.
+        let indent = if available_width >= FieldFormatter::INDENT.len() + 2 {
+            FieldFormatter::INDENT
+        } else {
+            ""
+        };
+        let mut title = vec![indent.into()];
+        title.extend(crate::history_cell::codex_title(CODEX_CLI_VERSION));
+        let mut rendered = word_wrap_lines(
+            [Line::from(title)],
+            RtOptions::new(available_width).subsequent_indent(indent.into()),
+        );
+        rendered.push(Line::default());
+        // Providers such as Bedrock manage limits and billing elsewhere.
+        if self.show_chatgpt_usage_link {
+            rendered.extend(word_wrap_lines(
+                [
+                    Line::from(vec![
+                        "Visit ".fg(accent_color()),
+                        CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
+                        " for up-to-date".fg(accent_color()),
+                    ]),
+                    "information on rate limits and credits"
+                        .fg(accent_color())
+                        .into(),
+                ],
+                RtOptions::new(available_width)
+                    .initial_indent(indent.into())
+                    .subsequent_indent(indent.into())
+                    .word_separator(textwrap::WordSeparator::AsciiSpace)
+                    .word_splitter(textwrap::WordSplitter::NoHyphenation),
+            ));
+            rendered.push(Line::default());
+        }
+        // Keep every value, including long paths and IDs, aligned beneath its first line.
+        // At widths too small for the label column, use the outer indent instead.
+        let continuation = if value_width > 0 {
+            formatter.continuation(Vec::new())
+        } else {
+            indent.into()
+        };
+        let options = RtOptions::new(available_width)
+            .subsequent_indent(continuation)
+            .word_splitter(textwrap::WordSplitter::NoHyphenation);
+        rendered.extend(lines.into_iter().flat_map(|line| {
+            let wrapped = word_wrap_lines([line.clone()], options.clone());
+            if wrapped
+                .iter()
+                .any(|line| line_width(line) > available_width)
+            {
+                // A wide grapheme may not fit after the continuation indent.
+                word_wrap_lines(
+                    [line],
+                    RtOptions::new(available_width)
+                        .word_splitter(textwrap::WordSplitter::NoHyphenation),
+                )
+            } else {
+                wrapped
+            }
+        }));
+
+        rendered
     }
 }
 
 impl HistoryCell for Arc<StatusHistoryCell> {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let available_inner_width = usize::from(width.saturating_sub(4));
-        if available_inner_width == 0 {
-            return Vec::new();
-        }
-        let lines = self.content_lines(width);
-        let content_width = lines.iter().map(line_width).max().unwrap_or(0);
-        let inner_width = content_width.min(available_inner_width);
-        let truncated_lines: Vec<Line<'static>> = lines
-            .into_iter()
-            .map(|line| truncate_line_to_width(line, inner_width))
-            .collect();
-
-        with_border_with_inner_width(truncated_lines, inner_width)
+        self.content_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -931,20 +990,22 @@ impl HistoryCell for Arc<StatusHistoryCell> {
     ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         let mut lines =
             crate::terminal_hyperlinks::plain_hyperlink_lines(self.display_lines(width));
-        for line in &mut lines {
-            let visible = line
-                .line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            if let Some(start_byte) = visible.find(CHATGPT_USAGE_URL) {
-                let start = display_width(&visible[..start_byte]);
-                line.hyperlinks
-                    .push(crate::terminal_hyperlinks::TerminalHyperlink::web(
-                        start..start + display_width(CHATGPT_USAGE_URL),
-                        CHATGPT_USAGE_URL.to_string(),
-                    ));
+        // The usage URL has a known destination; wrapping preserves its underlined spans.
+        // Attach that destination to every fragment instead of searching for the full URL.
+        if self.show_chatgpt_usage_link {
+            for line in &mut lines {
+                let mut column = 0;
+                for span in &line.line.spans {
+                    let end = column + span.width();
+                    if span.style.add_modifier.contains(Modifier::UNDERLINED) {
+                        line.hyperlinks
+                            .push(crate::terminal_hyperlinks::TerminalHyperlink::web(
+                                column..end,
+                                CHATGPT_USAGE_URL.to_string(),
+                            ));
+                    }
+                    column = end;
+                }
             }
         }
         lines

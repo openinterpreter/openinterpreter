@@ -98,6 +98,8 @@ fn experimental_features_discovery_preserves_server_order_and_accepts_new_keys()
         .send(Ok(vec![
             server_feature("network_proxy"),
             server_feature("future_feature"),
+            server_feature("worktrees"),
+            server_feature("realtime_conversation"),
             stable,
             server_feature("prevent_idle_sleep"),
         ]))

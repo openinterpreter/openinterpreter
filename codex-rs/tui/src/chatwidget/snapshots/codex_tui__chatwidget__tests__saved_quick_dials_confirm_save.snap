@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: "render_bottom_popup(&chat, 52)"
+---
+  Save preset 2?
+  /model gpt-5.6-terra --reasoning=high
+  --speed=fast
+
+
+› 1. Save preset 2
+
+  enter select · esc back

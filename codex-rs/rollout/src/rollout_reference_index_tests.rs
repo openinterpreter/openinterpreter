@@ -247,6 +247,61 @@ async fn filtered_unarchived_scan_validates_candidate_ownership() -> anyhow::Res
     Ok(())
 }
 
+/// Restoring a thread must include its compressed/reverted files without scanning other history.
+#[tokio::test]
+async fn filtered_archived_scan_includes_only_owned_archived_candidates() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let owner_uuid = Uuid::from_u128(60);
+    let owner_id = thread_id(owner_uuid)?;
+    let replacement_id = thread_id(Uuid::from_u128(61))?;
+    let other_uuid = Uuid::from_u128(62);
+    let other_id = thread_id(other_uuid)?;
+    let mismatched_id = thread_id(Uuid::from_u128(63))?;
+    let original_path = archived_rollout_path(home.path(), owner_uuid);
+    let replacement_path = original_path.with_file_name(format!(
+        "rollout-2025-01-03T12-00-00-{owner_id}_{replacement_id}.jsonl"
+    ));
+    write_rollout(original_path.clone(), owner_id, /*history_base*/ None)?;
+    compress_now(&original_path)?;
+    write_rollout(
+        replacement_path.clone(),
+        owner_id,
+        Some(history_position(owner_id)),
+    )?;
+
+    // A matching filename is only a candidate: metadata must confirm ownership.
+    let mismatched_path = original_path.with_file_name(format!(
+        "rollout-2025-01-03T12-00-00-{owner_id}_{mismatched_id}.jsonl"
+    ));
+    write_rollout(mismatched_path, other_id, /*history_base*/ None)?;
+    // Unrelated filenames are excluded before reading their metadata.
+    write_rollout(
+        archived_rollout_path(home.path(), other_uuid),
+        owner_id,
+        /*history_base*/ None,
+    )?;
+    write_rollout(
+        active_rollout_path(home.path(), owner_uuid),
+        owner_id,
+        /*history_base*/ None,
+    )?;
+
+    let index = RolloutReferenceIndex::scan_archived_threads(home.path(), &[owner_id]).await?;
+    let mut owned: Vec<_> = index
+        .rollouts_for_thread(owner_id)
+        .map(|(id, path)| (id, path.to_path_buf()))
+        .collect();
+    owned.sort_by_key(|(id, _)| id.to_string());
+    assert_eq!(
+        owned,
+        vec![
+            (owner_id, original_path.with_extension("jsonl.zst")),
+            (replacement_id, replacement_path),
+        ]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn self_history_base_does_not_count_as_reference() -> anyhow::Result<()> {
     let home = TempDir::new()?;

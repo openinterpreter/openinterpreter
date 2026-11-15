@@ -1,4 +1,7 @@
+use anyhow::Context;
 use anyhow::Result;
+use codex_core::AgentTreeShutdownFailure;
+use codex_core::AgentTreeShutdownFailureReason;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
@@ -9,7 +12,8 @@ use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::protocol::TurnEnvironmentRequests;
+use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -18,13 +22,17 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use test_case::test_case;
+use tokio::net::TcpListener;
 
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
@@ -56,7 +64,7 @@ async fn mount_root_collaboration_call(
     call_id: &'static str,
     tool_name: &'static str,
     arguments: serde_json::Value,
-) {
+) -> ResponseMock {
     let response_id = format!("resp-{call_id}");
     mount_sse_once_match(
         server,
@@ -75,16 +83,18 @@ async fn mount_root_collaboration_call(
     .await;
 
     let completion_id = format!("resp-{call_id}-complete");
+    let mut answer = ev_assistant_message(&format!("msg-{call_id}"), "collaboration completed");
+    answer["item"]["phase"] = json!("final_answer");
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| has_function_call_output(request, call_id),
         sse(vec![
             ev_response_created(&completion_id),
-            ev_assistant_message(&format!("msg-{call_id}"), "collaboration completed"),
+            answer,
             ev_completed(&completion_id),
         ]),
     )
-    .await;
+    .await
 }
 
 async fn mount_completed_worker(
@@ -93,6 +103,9 @@ async fn mount_completed_worker(
     parent_call_id: &'static str,
 ) -> ResponseMock {
     let response_id = format!("resp-worker-{parent_call_id}");
+    let mut answer =
+        ev_assistant_message(&format!("msg-worker-{parent_call_id}"), "worker completed");
+    answer["item"]["phase"] = json!("final_answer");
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
@@ -100,7 +113,7 @@ async fn mount_completed_worker(
         },
         sse(vec![
             ev_response_created(&response_id),
-            ev_assistant_message(&format!("msg-worker-{parent_call_id}"), "worker completed"),
+            answer,
             ev_completed(&response_id),
         ]),
     )
@@ -136,7 +149,8 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            body_contains(request, FIRST_TASK) && !has_function_call_output(request, "first-call")
+            body_contains(request, FIRST_TASK)
+                && body_contains(request, r#"\"agent_name\":\"/root/first\""#)
         },
         sse(vec![
             ev_response_created("first-worker-response"),
@@ -162,7 +176,10 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     .await;
     mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| has_function_call_output(request, "first-call"),
+        |request: &wiremock::Request| {
+            has_function_call_output(request, "first-call")
+                && body_contains(request, r#"\"agent_name\":\"/root\""#)
+        },
         sse(vec![
             ev_response_created("first-followup-response"),
             ev_assistant_message("first-followup-message", "spawned"),
@@ -264,15 +281,23 @@ async fn child_turn_start_preserves_root_attribution() -> Result<()> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResidencyReload {
     Sender,
+    SenderChangesWorkspace,
+    SenderPendingConfiguration,
+    OwnerChangesWorkspace,
     OwnerNarrowsPermissions,
     OwnerPreservesStricterChild,
     OwnerRevokesWorkspaceRoot,
+    OwnerPendingConfiguration,
 }
 
 #[test_case(ResidencyReload::Sender; "sender preserves stricter child")]
+#[test_case(ResidencyReload::SenderChangesWorkspace; "sender retains child workspace")]
+#[test_case(ResidencyReload::SenderPendingConfiguration; "sender follows pending owner configuration")]
+#[test_case(ResidencyReload::OwnerChangesWorkspace; "owner retains child workspace")]
 #[test_case(ResidencyReload::OwnerNarrowsPermissions; "owner narrows cached permissions")]
 #[test_case(ResidencyReload::OwnerPreservesStricterChild; "owner preserves stricter child")]
 #[test_case(ResidencyReload::OwnerRevokesWorkspaceRoot; "owner revokes cached workspace root")]
+#[test_case(ResidencyReload::OwnerPendingConfiguration; "owner pending configuration blocks cached authority")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     reload: ResidencyReload,
@@ -316,12 +341,22 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     let mut builder = test_codex()
         .with_model("gpt-5.6-sol")
         .with_exec_server_url("none")
-        .with_config(|config| {
-            for feature in [Feature::Collab, Feature::MultiAgentV2] {
+        .with_config(move |config| {
+            for feature in [
+                Feature::Collab,
+                Feature::MultiAgentV2,
+                Feature::SubagentThreadEnvironments,
+            ] {
                 config
                     .features
                     .enable(feature)
                     .expect("test config should allow feature update");
+            }
+            if reload == ResidencyReload::OwnerChangesWorkspace {
+                config
+                    .features
+                    .enable(Feature::DeferredExecutor)
+                    .expect("enable deferred executor");
             }
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
             config
@@ -332,9 +367,15 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     let test = builder.build_with_remote_and_local_env(&server).await?;
     let mut child_environment = test.executor_environment().selection().clone();
     let (child_permissions, parent_permissions) = match reload {
-        ResidencyReload::Sender => (
+        ResidencyReload::Sender
+        | ResidencyReload::SenderChangesWorkspace
+        | ResidencyReload::OwnerChangesWorkspace => (
             PermissionProfile::read_only(),
             PermissionProfile::workspace_write(),
+        ),
+        ResidencyReload::SenderPendingConfiguration => (
+            PermissionProfile::read_only(),
+            PermissionProfile::read_only(),
         ),
         ResidencyReload::OwnerNarrowsPermissions => {
             (PermissionProfile::Disabled, PermissionProfile::read_only())
@@ -342,10 +383,12 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         ResidencyReload::OwnerPreservesStricterChild => {
             (PermissionProfile::read_only(), PermissionProfile::Disabled)
         }
-        ResidencyReload::OwnerRevokesWorkspaceRoot => (
-            PermissionProfile::workspace_write(),
-            PermissionProfile::workspace_write(),
-        ),
+        ResidencyReload::OwnerRevokesWorkspaceRoot | ResidencyReload::OwnerPendingConfiguration => {
+            (
+                PermissionProfile::workspace_write(),
+                PermissionProfile::workspace_write(),
+            )
+        }
     };
     if reload == ResidencyReload::OwnerRevokesWorkspaceRoot {
         child_environment.cwd = test.workspace_path_uri("retained")?;
@@ -380,6 +423,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             .await?;
         owner_workspace_roots.push(owner_workspace_root);
         child_environment.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+            environment_hooks: Default::default(),
             allow_login_shell: test.config.permissions.allow_login_shell,
             workspace_roots: owner_workspace_roots,
             permission_profile: PermissionProfileSnapshot::legacy(child_permissions),
@@ -402,14 +446,38 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
                 /*connect_timeout*/ None,
             )?;
     }
+    let deferred_executor = if reload == ResidencyReload::OwnerChangesWorkspace {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        child_environment.environment_id = "deferred-child".to_string();
+        test.thread_manager
+            .environment_manager()
+            .upsert_environment(
+                child_environment.environment_id.clone(),
+                format!("ws://{}", listener.local_addr()?),
+                /*connect_timeout*/ None,
+            )?;
+        let (attach, connection) = tokio::sync::oneshot::channel();
+        let (shutdown, stop) = tokio::sync::oneshot::channel();
+        let executor = tokio::spawn(super::remote_env::serve_environment_with_agents_md(
+            listener, "", connection, stop,
+        ));
+        Some((attach, shutdown, executor))
+    } else {
+        None
+    };
+    let pending_owner = reload == ResidencyReload::SenderPendingConfiguration;
+    let mut initial_environment = child_environment.clone();
+    if pending_owner {
+        initial_environment.config = EnvironmentConfigState::Pending;
+    }
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
     submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentSelections::new(
+            environments: Some(TurnEnvironmentRequests::new(
                 test.config.cwd.clone(),
-                vec![child_environment.clone()],
+                vec![initial_environment.clone().into_request()],
             )),
             ..Default::default()
         },
@@ -423,22 +491,37 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     })
     .await;
 
+    let evicted_thread = Arc::downgrade(&first_thread);
+    drop(first_thread);
+
     let mut parent_environment = child_environment.clone();
+    if matches!(
+        reload,
+        ResidencyReload::SenderChangesWorkspace | ResidencyReload::OwnerChangesWorkspace
+    ) {
+        parent_environment.cwd = test.workspace_path_uri("owner-only-root")?;
+    }
     if reload == ResidencyReload::OwnerRevokesWorkspaceRoot {
         parent_environment.workspace_roots.truncate(1);
+    } else if reload == ResidencyReload::OwnerPendingConfiguration {
+        parent_environment.config = EnvironmentConfigState::Pending;
     } else {
         let EnvironmentConfigState::Ready(parent_config) = &mut parent_environment.config else {
             unreachable!("child environment config should be ready");
         };
         parent_config.permission_profile = PermissionProfileSnapshot::legacy(parent_permissions);
     }
-    if reload == ResidencyReload::Sender {
+    let sender_reload = matches!(
+        reload,
+        ResidencyReload::Sender | ResidencyReload::SenderChangesWorkspace
+    ) || pending_owner;
+    if sender_reload && !pending_owner {
         submit_thread_settings(
             &test.codex,
             ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(
+                environments: Some(TurnEnvironmentRequests::new(
                     test.config.cwd.clone(),
-                    vec![parent_environment.clone()],
+                    vec![parent_environment.clone().into_request()],
                 )),
                 ..Default::default()
             },
@@ -462,13 +545,23 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             .is_err()
     );
 
-    if reload != ResidencyReload::Sender {
+    assert!(
+        evicted_thread.upgrade().is_none(),
+        "evicted child must be dropped"
+    );
+
+    // Complete startup only after eviction has captured the child as Starting.
+    let deferred_executor = deferred_executor.map(|(attach, shutdown, executor)| {
+        attach.send(()).expect("release executor startup");
+        (shutdown, executor)
+    });
+    if !sender_reload {
         submit_thread_settings(
             &test.codex,
             ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(
+                environments: Some(TurnEnvironmentRequests::new(
                     test.config.cwd.clone(),
-                    vec![parent_environment.clone()],
+                    vec![parent_environment.clone().into_request()],
                 )),
                 ..Default::default()
             },
@@ -478,13 +571,30 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             test.codex.config_snapshot().await.environments.environments,
             vec![parent_environment]
         );
-        let result = test
-            .thread_manager
-            .ensure_multi_agent_v2_child_loaded(first_thread_id)
-            .await;
+        // Resume is nonblocking: retry while the released executor finishes startup.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let result = test
+                    .thread_manager
+                    .ensure_multi_agent_v2_child_loaded(first_thread_id)
+                    .await;
+                if reload != ResidencyReload::OwnerChangesWorkspace
+                    || !result.as_ref().is_err_and(|err| {
+                        err.to_string()
+                            .contains("has no matching ready environment binding")
+                    })
+                {
+                    break result;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("child should resume after deferred startup completes")?;
         let expected_error = match reload {
-            ResidencyReload::OwnerRevokesWorkspaceRoot => {
-                Some("no longer matches a ready parent environment")
+            ResidencyReload::OwnerRevokesWorkspaceRoot
+            | ResidencyReload::OwnerPendingConfiguration => {
+                Some("has no matching ready environment binding")
             }
             ResidencyReload::OwnerNarrowsPermissions
             | ResidencyReload::OwnerPreservesStricterChild
@@ -493,6 +603,9 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
                 Some("permissions changed on a remote executor")
             }
             ResidencyReload::Sender
+            | ResidencyReload::SenderChangesWorkspace
+            | ResidencyReload::SenderPendingConfiguration
+            | ResidencyReload::OwnerChangesWorkspace
             | ResidencyReload::OwnerNarrowsPermissions
             | ResidencyReload::OwnerPreservesStricterChild => None,
         };
@@ -524,6 +637,34 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    if pending_owner {
+        assert_eq!(
+            reloaded_worker.environment_selections().await,
+            vec![initial_environment.clone()]
+        );
+        let EnvironmentConfigState::Ready(config) = &child_environment.config else {
+            unreachable!("expected resolved owner configuration");
+        };
+        test.codex
+            .environment_ready(&initial_environment, config.clone())
+            .await?;
+        let selections = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let selections = reloaded_worker.environment_selections().await;
+                if selections
+                    .iter()
+                    .all(|selection| selection.config != EnvironmentConfigState::Pending)
+                {
+                    break selections;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("reloaded child should receive the original owner's configuration result")?;
+        assert_eq!(selections, vec![child_environment]);
+        return Ok(());
+    }
     assert_eq!(
         reloaded_worker
             .config_snapshot()
@@ -560,6 +701,239 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
     };
     let reloaded_tools = worker_tools(&reloaded_worker_request);
     assert!(reloaded_tools.to_string().contains("### `exec_command`"));
+    if let Some((shutdown, executor)) = deferred_executor {
+        shutdown.send(()).expect("stop executor fixture");
+        executor.await?;
+    }
 
     Ok(())
 }
+
+#[path = "agent_eviction_tests.rs"]
+mod eviction_tests;
+
+#[path = "agent_permission_reload_tests.rs"]
+mod permission_reload_tests;
+
+/// Tree shutdown waits for all admitted members, even after registry removal, without crossing
+/// into another root's tree.
+#[tokio::test]
+async fn tree_shutdown_waits_for_children_without_affecting_other_roots() -> Result<()> {
+    use codex_core::StartThreadOptions;
+    use codex_protocol::error::CodexErrorDetails;
+    use codex_protocol::protocol::InternalSessionSource;
+    use codex_protocol::protocol::SessionSource;
+
+    let server = start_mock_server().await;
+    mount_root_collaboration_call(
+        &server,
+        FIRST_PROMPT,
+        "first-call",
+        "spawn_agent",
+        json!({"message": FIRST_TASK, "task_name": "first", "fork_turns": "none"}),
+    )
+    .await;
+    mount_completed_worker(&server, FIRST_TASK, "first-call").await;
+    let test = test_codex()
+        .with_model("gpt-5.6-sol")
+        .with_config(|config| {
+            config.features.enable(Feature::Collab).unwrap();
+            config.features.enable(Feature::MultiAgentV2).unwrap();
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn(FIRST_PROMPT).await?;
+    let root_id = test.session_configured.thread_id;
+    let worker_id = test
+        .thread_manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|id| *id != root_id)
+        .expect("spawned worker");
+    let worker = test.thread_manager.get_thread(worker_id).await?;
+    wait_for_event(&worker, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let internal = test
+        .thread_manager
+        .spawn_internal_session(
+            root_id,
+            StartThreadOptions {
+                session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+                ..StartThreadOptions::new(test.config.clone())
+            },
+        )
+        .await?;
+    let other = test
+        .thread_manager
+        .start_thread(StartThreadOptions::new(test.config.clone()))
+        .await?;
+
+    assert!(test.codex.wait_until_terminated().now_or_never().is_none());
+    let shutdown = test
+        .thread_manager
+        .request_agent_tree_shutdown(worker_id)
+        .await?;
+    // A live child can leave the registry before its owner finishes teardown.
+    test.thread_manager.remove_thread(&worker_id).await;
+    let error = match test
+        .thread_manager
+        .spawn_internal_session(
+            root_id,
+            StartThreadOptions {
+                session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+                ..StartThreadOptions::new(test.config.clone())
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("agent-tree shutdown should reject a new internal session"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(_)
+    ));
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), shutdown.wait_detailed())
+        .await?
+        .expect("tree shutdown should succeed");
+    // Legacy waiters observe the same successful completion after a detailed wait.
+    shutdown.wait().await?;
+    assert!(test.codex.wait_until_terminated().now_or_never().is_some());
+    assert!(worker.wait_until_terminated().now_or_never().is_some());
+    assert!(
+        internal
+            .thread
+            .wait_until_terminated()
+            .now_or_never()
+            .is_some()
+    );
+    assert!(
+        other
+            .thread
+            .wait_until_terminated()
+            .now_or_never()
+            .is_none()
+    );
+    // A root that has never used collaboration can also receive the signal.
+    let other_shutdown = test
+        .thread_manager
+        .request_agent_tree_shutdown(other.thread_id)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), other_shutdown.wait()).await??;
+    assert!(
+        other
+            .thread
+            .wait_until_terminated()
+            .now_or_never()
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_shutdown_cancels_admitted_session_startup() -> Result<()> {
+    use codex_core::StartThreadOptions;
+    use codex_protocol::error::CodexErrorDetails;
+    use codex_protocol::protocol::InternalSessionSource;
+    use codex_protocol::protocol::SessionSource;
+
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let root_id = test.session_configured.thread_id;
+    let mcp_server = start_mock_server().await;
+    let (http_server, control) = AppsTestServer::mount_with_startup_control(&mcp_server).await?;
+    let release = control.hold_next_successful_initialize();
+    let mut config = test.config.clone();
+    let mut servers = config.mcp_servers.get().clone();
+    servers.insert(
+        "stalled".to_owned(),
+        serde_json::from_value(json!({
+            "url": format!("{}/api/codex/ps/mcp", http_server.chatgpt_base_url),
+            "http_headers": { "Authorization": "Bearer synthetic-test-token" },
+            "required": true,
+            "startup_timeout_sec": 120,
+        }))?,
+    );
+    config.mcp_servers.set(servers)?;
+    let mut start = Box::pin(test.thread_manager.spawn_internal_session(
+        root_id,
+        StartThreadOptions {
+            session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+            ..StartThreadOptions::new(config)
+        },
+    ));
+
+    tokio::select! {
+        _ = &mut start => panic!("startup must wait for the required MCP server"),
+        result = tokio::time::timeout(Duration::from_secs(10), async {
+            while control.initialize_attempts() == 0 {
+                tokio::task::yield_now().await;
+            }
+        }) => result.context("required MCP initialization did not begin")?,
+    }
+    let shutdown = test
+        .thread_manager
+        .request_agent_tree_shutdown(root_id)
+        .await?;
+    let (start_result, shutdown_result) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(&mut start, shutdown.wait())
+    })
+    .await
+    .context("tree shutdown must cancel admitted startup")?;
+    shutdown_result?;
+    let error = match start_result {
+        Ok(_) => panic!("cancelled internal session startup must not succeed"),
+        Err(error) => error,
+    };
+    assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
+    drop(release);
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tree_shutdown_reports_persistence_writer_failure() -> Result<()> {
+    let server = start_mock_server().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let root_id = test.session_configured.thread_id;
+
+    // Close the real local writer first so Core's shutdown observes a writer failure.
+    test.thread_store.shutdown_thread(root_id).await?;
+    let shutdown = test
+        .thread_manager
+        .request_agent_tree_shutdown(root_id)
+        .await?;
+    let report = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), shutdown.wait_detailed())
+        .await?
+        .expect_err("shutdown should report the failed persistence writer");
+
+    assert_eq!(
+        report.failures,
+        vec![AgentTreeShutdownFailure {
+            operation: "session_shutdown",
+            thread_id: Some(root_id),
+            reason: AgentTreeShutdownFailureReason::OperationFailed {
+                phase: "close_persistence",
+                error_kind: "thread_store_not_found",
+            },
+        }]
+    );
+    assert_eq!(report.omitted_failures, 0);
+    assert_eq!(
+        shutdown
+            .wait_detailed()
+            .await
+            .expect_err("failure persists"),
+        report
+    );
+    shutdown
+        .wait()
+        .await
+        .expect_err("legacy wait must still report the failure");
+    Ok(())
+}
+
+#[path = "agent_mailbox.rs"]
+mod agent_mailbox;

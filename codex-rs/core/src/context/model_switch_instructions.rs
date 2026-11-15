@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ModelSwitchInstructions {
@@ -23,10 +25,6 @@ impl ContextualUserFragment for ModelSwitchInstructions {
         "developer"
     }
 
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
-
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()
     }
@@ -35,10 +33,10 @@ impl ContextualUserFragment for ModelSwitchInstructions {
         ("<model_switch>", "</model_switch>")
     }
 
-    fn body(&self) -> String {
-        format!(
+    fn body(&self) -> ContentItem {
+        input_text(format!(
             "\nThe user was previously using a different model. Please continue the conversation according to the following instructions:\n\n{}\n",
             self.model_instructions
-        )
+        ))
     }
 }

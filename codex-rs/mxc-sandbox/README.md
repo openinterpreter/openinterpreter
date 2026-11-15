@@ -26,6 +26,37 @@ direct non-loopback egress and general inbound network access.
 Win32k calls and desktop handles remain available for PowerShell startup;
 clipboard, input-injection, and desktop/system-control restrictions remain.
 
+Filesystem conflicts in the emitted policy are enforced by BaseContainer:
+equivalent path spellings and symlink/junction aliases use the strictest access
+(`deny` > read-only > read-write), while more-specific paths override ancestor
+grants. See the [BaseContainer path-precedence rules](https://github.com/microsoft/mxc/blob/main/docs/schema.md#overlapping-paths-for-windows-basecontainer).
+
+Do not call MXC's shared `normalize_object_conflicts` before or after volume
+expansion. Its identity preflight is used by mount-based backends and can reject
+an otherwise usable Windows policy when a network share does not support
+`FileIdInfo`, or a protected deny path cannot be opened for metadata. Codex sends
+explicit path grants to BaseContainer without requiring that additional lookup.
+We intentionally accept two limitations:
+
+- Hard-link names retain independent path permissions. An allowed name can read
+  or modify the same file as a denied or read-only name; we do not tighten all
+  names to an object-wide restriction.
+- Volume-root expansion uses each root's declared access without reconciling
+  aliases first. For example, a writable `V:\` plus a read-only junction to
+  `V:\` can produce a writable `V:\projects` grant. That generated, more-specific
+  grant permits writes through either name despite the read-only root alias.
+
+## Selection and rollout
+
+`windows.sandbox = "mxc"` is strict. The default-off `features.prefer_mxc`
+selects MXC for local execution when available unless local binding is explicitly
+forbidden; otherwise legacy configuration and setup apply. Remote executors keep
+their configured backend. Command failures never trigger backend fallback.
+Desktop can supply `-c features.prefer_mxc=true` from its saved rollout decision
+on the next local Windows launch. Gate changes require a subsequent launch, and
+rollback may require legacy setup. `config/read` retains the configured sandbox;
+`windowsSandbox/readiness` reflects the effective local selection.
+
 ## Launch contract
 
 `create_command_args()` wraps the command like the Seatbelt backend, using the
@@ -33,6 +64,13 @@ executor's Codex executable as the native SDK helper. It carries one typed
 request: the canonical `PermissionProfile`, policy cwd, proxy context, and exact
 argv. The helper inherits command cwd, environment, and stdio from the shared
 process path; policy cwd can differ from command cwd.
+
+Windows MXC reserves `SystemDrive` and `LOCALAPPDATA` for the host's validated,
+nonempty values in both wrapper and explicit child environments. Caller
+overrides are replaced case-insensitively; unavailable host values fail before
+launch with a diagnostic naming the variable.
+Windows may virtualize the child's `LOCALAPPDATA` into a sandbox directory
+beneath the host profile.
 
 The request uses launcher-only environment chunks to leave Windows' command-line
 budget to the workload. Payloads are limited to 1,000,000 UTF-8 bytes and chunks
@@ -54,13 +92,19 @@ to 4096 bytes; the helper removes them before native process creation. Use
   the proxy's additional private-network destination checks. Proxy domain rules
   still apply to proxied traffic; direct DNS remains denied. This default also
   applies to remote Windows executors and does not enable disabled networking.
-- Windows volume-root grants do not recurse. The adapter grants the root and
-  its immediate children; directories added or newly mounted during a running
-  command are not implicitly granted.
+- Read-only volume-root grants recurse without enumerating children. Writable
+  volume-root grants do not recurse, so the adapter grants the root and its
+  immediate children; new children added during a running command are not
+  implicitly writable.
+- Default read access excludes network shares unrelated to the policy or command
+  cwd. Explicit read/write grants remain supported. Unrelated shares are not
+  probed for object identity or enumerated for implicit reads.
 - The native API represents paths and environment values as Unicode strings.
   Non-Unicode values fail instead of undergoing lossy conversion.
-- An explicitly empty child environment is rejected: the SDK replaces an empty
-  environment list with profile defaults and has no explicit-empty option.
+- An empty child environment still uses the Windows user-profile defaults.
+  Supplying only two keys would turn it into an incomplete explicit environment,
+  so the wrapper's bootstrap values are removed before the SDK selects defaults.
+  Nonempty environments remain explicit except for these two host-owned values.
 - The upstream runner terminates remaining descendants when the foreground
   process exits, as well as on cancellation. Both existing Windows backends
   preserve descendants after normal exit, so detached servers currently lose

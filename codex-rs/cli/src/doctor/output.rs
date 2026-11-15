@@ -147,7 +147,7 @@ fn write_check_row(out: &mut String, check: &DoctorCheck, options: HumanOutputOp
 
     if options.show_details {
         for detail in detail_lines(check, options) {
-            write_detail_line(out, detail, options);
+            write_detail_line(out, detail, status, options);
         }
     }
 }
@@ -162,7 +162,12 @@ fn write_note_row(out: &mut String, note: &DoctorNote, options: HumanOutputOptio
     );
 }
 
-fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutputOptions) {
+fn write_detail_line(
+    out: &mut String,
+    detail: HumanDetail,
+    status: DisplayStatus,
+    options: HumanOutputOptions,
+) {
     match detail {
         HumanDetail::Row {
             label,
@@ -174,11 +179,11 @@ fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutput
             let value = if let Some(expected) = expected {
                 format!(
                     "{} {}",
-                    detail_value(&value, options),
+                    detail_value(&value, status, options),
                     dim(&format!("(expected {expected})"), options)
                 )
             } else {
-                detail_value(&value, options)
+                detail_value(&value, status, options)
             };
             let _ = writeln!(
                 out,
@@ -194,7 +199,7 @@ fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutput
                 out,
                 "      {} {}",
                 detail_label(&spacer, options),
-                detail_value(&value, options)
+                detail_value(&value, status, options)
             );
         }
         HumanDetail::Bullet(value) => {
@@ -202,7 +207,7 @@ fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutput
                 out,
                 "    {} {}",
                 very_dim(if options.ascii { "-" } else { "·" }, options),
-                dim(&highlight_actions(&value, options), options)
+                dim(&highlight_actions(&value, status, options), options)
             );
         }
         HumanDetail::Remedy(value) => {
@@ -211,7 +216,7 @@ fn write_detail_line(out: &mut String, detail: HumanDetail, options: HumanOutput
                 out,
                 "    {} {}",
                 orange(marker, options),
-                highlight_actions(&value, options)
+                highlight_actions(&value, status, options)
             );
         }
     }
@@ -322,7 +327,7 @@ fn style_description(
     status: DisplayStatus,
     options: HumanOutputOptions,
 ) -> String {
-    let highlighted = highlight_actions(description, options);
+    let highlighted = highlight_actions(description, status, options);
     match status {
         DisplayStatus::Ok | DisplayStatus::Idle => dim(&highlighted, options),
         DisplayStatus::Update => amber(&highlighted, options),
@@ -809,7 +814,7 @@ fn separator(options: HumanOutputOptions) -> String {
     }
 }
 
-fn highlight_actions(text: &str, options: HumanOutputOptions) -> String {
+fn highlight_actions(text: &str, status: DisplayStatus, options: HumanOutputOptions) -> String {
     if !options.color_enabled {
         return text.to_string();
     }
@@ -817,33 +822,40 @@ fn highlight_actions(text: &str, options: HumanOutputOptions) -> String {
     let mut out = String::new();
     let mut parts = text.split('`');
     if let Some(first) = parts.next() {
-        out.push_str(&highlight_flags(first, options));
+        out.push_str(&highlight_plain_text(first, status, options));
     }
     let mut in_code = true;
     for part in parts {
         if in_code {
-            out.push_str(&cyan(part, options));
+            let highlighted = if status == DisplayStatus::Fail && looks_copyable(part) {
+                red(part, options)
+            } else {
+                cyan(part, options)
+            };
+            out.push_str(&highlighted);
         } else {
-            out.push_str(&highlight_flags(part, options));
+            out.push_str(&highlight_plain_text(part, status, options));
         }
         in_code = !in_code;
     }
     out
 }
 
-fn highlight_flags(text: &str, options: HumanOutputOptions) -> String {
+fn highlight_plain_text(text: &str, status: DisplayStatus, options: HumanOutputOptions) -> String {
     text.split_inclusive(char::is_whitespace)
         .map(|token| {
             let trimmed = token.trim_end();
             let suffix = &token[trimmed.len()..];
             let bare = trimmed.trim_end_matches([',', '.', ':', ';', ')']);
             let punctuation = &trimmed[bare.len()..];
-            if bare.starts_with("--") {
-                let highlighted = cyan(bare, options);
-                format!("{highlighted}{punctuation}{suffix}")
+            let highlighted = if status == DisplayStatus::Fail && looks_copyable(bare) {
+                red(bare, options)
+            } else if bare.starts_with("--") || looks_copyable(bare) {
+                cyan(bare, options)
             } else {
-                token.to_string()
-            }
+                bare.to_string()
+            };
+            format!("{highlighted}{punctuation}{suffix}")
         })
         .collect()
 }
@@ -894,8 +906,11 @@ pub(super) fn redact_detail(detail: &str) -> String {
         "secret",
     ];
     if secret_keys.iter().any(|key| lower.contains(key)) {
-        let name = detail.split(':').next().unwrap_or(detail);
-        format!("{name}: <redacted>")
+        // make sure that windows drives in paths are not matches C:/ if they are a first token
+        detail.split_once(": ").map_or_else(
+            || "<redacted>".to_string(),
+            |(name, _)| format!("{name}: <redacted>"),
+        )
     } else {
         redact_urls(detail)
     }
@@ -1052,47 +1067,60 @@ fn detail_label(text: &str, options: HumanOutputOptions) -> String {
     color256(text, /*code*/ 240, options)
 }
 
-fn detail_value(text: &str, options: HumanOutputOptions) -> String {
+fn detail_value(text: &str, status: DisplayStatus, options: HumanOutputOptions) -> String {
     if !options.color_enabled {
         return text.to_string();
     }
-    style_detail_text(text, options)
+    style_detail_text(text, status, options)
 }
 
-fn style_detail_text(text: &str, options: HumanOutputOptions) -> String {
+fn style_detail_text(text: &str, status: DisplayStatus, options: HumanOutputOptions) -> String {
     let mut out = String::new();
     let mut parts = text.split('`');
     if let Some(first) = parts.next() {
-        out.push_str(&style_detail_plain_text(first, options));
+        out.push_str(&style_detail_plain_text(first, status, options));
     }
     let mut in_code = true;
     for part in parts {
         if in_code {
-            out.push_str(&cyan(part, options));
+            let highlighted = if status == DisplayStatus::Fail && looks_copyable(part) {
+                red(part, options)
+            } else {
+                cyan(part, options)
+            };
+            out.push_str(&highlighted);
         } else {
-            out.push_str(&style_detail_plain_text(part, options));
+            out.push_str(&style_detail_plain_text(part, status, options));
         }
         in_code = !in_code;
     }
     out
 }
 
-fn style_detail_plain_text(text: &str, options: HumanOutputOptions) -> String {
+fn style_detail_plain_text(
+    text: &str,
+    status: DisplayStatus,
+    options: HumanOutputOptions,
+) -> String {
     text.split_inclusive(char::is_whitespace)
-        .map(|token| style_detail_token(token, options))
+        .map(|token| style_detail_token(token, status, options))
         .collect()
 }
 
-fn style_detail_token(token: &str, options: HumanOutputOptions) -> String {
+fn style_detail_token(token: &str, status: DisplayStatus, options: HumanOutputOptions) -> String {
     let trimmed = token.trim_end();
     let suffix = &token[trimmed.len()..];
     let bare = trimmed.trim_end_matches([',', '.', ':', ';', ')']);
     let punctuation = &trimmed[bare.len()..];
-    let styled = style_detail_bare_token(bare, options);
+    let styled = style_detail_bare_token(bare, status, options);
     format!("{styled}{punctuation}{suffix}")
 }
 
-fn style_detail_bare_token(bare: &str, options: HumanOutputOptions) -> String {
+fn style_detail_bare_token(
+    bare: &str,
+    status: DisplayStatus,
+    options: HumanOutputOptions,
+) -> String {
     if bare.is_empty() {
         return String::new();
     }
@@ -1109,6 +1137,9 @@ fn style_detail_bare_token(bare: &str, options: HumanOutputOptions) -> String {
     }
     if bare == "ok" {
         return green(bare, options);
+    }
+    if status == DisplayStatus::Fail && looks_copyable(bare) {
+        return red(bare, options);
     }
     if bare.starts_with("--") || looks_copyable(bare) {
         return cyan(bare, options);
@@ -1148,13 +1179,24 @@ fn color256(text: &str, code: u8, options: HumanOutputOptions) -> String {
 }
 
 fn looks_copyable(text: &str) -> bool {
-    text.starts_with("http://")
+    if text.starts_with("http://")
         || text.starts_with("https://")
         || text.starts_with("wss://")
         || text.starts_with("~/")
         || text.starts_with('/')
         || text.starts_with("./")
         || text.starts_with("../")
+    {
+        return true;
+    }
+
+    if cfg!(target_os = "windows") {
+        return text.starts_with(r"\\") // unc and win32 paths
+            || text.starts_with(r"\??\") // NT DOS paths
+            || matches!(text.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic()); // standard drive absolute C:/ and D:\ paths
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -1377,6 +1419,19 @@ Background Server
     #[test]
     fn render_human_report_snapshot_covers_environment_rows() {
         let mut report = sample_report();
+        report.checks.push(
+            DoctorCheck::new(
+                "network.reachability",
+                "network",
+                CheckStatus::Fail,
+                "provider is unreachable",
+            )
+            .remediation(super::super::network::SYSTEM_PROXY_REMEDIATION),
+        );
+        report.checks.push(
+            DoctorCheck::new("config.load", "config", CheckStatus::Ok, "config loaded")
+                .detail("configured TUI mode: fullscreen"),
+        );
         report.checks.push(DoctorCheck::new(
             "system.disk",
             "disk",
@@ -1761,6 +1816,7 @@ Run codex doctor without --summary for detailed diagnostics.
     fn detail_value_colors_inline_statuses_and_low_signal_values() {
         let rendered = detail_value(
             "npm: no · commit unknown · integrity ok · ~/code/codex/target/debug/codex · <redacted>",
+            DisplayStatus::Ok,
             detailed_color_unicode_options(),
         );
 
@@ -1780,6 +1836,27 @@ Run codex doctor without --summary for detailed diagnostics.
 
         assert!(rendered.contains("\u{1b}[38;5;220m0.130.0 available"));
         assert!(rendered.contains("\u{1b}[2m(current 0.0.0, dismissed 0.128.0)"));
+    }
+
+    #[test]
+    fn redact_detail_distinguishes_database_paths_from_field_labels() {
+        let details = [
+            r"C:\doctor-secret-sqlite\logs_2.sqlite database failed integrity check",
+            "C:/doctor-secret-sqlite/logs_2.sqlite database failed integrity check",
+            "/tmp/doctor-secret-sqlite/logs_2.sqlite database failed integrity check",
+            r"log database: C:\doctor-secret-sqlite\logs_2.sqlite",
+        ];
+
+        assert_eq!(
+            details.map(redact_detail),
+            [
+                "<redacted>",
+                "<redacted>",
+                "<redacted>",
+                "log database: <redacted>",
+            ]
+            .map(str::to_string)
+        );
     }
 
     #[test]
@@ -1903,5 +1980,42 @@ Run codex doctor without --summary for detailed diagnostics.
             },
         );
         assert!(rendered.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn copyable_items_use_check_status() {
+        let description =
+            "/tmp/logs_2.sqlite, ~/goals_1.sqlite integrity check; try --summary or `codex doctor`";
+        let details = r"see ./logs, ../goals. C:\logs, D:/goals. c:\logs, \\server\share\logs, \\?\C:\logs, \\?\UNC\server\share\logs, \\.\pipe\codex, \??\C:\logs, \DosDevices\C:\logs, \rooted. http://localhost:8080: https://example.com; wss://example.com) and `/tmp/my data/logs_2.sqlite`";
+        let mut rendered = String::new();
+
+        for status in [CheckStatus::Ok, CheckStatus::Warning, CheckStatus::Fail] {
+            let check = DoctorCheck::new("state.paths", "state", status, description)
+                .detail(format!("locations: {details}"));
+            write_check_row(&mut rendered, &check, detailed_color_unicode_options());
+            assert_eq!(
+                style_description(
+                    description,
+                    display_status(&check),
+                    detailed_no_color_unicode_options()
+                ),
+                description
+            );
+            assert_eq!(
+                detail_value(
+                    details,
+                    display_status(&check),
+                    detailed_no_color_unicode_options()
+                ),
+                details
+            );
+        }
+
+        let snapshot_name = if cfg!(windows) {
+            "copyable_items_color_windows"
+        } else {
+            "copyable_items_color"
+        };
+        insta::assert_snapshot!(snapshot_name, rendered.replace('\u{1b}', "<ESC>"));
     }
 }

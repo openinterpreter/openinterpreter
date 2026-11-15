@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use codex_exec_server::EnvironmentAccess;
 use codex_extension_api::ContextualUserFragment;
 use codex_skills::SkillMetadata;
 use codex_skills::normalize_skill_path;
@@ -11,7 +12,7 @@ use crate::render::truncate_main_prompt_contents;
 /// Host skill prompts already supplied or superseded by an extension.
 ///
 /// Core preserves its host skill invocation lifecycle while avoiding duplicate
-/// prompts and retaining executor/orchestrator skill precedence.
+/// prompts and retaining executor/cloud skill precedence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InjectedHostSkillPrompts {
     paths: HashSet<String>,
@@ -66,7 +67,11 @@ impl HostSkillsSnapshot {
         skip_all,
         fields(selected_skill_count = selected_skills.len())
     )]
-    pub async fn load_skill_prompts(&self, selected_skills: &[SkillMetadata]) -> HostSkillPrompts {
+    pub async fn load_skill_prompts(
+        &self,
+        selected_skills: &[SkillMetadata],
+        accessors: &[&dyn EnvironmentAccess],
+    ) -> HostSkillPrompts {
         let mut prompts = HostSkillPrompts {
             fragments: Vec::with_capacity(selected_skills.len()),
             injected: Vec::with_capacity(selected_skills.len()),
@@ -74,7 +79,7 @@ impl HostSkillsSnapshot {
         };
 
         for skill in selected_skills {
-            match self.read_skill_text(skill).await {
+            match self.read_skill_text(skill, accessors).await {
                 Ok(contents) => {
                     let (contents, truncated) = if self.outcome().is_agent_plugin_skill(skill) {
                         truncate_main_prompt_contents(&contents)
@@ -89,7 +94,7 @@ impl HostSkillsSnapshot {
                     }
                     prompts.fragments.push(Box::new(SkillInstructions {
                         name: skill.name.clone(),
-                        path: skill.path_to_skills_md.to_string_lossy().into_owned(),
+                        path: skill.path_to_skills_md.inferred_native_path_string(),
                         contents,
                         resource_access: None,
                     }));
@@ -99,7 +104,7 @@ impl HostSkillsSnapshot {
                     prompts.warnings.push(format!(
                         "Failed to load skill {} at {}: {err:#}",
                         skill.name,
-                        skill.path_to_skills_md.display()
+                        skill.path_to_skills_md.inferred_native_path_string()
                     ));
                 }
             }

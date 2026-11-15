@@ -1,6 +1,9 @@
 mod aliases;
 pub mod catalog;
+mod catalog_delta;
+mod catalog_observability;
 mod catalog_prompt;
+mod catalog_state;
 mod config;
 mod dynamic_skill_selector;
 mod extension;
@@ -13,19 +16,23 @@ mod host_service;
 mod host_snapshot;
 mod invocation;
 mod loader;
+mod preparation;
 pub mod provider;
 mod render;
 mod render_observability;
+mod required;
 mod selection;
 mod shadow_selection_experiment;
 mod sources;
 mod state;
+mod step_state;
 mod telemetry;
 mod tools;
 mod warnings;
 mod world_state;
 mod world_state_catalogs;
 
+pub use catalog::merge_catalogs;
 pub use config::SkillsExtensionConfig;
 pub use extension::install;
 pub use extension::install_with_providers;
@@ -39,12 +46,21 @@ pub use host_service::HostSkillsService;
 pub use host_snapshot::HostSkillsSnapshot;
 pub use invocation::detect_implicit_skill_invocation;
 pub use provider::ExecutorSkillProvider;
+pub use provider::FrozenCloudSkillProvider;
 pub use provider::HostSkillProvider;
 pub use provider::OrchestratorSkillProvider;
 pub use provider::SkillProvider;
+pub use required::EnvironmentSkillRequirements;
+pub use required::validate_required_skills;
 pub use sources::SkillProviderSource;
 pub use sources::SkillProviders;
+pub use state::SkillsThreadState;
 pub use telemetry::record_plugin_turn_usage;
+
+/// Selected environments whose discovery can use a turn-scoped filesystem grant.
+pub struct TurnSkillFilesystemGrants {
+    pub environment_ids: std::collections::HashSet<String>,
+}
 
 /// Recognizes persisted explicit skill prompts without exposing their fragment implementation.
 pub fn is_skill_prompt_fragment(text: &str) -> bool {

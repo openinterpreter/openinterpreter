@@ -44,7 +44,6 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
-use wiremock::matchers::body_json;
 use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
@@ -275,6 +274,7 @@ async fn codex_apps_file_params_omit_fields_absent_from_tool_schema() -> Result<
         apps_tool_call.pointer("/params/_meta/_codex_apps"),
         Some(&json!({
             "call_id": "extract-call-1",
+            "root_turn_id": requests[0].body_json()["client_metadata"]["turn_id"],
             "resource_uri": DOCUMENT_EXTRACT_TEXT_RESOURCE_URI,
             "contains_mcp_source": true,
             "connector_id": "calendar",
@@ -291,6 +291,12 @@ async fn codex_apps_file_params_omit_fields_absent_from_tool_schema() -> Result<
         upload_body.get("codex_connector_id"),
         Some(&json!("calendar"))
     );
+    let thread_id = json!(test.session_configured.session_id);
+    assert_eq!(
+        apps_tool_call.pointer("/params/_meta/threadId"),
+        Some(&thread_id)
+    );
+    assert_eq!(upload_body.get("codex_thread_id"), None);
     assert_eq!(upload_body.get("upload_source"), None);
     assert_eq!(upload_body.get("store_in_library"), None);
 
@@ -329,7 +335,7 @@ async fn codex_apps_file_params_pass_uploaded_file_to_post_tool_use_hook() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy() -> Result<()> {
+async fn codex_apps_file_params_retry_stream_under_restricted_read_policy() -> Result<()> {
     skip_if_target_windows!(
         Ok(()),
         "Windows restricted-token sandbox cannot enforce deny-read policies"
@@ -339,6 +345,14 @@ async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy
     let server = start_mock_server().await;
     let apps_server = AppsTestServer::mount(&server).await?;
     mount_file_upload_mocks(&server, STREAMED_FILE_SIZE as u64).await;
+    Mock::given(method("PUT"))
+        .and(path("/upload/file_123"))
+        .respond_with(ResponseTemplate::new(503).insert_header("x-ms-retry-after-ms", "0"))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let mut builder = apps_enabled_builder(apps_server.chatgpt_base_url)
         .with_config(|config| restrict_apps_upload_reads(config, "private.txt"))
@@ -357,6 +371,15 @@ async fn codex_apps_file_params_stream_allowed_file_under_restricted_read_policy
     let permission_profile = test.config.permissions.permission_profile().clone();
 
     run_extract_turn(&test, &server, permission_profile).await?;
+
+    let requests = server.received_requests().await.expect("capture requests");
+    let bodies: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/upload/file_123")
+        .map(|request| request.body.as_slice())
+        .collect();
+    let contents = vec![b'x'; STREAMED_FILE_SIZE];
+    assert_eq!(bodies, vec![contents.as_slice(); 2]);
 
     let apps_tool_call =
         recorded_apps_tool_call_by_name(&server, CALENDAR_EXTRACT_TEXT_TOOL_NAME).await;

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_core::RestrictRootCapabilities;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
@@ -32,6 +33,90 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
+
+enum ThreadKind {
+    Root,
+    NativeChild,
+    HostRestricted,
+}
+
+#[test_case(ThreadKind::Root, None, true, false; "root_without_capability")]
+#[test_case(ThreadKind::Root, Some("send_user_message_async"), true, true; "legacy_capability_enabled")]
+#[test_case(ThreadKind::Root, Some("send_user_message_async"), false, false; "legacy_capability_disabled")]
+#[test_case(ThreadKind::Root, Some("request_user_input_async"), true, true; "current_capability_enabled")]
+#[test_case(ThreadKind::Root, Some("request_user_input_async"), false, false; "current_capability_disabled")]
+#[test_case(ThreadKind::NativeChild, Some("request_user_input_async"), true, false; "subagent")]
+#[test_case(ThreadKind::HostRestricted, Some("request_user_input_async"), true, false; "host_restricted")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_question_registration_respects_user_input_setting(
+    thread_kind: ThreadKind,
+    catalog_tool: Option<&'static str>,
+    enabled: bool,
+    expect_question_tool: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.2", move |model| {
+            model.tool_mode = Some(ToolMode::CodeModeOnly);
+            model.experimental_supported_tools = catalog_tool
+                .into_iter()
+                .chain(["send_message_to_user_async"])
+                .map(str::to_string)
+                .collect();
+        })
+        .with_config(move |config| {
+            config.experimental_request_user_input_enabled = enabled;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let session_source = match thread_kind {
+        ThreadKind::Root => SessionSource::Exec,
+        ThreadKind::NativeChild => SessionSource::SubAgent(SubAgentSource::Other("test".into())),
+        ThreadKind::HostRestricted => SessionSource::Custom("host".into()),
+    };
+    let mut options = StartThreadOptions {
+        session_source: Some(session_source),
+        ..StartThreadOptions::new(test.config.clone())
+    };
+    if matches!(thread_kind, ThreadKind::HostRestricted) {
+        options
+            .thread_extension_init
+            .insert(RestrictRootCapabilities);
+    }
+    let thread = test.thread_manager.start_thread(options).await?.thread;
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Report progress.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let body = responses.single_request().body_json();
+    let tools = body["tools"].as_array().expect("request tools");
+    assert_eq!(
+        tools
+            .iter()
+            .filter(|tool| tool["name"] == "request_user_input_async")
+            .count(),
+        usize::from(expect_question_tool),
+    );
+    assert_eq!(
+        tools
+            .iter()
+            .filter(|tool| tool["name"] == "send_message_to_user_async")
+            .count(),
+        usize::from(matches!(thread_kind, ThreadKind::Root)),
+    );
+    Ok(())
+}
 
 #[test_case(SessionSource::Exec, false, false; "root_without_tool")]
 #[test_case(SessionSource::Exec, true, true; "root_with_tool")]
@@ -282,6 +367,7 @@ async fn freeform_async_message_emits_an_item_without_ending_the_turn(
     })
     .await;
     let expected = serde_json::to_value(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: CALL_ID.to_string(),
         content: vec![AgentMessageContent::Text {
             text: MESSAGE.to_string(),
@@ -352,6 +438,7 @@ async fn freeform_async_message_emits_an_item_without_ending_the_turn(
 async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
     tool_messages: Option<ToolMessages>,
     catalog_tool_name: &'static str,
+    expected_parameters: Option<&'static str>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -445,6 +532,7 @@ async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
     assert_eq!(
         serde_json::to_value(&started)?,
         serde_json::to_value(AgentMessageItem {
+            moderation: None,
             id: CALL_ID.to_string(),
             content: vec![AgentMessageContent::Text {
                 text: MESSAGE.to_string(),
@@ -490,17 +578,24 @@ async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
             .expect("the async message tool should be directly visible to the model");
         assert_eq!(tool["description"], expected_description);
         assert_eq!(tool["strict"], false);
-        assert_eq!(tool["parameters"]["required"], json!(["questions"]));
-        assert_eq!(tool["parameters"]["additionalProperties"], false);
-        let schema = &tool["parameters"]["properties"]["questions"];
-        assert_eq!(schema["minItems"], 1);
-        assert_eq!(schema["items"]["required"], json!(["title"]));
-        assert_eq!(schema["items"]["additionalProperties"], false);
-        assert_eq!(schema["items"]["properties"]["options"]["minItems"], 1);
-        assert_eq!(
-            schema["items"]["properties"]["options"]["items"]["type"],
-            "string"
-        );
+        if let Some(expected_parameters) = expected_parameters {
+            assert_eq!(
+                tool["parameters"],
+                serde_json::from_str::<serde_json::Value>(expected_parameters)?
+            );
+        } else {
+            assert_eq!(tool["parameters"]["required"], json!(["questions"]));
+            assert_eq!(tool["parameters"]["additionalProperties"], false);
+            let schema = &tool["parameters"]["properties"]["questions"];
+            assert_eq!(schema["minItems"], 1);
+            assert_eq!(schema["items"]["required"], json!(["title"]));
+            assert_eq!(schema["items"]["additionalProperties"], false);
+            assert_eq!(schema["items"]["properties"]["options"]["minItems"], 1);
+            assert_eq!(
+                schema["items"]["properties"]["options"]["items"]["type"],
+                "string"
+            );
+        }
         assert!(
             tools
                 .iter()

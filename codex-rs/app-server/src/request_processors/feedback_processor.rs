@@ -1,17 +1,24 @@
 use super::feedback_thread_index::FeedbackThreadIndex;
 use super::*;
 use crate::error_code::OVERLOADED_ERROR_CODE;
+use codex_app_server_protocol::FeedbackSaveParams;
+use codex_app_server_protocol::FeedbackSaveResponse;
 use codex_connectors::ConnectorDirectoryCacheContext;
 use codex_connectors::ConnectorDirectoryCacheKey;
 use codex_connectors::connector_runtime_cache_path;
 use codex_feedback::CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME;
 use codex_feedback::CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME;
+use codex_feedback::FeedbackAttachment;
+use codex_feedback::FeedbackSnapshot;
 #[cfg(target_os = "windows")]
 use codex_feedback::WINDOWS_SANDBOX_LOG_ATTACHMENT_FILENAME;
 use codex_feedback::guardian_review_failures;
 use codex_rollout::RolloutRecorder;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use sha2::Digest;
 use sha2::Sha256;
+use std::path::Path;
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
@@ -49,20 +56,46 @@ impl FeedbackRequestProcessor {
         &self,
         params: FeedbackUploadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.upload_feedback_response(params)
-            .await
-            .map(|response| Some(response.into()))
-    }
-
-    async fn upload_feedback_response(
-        &self,
-        params: FeedbackUploadParams,
-    ) -> Result<FeedbackUploadResponse, JSONRPCErrorError> {
         if !self.config.feedback_enabled {
             return Err(invalid_request(
                 "sending feedback is disabled by configuration",
             ));
         }
+        self.feedback_response(params, /*save_path*/ None)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn feedback_save(
+        &self,
+        params: FeedbackSaveParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !Path::new(params.save_path.as_str()).is_absolute() {
+            return Err(invalid_request(
+                "feedback savePath must be an absolute host path",
+            ));
+        }
+        let save_path = AbsolutePathBuf::try_from(params.save_path)
+            .map_err(|error| invalid_request(format!("invalid feedback savePath: {error}")))?;
+        let saved_path = LegacyAppPathString::from_abs_path(&save_path);
+        let response = self
+            .feedback_response(params.feedback, Some(save_path))
+            .await?;
+        Ok(Some(
+            FeedbackSaveResponse {
+                saved_path,
+                thread_id: response.thread_id,
+                prompt_hash: response.prompt_hash,
+            }
+            .into(),
+        ))
+    }
+
+    async fn feedback_response(
+        &self,
+        params: FeedbackUploadParams,
+        save_path: Option<AbsolutePathBuf>,
+    ) -> Result<FeedbackUploadResponse, JSONRPCErrorError> {
         let permit = self
             .uploads
             .clone()
@@ -94,11 +127,12 @@ impl FeedbackRequestProcessor {
             None => None,
         };
 
+        let http_client_factory = self.config.http_client_factory();
         let auth = self.auth_manager.auth_cached();
         let turn_metadata = if let Some(conversation_id) = conversation_id
             && let Some(rollout_path) = self
-                .resolve_rollout_path(conversation_id, self.state_db.as_ref())
-                .await
+                .resolve_rollout_path(conversation_id, self.state_db.as_ref(), save_path.as_ref())
+                .await?
         {
             feedback_turn_metadata_from_rollout(
                 &rollout_path,
@@ -124,15 +158,11 @@ impl FeedbackRequestProcessor {
             tracing::info!(target: "feedback_tags", account_id);
         }
         let snapshot = self.feedback.snapshot(conversation_id);
-        let thread_id = snapshot.thread_id.clone();
         let mut extra_attachments = Vec::new();
         let mut feedback_index = None;
-        let (sqlite_feedback_logs, state_db_ctx) = if include_logs {
-            if let Some(log_db) = self.log_db.as_ref() {
-                log_db.flush().await;
-            }
+        let (snapshot, sqlite_feedback_logs, state_db_ctx) = if include_logs {
             let state_db_ctx = self.state_db.clone();
-            let feedback_thread_ids = match conversation_id {
+            let mut feedback_thread_ids = match conversation_id {
                 Some(conversation_id) => match self
                     .thread_manager
                     .list_agent_subtree_thread_ids(conversation_id)
@@ -148,8 +178,16 @@ impl FeedbackRequestProcessor {
                 },
                 None => Vec::new(),
             };
-            let failures = guardian_review_failures(&feedback_thread_ids);
-            let mut feedback_thread_ids = feedback_thread_ids;
+            if let (Some(state_db), Some(thread_id)) = (&state_db_ctx, conversation_id) {
+                match state_db.list_attached_thread_ids(thread_id).await {
+                    Ok(attached_ids) => feedback_thread_ids.extend(attached_ids),
+                    Err(err) => {
+                        warn!("failed to list attached threads for feedback on {thread_id}: {err}")
+                    }
+                }
+            }
+            let failures =
+                guardian_review_failures(state_db_ctx.as_deref(), &feedback_thread_ids).await;
             if let Some(conversation_id) = conversation_id {
                 let index =
                     FeedbackThreadIndex::new(conversation_id, feedback_thread_ids, &failures);
@@ -161,38 +199,27 @@ impl FeedbackRequestProcessor {
                 feedback_index = Some(index);
             }
             extra_attachments.extend(failures.attachment);
-            let sqlite_feedback_logs = if let Some(state_db_ctx) = state_db_ctx.as_ref()
-                && !feedback_thread_ids.is_empty()
-            {
-                let thread_id_texts = feedback_thread_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                let thread_id_refs = thread_id_texts
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                match state_db_ctx
-                    .query_feedback_logs_for_threads(&thread_id_refs)
-                    .await
-                {
-                    Ok(logs) if logs.is_empty() => None,
-                    Ok(logs) => Some(logs),
-                    Err(err) => {
-                        let thread_ids = thread_id_texts.join(", ");
-                        warn!(
-                            "failed to query feedback logs from sqlite for thread_ids=[{thread_ids}]: {err}"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            (sqlite_feedback_logs, state_db_ctx)
+            let (snapshot, sqlite_feedback_logs, legacy_logs) = collect_feedback_logs(
+                &self.feedback,
+                self.log_db.as_ref(),
+                state_db_ctx.as_ref(),
+                &self.config,
+                snapshot,
+                &feedback_thread_ids,
+            )
+            .await;
+            if let Some(buffer) = legacy_logs {
+                extra_attachments.push(FeedbackAttachment {
+                    filename: "codex-logs-legacy.log".to_string(),
+                    content_type: Some("text/plain".to_string()),
+                    buffer,
+                });
+            }
+            (snapshot, sqlite_feedback_logs, state_db_ctx)
         } else {
-            (None, None)
+            (snapshot, None, None)
         };
+        let thread_id = snapshot.thread_id.clone();
 
         let mut attachment_paths = Vec::new();
         let mut seen_attachment_paths = HashSet::new();
@@ -204,8 +231,12 @@ impl FeedbackRequestProcessor {
                 .flat_map(|index| &mut index.threads)
             {
                 if let Some(rollout_path) = self
-                    .resolve_rollout_path(thread.thread_id, state_db_ctx.as_ref())
-                    .await
+                    .resolve_rollout_path(
+                        thread.thread_id,
+                        state_db_ctx.as_ref(),
+                        save_path.as_ref(),
+                    )
+                    .await?
                     && seen_attachment_paths.insert(rollout_path.clone())
                 {
                     thread.rollout_filename = codex_rollout::plain_rollout_path(&rollout_path)
@@ -229,7 +260,10 @@ impl FeedbackRequestProcessor {
                     });
                 }
             }
-            if let Some(index) = feedback_index {
+            if let Some(mut index) = feedback_index {
+                if save_path.is_some() {
+                    index.rollout_archive_filename = None;
+                }
                 match index.attachment() {
                     Ok(attachment) => extra_attachments.insert(0, attachment),
                     Err(err) => warn!("failed to serialize feedback thread index: {err}"),
@@ -279,15 +313,31 @@ impl FeedbackRequestProcessor {
                     upload_tags.entry(key).or_insert(value);
                 }
             }
+            extra_attachments.extend(
+                super::feedback_rollout_history::history_base_attachments(
+                    &self.config.codex_home,
+                    &attachment_paths,
+                )
+                .await,
+            );
         }
 
         let session_source = self.thread_manager.session_source();
-        let http_client_factory = self.config.http_client_factory();
         let runtime_handle = tokio::runtime::Handle::current();
+        let codex_home = self.config.codex_home.clone();
 
+        let operation = if save_path.is_some() {
+            "save"
+        } else {
+            "upload"
+        };
         let upload_result = tokio::task::spawn_blocking(move || {
             // Cancelling the RPC waiter must not release a still-running upload's slot.
             let _permit = permit;
+            if include_logs {
+                extra_attachments
+                    .extend(codex_feedback::daemon_log_attachments(codex_home.as_path()));
+            }
             let tags = (!upload_tags.is_empty()).then_some(&upload_tags);
             runtime_handle.block_on(snapshot.upload_feedback(
                 FeedbackUploadOptions {
@@ -296,7 +346,7 @@ impl FeedbackRequestProcessor {
                     report_passcode: report_passcode.as_deref(),
                     tags,
                     include_logs,
-                    extra_attachments: &extra_attachments,
+                    extra_attachments,
                     extra_attachment_paths: &attachment_paths,
                     session_source: Some(session_source),
                     logs_override: sqlite_feedback_logs,
@@ -310,7 +360,7 @@ impl FeedbackRequestProcessor {
             Ok(result) => result,
             Err(join_err) => {
                 return Err(internal_error(format!(
-                    "failed to upload feedback: {join_err}"
+                    "failed to {operation} feedback: {join_err}"
                 )));
             }
         };
@@ -327,21 +377,31 @@ impl FeedbackRequestProcessor {
         &self,
         conversation_id: ThreadId,
         state_db_ctx: Option<&StateDbHandle>,
-    ) -> Option<PathBuf> {
-        if let Ok(conversation) = self.thread_manager.get_thread(conversation_id).await
-            && let Some(rollout_path) = conversation.rollout_path()
-        {
-            return Some(rollout_path);
+        save_path: Option<&AbsolutePathBuf>,
+    ) -> Result<Option<PathBuf>, JSONRPCErrorError> {
+        if let Ok(conversation) = self.thread_manager.get_thread(conversation_id).await {
+            if save_path.is_some() {
+                // Explicit extraLogFiles are collected separately and remain strict, even
+                // when they name this same not-yet-materialized automatic rollout.
+                return conversation.feedback_rollout_path().await.map_err(|error| {
+                    internal_error(format!("failed to select feedback rollout: {error}"))
+                });
+            }
+            if let Some(rollout_path) = conversation.rollout_path() {
+                return Ok(Some(rollout_path));
+            }
         }
 
-        let state_db_ctx = state_db_ctx?;
-        state_db_ctx
+        let Some(state_db_ctx) = state_db_ctx else {
+            return Ok(None);
+        };
+        Ok(state_db_ctx
             .find_rollout_path_by_id(conversation_id, /*archived_only*/ None)
             .await
             .unwrap_or_else(|err| {
                 warn!("failed to resolve rollout path for thread_id={conversation_id}: {err}");
                 None
-            })
+            }))
     }
 }
 
@@ -496,6 +556,66 @@ fn windows_sandbox_log_attachment(codex_home: &Path) -> Option<FeedbackAttachmen
 #[cfg(not(target_os = "windows"))]
 fn windows_sandbox_log_attachment(_codex_home: &Path) -> Option<FeedbackAttachmentPath> {
     None
+}
+
+// Refresh logs after SQLite collection without changing the earlier metadata snapshot.
+async fn collect_feedback_logs(
+    feedback: &CodexFeedback,
+    log_db: Option<&LogDbLayer>,
+    state_db: Option<&StateDbHandle>,
+    config: &Config,
+    mut snapshot: FeedbackSnapshot,
+    thread_ids: &[ThreadId],
+) -> (FeedbackSnapshot, Option<Vec<u8>>, Option<Vec<u8>>) {
+    if let Some(log_db) = log_db {
+        log_db.flush().await;
+    }
+    let mut sqlite_logs = None;
+    let mut legacy_logs = None;
+    if let Some(state_db) = state_db
+        && !thread_ids.is_empty()
+    {
+        let thread_ids = thread_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let thread_id_refs = thread_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        match state_db
+            .query_feedback_logs_for_threads(&thread_id_refs)
+            .await
+        {
+            Ok(logs) if logs.is_empty() => {}
+            Ok(logs) => sqlite_logs = Some(logs),
+            Err(err) => {
+                let thread_ids = thread_ids.join(", ");
+                tracing::warn!(
+                    "failed to query feedback logs from sqlite for thread_ids=[{thread_ids}]: {err}"
+                );
+            }
+        }
+        // Earlier versions stored logs in sqlite_home/logs_2.sqlite.
+        // Keep this temporary read path so feedback can include logs from before the directory change.
+        // Read the old database when log_dir is unset or the current query returns no logs.
+        if config.configured_log_dir().is_none() || sqlite_logs.is_none() {
+            match state_db
+                .query_legacy_feedback_logs_for_threads(&thread_id_refs)
+                .await
+            {
+                Ok(logs) if logs.is_empty() => {}
+                Ok(logs) => legacy_logs = Some(logs),
+                Err(err) => {
+                    tracing::warn!("failed to query legacy feedback logs from sqlite: {err}")
+                }
+            }
+        }
+    }
+    if log_db.is_some_and(LogDbLayer::has_write_failure) {
+        sqlite_logs = None;
+    }
+
+    // new logs might arrive to the buffer while collecting metadata e.g. if log db flush fails
+    snapshot.refresh_logs(feedback);
+    (snapshot, sqlite_logs, legacy_logs)
 }
 
 #[cfg(test)]
@@ -710,7 +830,7 @@ mod tests {
         let mut lines = vec![RolloutLine {
             timestamp: "2026-07-24T00:00:00Z".to_string(),
             ordinal: None,
-            item: RolloutItem::SessionMeta(SessionMetaLine {
+            item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: codex_protocol::protocol::SessionMeta {
                     cwd: tempdir.path().to_path_buf(),
                     base_instructions: Some(codex_protocol::models::BaseInstructions {
@@ -720,7 +840,7 @@ mod tests {
                     ..Default::default()
                 },
                 git: None,
-            }),
+            })),
         }];
         lines.extend(turns.iter().map(|(turn_id, model, effort)| {
             RolloutLine {
@@ -729,29 +849,22 @@ mod tests {
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
                     root_turn_id: None,
+                    direct_only_tool_namespaces: None,
                     disabled_plugin_ids: None,
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
                         .expect("absolute feedback rollout directory"),
-                    workspace_roots: None,
-                    current_date: None,
-                    timezone: None,
                     approval_policy: codex_protocol::protocol::AskForApproval::Never,
                     approvals_reviewer: None,
-                    sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
-                    permission_profile: None,
+                    permission_profile: codex_protocol::models::PermissionProfile::read_only(),
                     active_permission_profile: None,
-                    network: None,
-                    file_system_sandbox_policy: None,
                     model: (*model).to_string(),
                     comp_hash: None,
-                    personality: None,
                     collaboration_mode: None,
                     multi_agent_version: None,
-                    multi_agent_mode: None,
                     realtime_active: None,
                     cyber_access_program: None,
                     effort: effort.clone(),
-                    summary: ReasoningSummary::Auto,
+                    summary: Some(ReasoningSummary::Auto),
                 }),
             }
         }));
@@ -880,3 +993,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "feedback_log_snapshot_tests.rs"]
+mod feedback_log_snapshot_tests;

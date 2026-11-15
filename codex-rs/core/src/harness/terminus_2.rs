@@ -1,6 +1,6 @@
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
-use crate::client_common::ResponseStream;
+use crate::client_common::SamplingStream;
 use codex_chat_wire_compat::ToolKinds;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -57,16 +57,22 @@ pub(crate) fn build_request(
 }
 
 pub(crate) fn inject_action_calls(
-    stream: ResponseStream,
+    stream: SamplingStream,
     request_kind: Terminus2RequestKind,
     pending_completion: bool,
-) -> ResponseStream {
+) -> SamplingStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
+    let mut stream = stream;
+    let routing_affinity = stream.routing_affinity.take();
+    let interrupt = stream.interrupt.take();
+    let settlement_started = stream.settlement_started.clone();
 
     tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(event) = stream.next().await {
-            let harness_items = match &event {
+        while let Some(event) = tokio::select! {
+            _ = tx_event.closed() => return,
+            event = stream.next() => event,
+        } {
+            let harness_items = match &event.event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
                     role, content, ..
                 })) if role == "assistant" => plain_text_content(content)
@@ -84,7 +90,7 @@ pub(crate) fn inject_action_calls(
 
             for item in harness_items {
                 if tx_event
-                    .send(Ok(ResponseEvent::OutputItemDone(item)))
+                    .send(Ok(ResponseEvent::OutputItemDone(item)).into())
                     .await
                     .is_err()
                 {
@@ -94,9 +100,12 @@ pub(crate) fn inject_action_calls(
         }
     });
 
-    ResponseStream {
+    SamplingStream {
+        routing_affinity,
         rx_event,
+        interrupt,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
+        settlement_started,
     }
 }
 
@@ -909,6 +918,8 @@ fn build_harness_follow_up_items(
             current_screen,
         } => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -920,6 +931,8 @@ fn build_harness_follow_up_items(
         }
         Terminus2RequestKind::Questions => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -931,6 +944,8 @@ fn build_harness_follow_up_items(
         }
         Terminus2RequestKind::AnswerQuestions { questions } => {
             return vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -946,6 +961,8 @@ fn build_harness_follow_up_items(
     let parsed = parse_response(content);
     if !parsed.error.is_empty() {
         return vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -961,6 +978,8 @@ fn build_harness_follow_up_items(
             return Vec::new();
         }
         return vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -1001,6 +1020,7 @@ fn build_shell_call(commands: Vec<ParsedCommand>, working_directory: String) -> 
     let timeout_ms = timeout_ms.max(1_000);
     let timeout_seconds = timeout_ms.saturating_add(999) / 1000;
     ResponseItem::LocalShellCall {
+        encrypted_content: None,
         id: None,
         call_id: Some(format!("terminus-2-shell-{id}")),
         status: LocalShellStatus::InProgress,
@@ -1711,7 +1731,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => Some(text),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
@@ -1886,6 +1906,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "{\"analysis\":\"Inspect\",\"plan\":\"pwd\",\"commands\":[{\"keystrokes\":\"pwd\\n\",\"duration\":0.1}]}".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -1980,6 +2002,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary so far".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2031,6 +2055,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "```json\n{\"analysis\":\"Summary\",\"plan\":\"Ask\",\"commands\":[{\"keystrokes\":\"git status\\n\",\"duration\":0.1}]}\n```"
                             .to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2071,6 +2097,8 @@ mod tests {
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary so far".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
@@ -2134,6 +2162,8 @@ mod tests {
                     content: vec![ContentItem::OutputText {
                         text: "```json\n{\"analysis\":\"Run tests\",\"commands\":[]}\n```"
                             .to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 

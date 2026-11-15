@@ -48,9 +48,16 @@ impl ChatWidget {
             ServerRequest::ToolRequestUserInput { params, .. } => {
                 self.on_request_user_input(params);
             }
+            ServerRequest::CurrentTimeRead { .. } => {
+                // Time reads are answered by App's originating-connection reply handle,
+                // before UI dispatch. Reaching the widget means that routing failed;
+                // never pretend a time response was delivered.
+                if replay_kind.is_none() {
+                    self.add_error_message("Could not route the current-time request.".to_string());
+                }
+            }
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
-            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => {

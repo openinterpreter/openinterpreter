@@ -1,3 +1,10 @@
+#[cfg(target_os = "linux")]
+#[path = "exec_server/pid_namespace_tests.rs"]
+mod pid_namespace_tests;
+
+#[path = "exec_server/auth_refresh_tests.rs"]
+mod auth_refresh_tests;
+
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::BufRead as _;
@@ -29,6 +36,8 @@ use codex_exec_server::NoiseRendezvousConnectBundle;
 use codex_exec_server::ProcessId;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_utils_cargo_bin::copy_executable;
+use codex_utils_path_uri::PathUri;
 use futures::SinkExt;
 use futures::StreamExt;
 use predicates::prelude::PredicateBooleanExt;
@@ -42,9 +51,13 @@ use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::Request;
+use tokio_tungstenite::tungstenite::handshake::server::Response;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
@@ -92,6 +105,75 @@ fn local_exec_server_ignores_invalid_config_without_strict_config() -> Result<()
     Ok(())
 }
 
+/// Real global CLI flags must reach executor config reads; unrelated startup flags stay private.
+#[tokio::test]
+async fn local_exec_server_projects_global_mxc_preference() -> Result<()> {
+    let home = TempDir::new()?;
+    let cwd = url::Url::from_directory_path(home.path())
+        .map_err(|()| anyhow::anyhow!("could not convert home to file URL"))?;
+    let mut child = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .env("CODEX_HOME", home.path())
+        .args([
+            "-c",
+            "features.prefer_mxc=true",
+            "-c",
+            "model='private-startup-model'",
+            "exec-server",
+            "--listen",
+            "stdio",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().context("exec-server stdin")?;
+    let mut stdout = BufReader::new(child.stdout.take().context("exec-server stdout")?);
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"id": 1, "method": "initialize",
+                "params": {"clientName": "mxc-test", "resumeSessionId": null}}),
+        )
+        .await?;
+        wait_for_response(&mut stdout, /*expected_id*/ 1).await?;
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"method": "initialized", "params": {}}),
+        )
+        .await?;
+        send_json_line(
+            &mut stdin,
+            &serde_json::json!({"id": 2, "method": "environmentConfig/read", "params": {
+                "cwd": cwd, "configPaths": [["features", "prefer_mxc"], ["model"]],
+                "requirementsPaths": []
+            }}),
+        )
+        .await?;
+        wait_for_response(&mut stdout, /*expected_id*/ 2).await
+    })
+    .await
+    .context("executor CLI config read timed out")??;
+    let layers = result["result"]["config"]["layers"]
+        .as_array()
+        .context("config layers")?;
+    let session = layers
+        .iter()
+        .find(|l| l["source"] == "session-flags")
+        .context("session flags")?;
+    let value: toml::Value = toml::from_str(session["toml"].as_str().context("session TOML")?)?;
+    assert_eq!(
+        value,
+        toml::Value::Table(toml::toml! { [features] prefer_mxc = true })
+    );
+    drop(stdin);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await??
+            .success()
+    );
+    Ok(())
+}
+
 /// The standalone exec-server accepts an explicit per-connection concurrency limit.
 #[test]
 fn local_exec_server_accepts_concurrent_requests_flag() -> Result<()> {
@@ -123,6 +205,250 @@ fn local_exec_server_allows_disabled_parent_lifetime_environment_variable() -> R
     .success();
 
     Ok(())
+}
+
+enum PatCredentialChange {
+    Rotate,
+    SwitchAccount,
+    Logout,
+    Unchanged,
+    UnavailableReplacement,
+    SlowReplacement,
+}
+
+async fn assert_pat_registry_reload(change: PatCredentialChange) -> Result<()> {
+    let home = TempDir::new()?;
+    let config_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/config/bundle"))
+        .and(header("authorization", "Bearer at-synthetic-executor-pat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "config_toml": {"enterprise_managed": []},
+            "requirements_toml": {"enterprise_managed": []},
+        })))
+        .expect(1)
+        .mount(&config_server)
+        .await;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "cli_auth_credentials_store = 'file'\nchatgpt_base_url = '{}/backend-api'\n",
+            config_server.uri(),
+        ),
+    )?;
+    let auth_path = home.path().join("auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_vec(&serde_json::json!({
+            "personal_access_token": "at-synthetic-executor-pat",
+        }))?,
+    )?;
+    let auth_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user-auth-credential/whoami"))
+        .and(header("authorization", "Bearer at-synthetic-executor-pat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "chatgpt_user_id": "user-pat-test",
+            "chatgpt_account_id": "account-pat-test",
+            "chatgpt_plan_type": "enterprise",
+            "chatgpt_account_is_fedramp": false,
+        })))
+        // Cloud-config bootstrap and executor startup each hydrate once.
+        // Later registry requests must reuse metadata for the unchanged PAT.
+        .with_priority(1)
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&auth_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user-auth-credential/whoami"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(10)
+        .expect(0)
+        .mount(&auth_server)
+        .await;
+    if !matches!(
+        change,
+        PatCredentialChange::Logout | PatCredentialChange::Unchanged
+    ) {
+        let account = match change {
+            PatCredentialChange::Rotate
+            | PatCredentialChange::UnavailableReplacement
+            | PatCredentialChange::SlowReplacement => "account-pat-test",
+            PatCredentialChange::SwitchAccount => "another-account",
+            PatCredentialChange::Logout | PatCredentialChange::Unchanged => unreachable!(),
+        };
+        if matches!(change, PatCredentialChange::UnavailableReplacement) {
+            Mock::given(method("GET"))
+                .and(path("/v1/user-auth-credential/whoami"))
+                .and(header(
+                    "authorization",
+                    "Bearer at-synthetic-replacement-pat",
+                ))
+                .respond_with(ResponseTemplate::new(503))
+                .with_priority(1)
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&auth_server)
+                .await;
+        }
+        let response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "chatgpt_user_id": "user-pat-test",
+            "chatgpt_account_id": account,
+            "chatgpt_plan_type": "enterprise",
+            "chatgpt_account_is_fedramp": false,
+        }));
+        // Exceed registration's 10-second deadline while the detached auth
+        // resolution can still finish within its own 30-second budget.
+        let response = if matches!(change, PatCredentialChange::SlowReplacement) {
+            response.set_delay(Duration::from_secs(11))
+        } else {
+            response
+        };
+        Mock::given(method("GET"))
+            .and(path("/v1/user-auth-credential/whoami"))
+            .and(header(
+                "authorization",
+                "Bearer at-synthetic-replacement-pat",
+            ))
+            .respond_with(response)
+            .with_priority(2)
+            .expect(1)
+            .mount(&auth_server)
+            .await;
+    }
+    let expected_registry_requests = match change {
+        PatCredentialChange::Rotate
+        | PatCredentialChange::Unchanged
+        | PatCredentialChange::UnavailableReplacement
+        | PatCredentialChange::SlowReplacement => 2,
+        PatCredentialChange::SwitchAccount | PatCredentialChange::Logout => 1,
+    };
+    let second_bearer = if matches!(change, PatCredentialChange::Unchanged) {
+        "Bearer at-synthetic-executor-pat"
+    } else {
+        "Bearer at-synthetic-replacement-pat"
+    };
+    let registry = MockServer::start().await;
+    let registration_path = "/cloud/environment/environment-pat-test/register";
+    let (credential_change_tx, mut credential_change_rx) = tokio::sync::mpsc::unbounded_channel();
+    Mock::given(method("POST"))
+        .and(path(registration_path))
+        .and(header("authorization", "Bearer at-synthetic-executor-pat"))
+        .and(header("chatgpt-account-id", "account-pat-test"))
+        .respond_with(move |_: &wiremock::Request| {
+            let result = match change {
+                PatCredentialChange::Rotate
+                | PatCredentialChange::SwitchAccount
+                | PatCredentialChange::UnavailableReplacement
+                | PatCredentialChange::SlowReplacement => std::fs::write(
+                    &auth_path,
+                    r#"{"personal_access_token":"at-synthetic-replacement-pat"}"#,
+                ),
+                PatCredentialChange::Logout => std::fs::remove_file(&auth_path),
+                PatCredentialChange::Unchanged => Ok(()),
+            };
+            let _ = credential_change_tx.send(result);
+            ResponseTemplate::new(502).set_body_json(serde_json::json!({
+                "detail": {"code": "authentication_service_unavailable"},
+            }))
+        })
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&registry)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(registration_path))
+        .and(header("authorization", second_bearer))
+        .and(header("chatgpt-account-id", "account-pat-test"))
+        .respond_with(ResponseTemplate::new(403))
+        .with_priority(2)
+        .expect(expected_registry_requests - 1)
+        .mount(&registry)
+        .await;
+
+    let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    command
+        .current_dir(home.path())
+        .env("CODEX_HOME", home.path())
+        .env_remove("CODEX_ACCESS_TOKEN")
+        .env("CODEX_AUTHAPI_BASE_URL", auth_server.uri())
+        .env_remove("CODEX_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .args([
+            "exec-server",
+            "--remote",
+            &registry.uri(),
+            "--environment-id",
+            "environment-pat-test",
+        ])
+        .kill_on_drop(true);
+    // A same-owner replacement reaches the second registry request, whose denial
+    // stops the executor. Logout or a different owner must fail before that request.
+    let result = tokio::time::timeout(Duration::from_secs(30), command.output()).await;
+    assert!(
+        result.is_ok(),
+        "executor timed out (AuthAPI request count: {:?})",
+        auth_server
+            .received_requests()
+            .await
+            .map(|requests| requests.len()),
+    );
+    let output = result??;
+    let credential_update = credential_change_rx.try_recv();
+    assert!(
+        credential_update.is_ok(),
+        "registration did not update the credential fixture ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    credential_update?.context("update the stored PAT fixture")?;
+    assert!(!output.status.success());
+    registry.verify().await;
+    auth_server.verify().await;
+    config_server.verify().await;
+    assert_eq!(
+        registry
+            .received_requests()
+            .await
+            .context("registry request recording is disabled")?
+            .len(),
+        expected_registry_requests as usize
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_follows_stored_rotation() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::Rotate).await
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_rejects_account_switch() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::SwitchAccount).await
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_stops_using_removed_credentials() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::Logout).await
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_reuses_metadata_during_authapi_outage() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::Unchanged).await
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_recovers_after_replacement_metadata_outage() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::UnavailableReplacement).await
+}
+
+#[tokio::test]
+async fn remote_exec_server_pat_recovers_after_replacement_metadata_timeout() -> Result<()> {
+    assert_pat_registry_reload(PatCredentialChange::SlowReplacement).await
 }
 
 #[tokio::test]
@@ -168,6 +494,8 @@ async fn remote_exec_server_gracefully_stops_when_parent_stdin_closes() -> Resul
         codex_home.path().join("config.toml"),
         format!(
             r#"
+cli_auth_credentials_store = "file"
+
 [analytics]
 enabled = true
 
@@ -181,20 +509,27 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     let bin_dir = package.path().join("bin");
     std::fs::create_dir(&bin_dir)?;
     let executable = bin_dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(codex_utils_cargo_bin::cargo_bin("codex")?, &executable)?;
+    copy_executable(&codex_utils_cargo_bin::cargo_bin("codex")?, &executable)?;
+    let codex_path_dir = package.path().join("codex-path");
+    std::fs::create_dir(&codex_path_dir)?;
     let manifest = package.path().join("codex-package.json");
     std::fs::write(&manifest, r#"{"version":"1.2.3-alpha.4"}"#)?;
 
+    let stderr_path = codex_home.path().join("executor-stderr.log");
+    let stderr = std::fs::File::create(&stderr_path)?;
     let mut command = tokio::process::Command::new(executable);
     command
+        .current_dir(codex_home.path())
         .env("CODEX_HOME", codex_home.path())
         .env("CODEX_API_KEY", "test-api-key")
+        .env_remove("CODEX_ACCESS_TOKEN")
         .env(
             codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR,
             "true",
         )
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
+        .env("RUST_LOG", "error,codex_exec_server::remote=info")
         .args([
             "exec-server",
             "--remote",
@@ -205,7 +540,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
             "2",
         ])
         .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(stderr))
         .kill_on_drop(true);
 
     let mut child = command.spawn()?;
@@ -214,7 +549,32 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         .take()
         .ok_or_else(|| anyhow::anyhow!("remote exec-server stdin was not piped"))?;
 
-    let environment_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT).await?;
+    // An executor that exits during startup cannot reach the rendezvous. Report that
+    // exit immediately instead of hiding it behind the connection timeout.
+    let environment_websocket = tokio::select! {
+        status = child.wait() => {
+            let status = status.context("failed to wait for remote exec-server")?;
+            Err(anyhow::anyhow!("remote exec-server exited before connecting: {status}"))
+        }
+        result = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT) => result,
+    };
+    let environment_websocket = match environment_websocket {
+        Ok(websocket) => websocket,
+        Err(error) => {
+            let registration_requests = registry.received_requests().await.map(|requests| {
+                requests
+                    .iter()
+                    .filter(|request| request.url.path().ends_with("/register"))
+                    .count()
+            });
+            // Keep registry request headers and bodies out of the failure report.
+            let child_status = child.try_wait();
+            let stderr = std::fs::read_to_string(&stderr_path)?;
+            return Err(error.context(format!(
+                "remote executor failed to attach (registration requests: {registration_requests:?}, child status: {child_status:?}); stderr: {stderr}"
+            )));
+        }
+    };
     // Remote startup must capture the version before registration, not on the first initialize.
     std::fs::write(&manifest, r#"{"version":"9.9.9"}"#)?;
     let executor_public_key = registered_parent_lifetime_executor_public_key(&registry).await?;
@@ -235,7 +595,9 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     };
     let client_task =
         tokio::spawn(async move { ExecServerClient::connect_noise_rendezvous(harness_args).await });
-    let harness_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT).await?;
+    let harness_websocket = accept_parent_lifetime_websocket(&listener, TEST_TIMEOUT)
+        .await
+        .context("harness failed to attach")?;
     let relay_task = tokio::spawn(proxy_parent_lifetime_relay(
         environment_websocket,
         harness_websocket,
@@ -245,21 +607,36 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         .context("remote harness did not connect")???;
 
     let environment_info = client.environment_info().await?;
+    assert_eq!(
+        environment_info
+            .prepend_path_dirs
+            .iter()
+            .map(|path| std::fs::canonicalize(path.inferred_native_path_string()))
+            .collect::<std::io::Result<Vec<_>>>()?,
+        vec![codex_path_dir.canonicalize()?]
+    );
     let expected_info = EnvironmentInfo {
         executor_version: "1.2.3-alpha.4".to_string(),
+        cwd: Some(PathUri::from_host_native_path(
+            codex_home.path().canonicalize()?,
+        )?),
         // The build identity belongs to the spawned CLI, not this test process.
         provider_id: environment_info.provider_id.clone(),
+        prepend_path_dirs: environment_info.prepend_path_dirs.clone(),
         ..EnvironmentInfo::local()
     };
-    assert_eq!(environment_info, expected_info);
+    assert_eq!(environment_info.as_ref(), &expected_info);
     std::fs::remove_file(&manifest)?;
     assert_eq!(client.force_environment_info().await?, expected_info);
 
     #[cfg(windows)]
     let argv = vec![
-        "cmd.exe",
-        "/C",
-        "if defined CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE (exit /b 1) else ping -n 61 127.0.0.1",
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "if (Test-Path Env:CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE) { exit 1 }; Start-Sleep -Seconds 60",
     ];
     #[cfg(not(windows))]
     let argv = vec![
@@ -300,15 +677,10 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
 
     drop(stdin);
 
-    let output = tokio::time::timeout(TEST_TIMEOUT, child.wait_with_output())
+    let status = tokio::time::timeout(TEST_TIMEOUT, child.wait())
         .await
         .map_err(|_| anyhow::anyhow!("remote exec-server did not exit after stdin closed"))??;
-    anyhow::ensure!(
-        output.status.success(),
-        "remote exec-server exited with {}; stderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
+    anyhow::ensure!(status.success(), "remote exec-server exited with {status}");
 
     relay_task.abort();
     let _ = relay_task.await;
@@ -336,6 +708,331 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         Some(1),
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn forward_rejects_stdin_credentials_on_opposite_sides_of_subcommand() -> Result<()> {
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let home = TempDir::new()?;
+    let remote = [
+        "--remote",
+        "https://registry.example",
+        "--environment-id",
+        "env-1",
+    ];
+    let bearer = "--registration-bearer-stdin";
+    let rotating = "--executor-credential-stdin";
+    for (before, after) in [(bearer, rotating), (rotating, bearer)] {
+        let mut child = tokio::process::Command::new(&codex)
+            .env("CODEX_HOME", home.path())
+            .arg("exec-server")
+            .args(remote)
+            .args([before, "forward", "--connect", "ws://127.0.0.1:8765"])
+            .args(remote)
+            .arg(after)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        // Keep the empty pipe open so either credential read would block.
+        let _stdin = child.stdin.take().context("credential pipe")?;
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .context("exec-server waited for a credential")??;
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)?.contains(
+            "--registration-bearer-stdin cannot be used with --executor-credential-stdin"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_exec_server_scoped_credentials_authenticate_only_register_and_validate()
+-> Result<()> {
+    const ENVIRONMENT: &str = "environment-scoped-credentials";
+    const CREDENTIAL: &str = "synthetic-scoped-credential-never-log-1234";
+    const ROTATED_CREDENTIAL: &str = "rotated-scoped-credential";
+    const TIMEOUT: Duration = Duration::from_secs(30);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let rendezvous = format!("ws://{}", listener.local_addr()?);
+    let registry = MockServer::start().await;
+    let (registration_tx, mut registration_rx) = tokio::sync::mpsc::unbounded_channel();
+    // A confirmed pre-write auth outage must retry with the same scoped credential.
+    Mock::given(method("POST"))
+        .and(path(format!("/cloud/environment/{ENVIRONMENT}/register")))
+        .respond_with(ResponseTemplate::new(502).set_body_json(serde_json::json!({
+            "detail": {"code": "authentication_service_unavailable", "message": CREDENTIAL},
+        })))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&registry)
+        .await;
+    let registration_response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "environment_id": ENVIRONMENT,
+        "url": format!("{rendezvous}/relay?role=environment"),
+        "security_profile": "noise_hybrid_ik_v1",
+        "executor_registration_id": "registration-scoped",
+    }));
+    Mock::given(method("POST"))
+        .and(path(format!("/cloud/environment/{ENVIRONMENT}/register")))
+        .respond_with(move |request: &wiremock::Request| {
+            let credential = request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .unwrap_or_default()
+                .to_string();
+            let _ = registration_tx.send(credential);
+            registration_response.clone()
+        })
+        .mount(&registry)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/cloud/environment/{ENVIRONMENT}/validate")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"valid": true})))
+        .mount(&registry)
+        .await;
+
+    let collector = MockServer::start().await;
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"
+[analytics]
+enabled = true
+[otel]
+metrics_exporter = {{ otlp-http = {{ endpoint = "{}/v1/metrics", protocol = "json", headers = {{ Authorization = "general-telemetry-token" }} }} }}
+"#,
+            collector.uri()
+        ),
+    )?;
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"OPENAI_API_KEY":"general-file-token"}"#,
+    )?;
+    let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    command
+        .env("CODEX_HOME", home.path())
+        .env_remove(codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR)
+        .env("CODEX_API_KEY", "general-api-key")
+        .env("OPENAI_API_KEY", "general-openai-key")
+        .env("CODEX_ACCESS_TOKEN", "general-agent-identity")
+        .env(
+            "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+            "invalid-general-workload-identity",
+        )
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .args([
+            "exec-server",
+            "--remote",
+            &registry.uri(),
+            "--environment-id",
+            ENVIRONMENT,
+            "--executor-credential-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("credential stdin was not piped")?;
+    send_json_line(&mut stdin, &serde_json::json!({
+        "version": 1, "environment_id": ENVIRONMENT, "token": CREDENTIAL,
+        "expires_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 120,
+    })).await?;
+
+    let (socket, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+        .await
+        .context("executor did not reach rendezvous")??;
+    let environment_websocket = tokio::time::timeout(
+        TIMEOUT,
+        accept_hdr_async(socket, |request: &Request, response: Response| {
+            for name in ["authorization", "chatgpt-account-id"] {
+                assert!(
+                    !request.headers().contains_key(name),
+                    "registry authentication must not be sent in the WebSocket handshake"
+                );
+            }
+            Ok(response)
+        }),
+    )
+    .await
+    .context("executor WebSocket handshake did not complete")??;
+    let executor_public_key = registered_parent_lifetime_executor_public_key(&registry).await?;
+    let args = NoiseRendezvousConnectArgs {
+        bundle: NoiseRendezvousConnectBundle {
+            websocket_url: format!("{rendezvous}/relay?role=harness"),
+            environment_id: ENVIRONMENT.to_string(),
+            executor_registration_id: "registration-scoped".to_string(),
+            executor_public_key,
+            harness_key_authorization: "synthetic-harness-authorization".to_string(),
+        },
+        harness_identity: NoiseChannelIdentity::generate()?,
+        client_name: "scoped-credential-test".to_string(),
+        connect_timeout: TIMEOUT,
+        initialize_timeout: TIMEOUT,
+        resume_session_id: None,
+        http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    };
+    let connect =
+        tokio::spawn(async move { ExecServerClient::connect_noise_rendezvous(args).await });
+    let harness_websocket = accept_parent_lifetime_websocket(&listener, TIMEOUT).await?;
+    let relay = tokio::spawn(proxy_parent_lifetime_relay(
+        environment_websocket,
+        harness_websocket,
+    ));
+    let client = tokio::time::timeout(TIMEOUT, connect)
+        .await
+        .context("harness timed out")???;
+    let before_rotation = client.environment_info().await?;
+    send_json_line(&mut stdin, &serde_json::json!({
+        "version": 1, "environment_id": ENVIRONMENT, "token": ROTATED_CREDENTIAL,
+        "expires_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 120,
+    })).await?;
+    assert_eq!(
+        &client.force_environment_info().await?,
+        before_rotation.as_ref()
+    );
+    let requests = registry
+        .received_requests()
+        .await
+        .context("registry requests")?;
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.url.path())
+            .collect::<Vec<_>>(),
+        [
+            format!("/cloud/environment/{ENVIRONMENT}/register"),
+            format!("/cloud/environment/{ENVIRONMENT}/register"),
+            format!("/cloud/environment/{ENVIRONMENT}/validate"),
+        ]
+    );
+    for request in requests {
+        assert_eq!(
+            request.headers["authorization"],
+            format!("Bearer {CREDENTIAL}")
+        );
+        assert_eq!(request.headers.get_all("authorization").iter().count(), 1);
+        for name in [
+            "chatgpt-account-id",
+            "x-openai-biscuit",
+            "biscuit",
+            "x-openai-access-token",
+        ] {
+            assert!(
+                !request.headers.contains_key(name),
+                "unexpected registry credential header {name}"
+            );
+        }
+    }
+
+    assert_eq!(registration_rx.try_recv()?, CREDENTIAL);
+    drop(client);
+    relay.abort();
+    let _ = relay.await;
+
+    // Reject reconnects to trigger re-registration while the parent update is processed.
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let (socket, _) = listener.accept().await?;
+            let rejected = http::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(Some("expired registration".to_string()))?;
+            let result = accept_hdr_async(socket, |_: &Request, _: Response| Err(rejected)).await;
+            assert!(result.is_err());
+
+            let credential = registration_rx
+                .recv()
+                .await
+                .context("missing re-registration")?;
+            if credential == ROTATED_CREDENTIAL {
+                break Ok::<(), anyhow::Error>(());
+            }
+            assert_eq!(credential, CREDENTIAL);
+        }
+    })
+    .await
+    .context("executor did not re-register with the rotated parent credential")??;
+
+    drop(stdin);
+    let output = tokio::time::timeout(TIMEOUT, child.wait_with_output())
+        .await
+        .context("stdin EOF did not stop executor")??;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::ensure!(output.status.success(), "scoped executor failed: {stderr}");
+    assert!(!stderr.contains(CREDENTIAL));
+    assert!(!stderr.contains(ROTATED_CREDENTIAL));
+    assert!(
+        collector
+            .received_requests()
+            .await
+            .context("telemetry requests")?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_exec_server_scoped_credentials_never_fall_back_for_another_environment()
+-> Result<()> {
+    let registry = MockServer::start().await;
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"OPENAI_API_KEY":"general-file-token"}"#,
+    )?;
+    let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    let mut child = command
+        .env("CODEX_HOME", home.path())
+        .env("CODEX_API_KEY", "general-api-key")
+        .env("CODEX_ACCESS_TOKEN", "general-agent-identity")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .args([
+            "exec-server",
+            "--remote",
+            &registry.uri(),
+            "--environment-id",
+            "configured-environment",
+            "--executor-credential-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("credential stdin was not piped")?;
+    send_json_line(&mut stdin, &serde_json::json!({
+        "version": 1, "environment_id": "another-environment", "token": "never-print-this-scoped-token",
+        "expires_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 120,
+    })).await?;
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("invalid scoped frame did not stop executor")??;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("different environment"));
+    assert!(!stderr.contains("never-print-this-scoped-token"));
+    assert!(
+        registry
+            .received_requests()
+            .await
+            .context("registry requests")?
+            .is_empty()
+    );
+    drop(stdin);
     Ok(())
 }
 
@@ -601,7 +1298,7 @@ fn local_exec_server_exits_successfully_on_sigterm() -> Result<()> {
 async fn wait_for_response(
     stdout: &mut (impl tokio::io::AsyncBufRead + Unpin),
     expected_id: i64,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     loop {
         let mut line = String::new();
         if stdout.read_line(&mut line).await? == 0 {
@@ -613,7 +1310,7 @@ async fn wait_for_response(
                 message.get("error").is_none(),
                 "exec-server request {expected_id} failed: {message}"
             );
-            return Ok(());
+            return Ok(message);
         }
     }
 }

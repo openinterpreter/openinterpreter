@@ -22,9 +22,9 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::config_update::format_config_error;
 use crate::hooks_rpc::HookTrustUpdate;
+use crate::hooks_rpc::HooksListTarget;
 use crate::hooks_rpc::fetch_hooks_list;
 use crate::hooks_rpc::hook_needs_review;
-use crate::hooks_rpc::hooks_list_entry_for_cwd;
 use crate::hooks_rpc::write_hook_trusts;
 use crate::keymap::ListAction;
 use crate::keymap::RuntimeKeymap;
@@ -53,19 +53,18 @@ pub(crate) async fn load_startup_hooks_review_entry(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
 ) -> HooksListEntry {
-    let response = match fetch_hooks_list(request_handle, cwd.clone()).await {
-        Ok(response) => response,
+    match fetch_hooks_list(request_handle, &HooksListTarget::Cwd(cwd.clone())).await {
+        Ok(entry) => entry,
         Err(err) => {
             tracing::warn!("failed to load startup hook review state: {err:#}");
-            return HooksListEntry {
+            HooksListEntry {
                 cwd,
                 hooks: Vec::new(),
                 warnings: Vec::new(),
                 errors: Vec::new(),
-            };
+            }
         }
-    };
-    hooks_list_entry_for_cwd(response, &cwd)
+    }
 }
 
 pub(crate) async fn maybe_run_startup_hooks_review(
@@ -102,7 +101,7 @@ async fn run_startup_hooks_review_app(
         &keymap,
     );
     let mut chord_matcher = crate::keymap::KeyChordMatcher::default();
-    draw_view(tui, &view)?;
+    draw_view(tui, &view, &chord_matcher, &keymap)?;
 
     tui.discard_pending_input_before_interactive_screen()?;
     let tui_events = tui.event_stream();
@@ -113,6 +112,9 @@ async fn run_startup_hooks_review_app(
             return Ok(StartupHooksReviewOutcome::Continue);
         };
         tui.screen_size_for_event(&event)?;
+        if tui.dismiss_shortcut_on_input(&event, &mut chord_matcher) {
+            continue;
+        }
         match event {
             TuiEvent::Key(key_event) => {
                 let key_event = match chord_matcher.advance(
@@ -123,14 +125,17 @@ async fn run_startup_hooks_review_app(
                     crate::keymap::KeyChordMatch::PassThrough => key_event,
                     crate::keymap::KeyChordMatch::Completed(dispatch_event) => dispatch_event,
                     crate::keymap::KeyChordMatch::Pending(_)
-                    | crate::keymap::KeyChordMatch::Cancelled
-                    | crate::keymap::KeyChordMatch::Ignored => continue,
+                    | crate::keymap::KeyChordMatch::Cancelled => {
+                        tui.frame_requester().schedule_frame();
+                        continue;
+                    }
+                    crate::keymap::KeyChordMatch::Ignored => continue,
                 };
                 if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     view.handle_key_event(key_event);
                 }
                 let Some(selection) = selected_choice(&mut view) else {
-                    draw_view(tui, &view)?;
+                    draw_view(tui, &view, &chord_matcher, &keymap)?;
                     continue;
                 };
                 match selection {
@@ -148,7 +153,7 @@ async fn run_startup_hooks_review_app(
                             app_event_tx.clone(),
                             &keymap,
                         );
-                        draw_view(tui, &view)?;
+                        draw_view(tui, &view, &chord_matcher, &keymap)?;
                         let result = write_hook_trusts(
                             app_server.request_handle(),
                             entry
@@ -177,7 +182,7 @@ async fn run_startup_hooks_review_app(
                                     app_event_tx.clone(),
                                     &keymap,
                                 );
-                                draw_view(tui, &view)?;
+                                draw_view(tui, &view, &chord_matcher, &keymap)?;
                             }
                         }
                     }
@@ -185,7 +190,7 @@ async fn run_startup_hooks_review_app(
             }
             TuiEvent::Paste(_) | TuiEvent::FocusLost | TuiEvent::Mouse(_) => {}
             TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
-                draw_view(tui, &view)?;
+                draw_view(tui, &view, &chord_matcher, &keymap)?;
             }
         }
     }
@@ -296,8 +301,14 @@ fn selection_item(name: &str, is_disabled: bool) -> SelectionItem {
     }
 }
 
-fn draw_view(tui: &mut Tui, view: &ListSelectionView) -> Result<()> {
-    tui.draw(u16::MAX, |frame| {
+fn draw_view(
+    tui: &mut Tui,
+    view: &ListSelectionView,
+    matcher: &crate::keymap::KeyChordMatcher,
+    keymap: &RuntimeKeymap,
+) -> Result<()> {
+    let hud = matcher.guide(&keymap.chords, &tui.frame_requester());
+    tui.draw_with_shortcut_hud(u16::MAX, hud, |frame| {
         let area = frame.area();
         frame.render_widget_ref(&Clear, area);
         let view_area = Rect::new(
@@ -365,6 +376,7 @@ mod tests {
             source_path: test_path_buf("/tmp/hooks.json").abs(),
             source: HookSource::User,
             plugin_id: None,
+            environment_id: None,
             display_order: 0,
             enabled: false,
             current_hash: format!("sha256:{key}"),

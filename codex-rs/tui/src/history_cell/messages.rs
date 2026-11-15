@@ -19,6 +19,10 @@ pub(crate) struct UserHistoryCell {
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
     pub(crate) spoken: bool,
+    pub(crate) async_replies: Option<(
+        Vec<crate::async_question_reply::AsyncQuestionReply>,
+        PathBuf,
+    )>,
 }
 
 /// Remove CSI sequences and control characters, preserving tabs and newlines.
@@ -152,6 +156,22 @@ fn build_user_message_lines_with_elements(
 }
 
 impl UserHistoryCell {
+    pub(crate) fn with_async_replies(
+        mut self,
+        replies: Vec<crate::async_question_reply::AsyncQuestionReply>,
+        cwd: &Path,
+    ) -> Self {
+        if !replies.is_empty() {
+            self.async_replies = Some((replies, cwd.to_path_buf()));
+        }
+        self
+    }
+
+    pub(crate) fn uses_markdown(&self) -> bool {
+        // Inline text-element ranges refer to the literal prompt, not rendered Markdown.
+        !self.spoken && self.text_elements.is_empty()
+    }
+
     pub(crate) fn has_visible_content(&self) -> bool {
         !sanitize_user_text(Cow::Borrowed(&self.message))
             .trim()
@@ -209,12 +229,17 @@ impl HistoryCell for UserHistoryCell {
                 .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
         ));
 
-        let wrapped_message = wrap_user_message(message, text_elements, style, wrap_width);
+        let wrapped_message = self
+            .async_replies
+            .as_ref()
+            .map(|(replies, cwd)| {
+                super::async_replies::render(replies, cwd, usize::from(wrap_width))
+            })
+            .or_else(|| wrap_user_message(message, text_elements, style, wrap_width));
 
         if wrapped_images.is_empty() && wrapped_message.is_none() {
             return Vec::new();
         }
-
         let mut lines = vec![HyperlinkLine::new(Line::from("").style(style))];
 
         if !wrapped_images.is_empty() {
@@ -223,21 +248,28 @@ impl HistoryCell for UserHistoryCell {
                 "  ".into(),
                 "  ".into(),
             ));
-            if wrapped_message.is_some() {
+            if wrapped_message
+                .as_ref()
+                .is_some_and(|lines| !lines.is_empty())
+            {
                 lines.push(HyperlinkLine::new(Line::from("").style(style)));
             }
         }
 
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_hyperlink_lines(
-                wrapped_message,
-                if self.spoken {
-                    "› ".red().bold()
-                } else {
-                    "› ".bold().dim()
-                },
-                "  ".into(),
-            ));
+            if self.async_replies.is_some() {
+                lines.extend(wrapped_message);
+            } else {
+                lines.extend(prefix_hyperlink_lines(
+                    wrapped_message,
+                    if self.spoken {
+                        "› ".red().bold()
+                    } else {
+                        "› ".bold().dim()
+                    },
+                    "  ".into(),
+                ));
+            }
         }
 
         lines.push(HyperlinkLine::new(Line::from("").style(style)));
@@ -247,8 +279,8 @@ impl HistoryCell for UserHistoryCell {
         lines
     }
 
-    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.display_hyperlink_lines(width)
+    fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.transcript_hyperlink_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -501,14 +533,36 @@ impl HistoryCell for AgentMessageCell {
 /// because resolving their local file links depends on filesystem state that can change later.
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
+    /// Identifies an interrupted reply that can still receive its authoritative completion.
+    pub(crate) interrupted_item: Option<(String, String)>,
+    pub(crate) phase: Option<codex_protocol::models::MessagePhase>,
     markdown_source: String,
+    copy_source: Option<String>,
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
     spoken_artifacts: bool,
+    question_titles: Vec<std::ops::Range<usize>>,
 }
 
 impl AgentMarkdownCell {
+    pub(crate) fn from_parsed_message(
+        visible_markdown: String,
+        source: String,
+        cwd: &Path,
+        context: Option<crate::inline_visualization::InlineVisualizationContext>,
+        questions: &[codex_protocol::items::AsyncUserInputQuestion],
+    ) -> Self {
+        Self::new_with_inline_visualizations(visible_markdown, cwd, context)
+            .with_questions(questions)
+            .with_copy_source(Some(source))
+    }
+
+    pub(crate) fn with_copy_source(mut self, source: Option<String>) -> Self {
+        self.copy_source = source;
+        self
+    }
+
     /// Create a finalized source-backed assistant message cell.
     ///
     /// `markdown_source` must be the raw source accumulated by the stream controller, not already
@@ -534,12 +588,33 @@ impl AgentMarkdownCell {
             (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
                 .then(MarkdownRenderCache::default);
         Self {
+            interrupted_item: None,
             markdown_source,
+            copy_source: None,
+            phase: None,
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
             spoken_artifacts: false,
+            question_titles: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_phase(
+        mut self,
+        phase: Option<codex_protocol::models::MessagePhase>,
+    ) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    pub(crate) fn with_questions(
+        mut self,
+        questions: &[codex_protocol::items::AsyncUserInputQuestion],
+    ) -> Self {
+        self.question_titles =
+            super::async_questions::title_ranges(&self.markdown_source, questions);
+        self
     }
 
     pub(crate) fn new_spoken(markdown_source: String, cwd: &Path) -> Self {
@@ -553,7 +628,9 @@ impl AgentMarkdownCell {
     }
 }
 
-fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
+pub(super) fn normalize_whitespace_only_hyperlink_lines(
+    mut lines: Vec<HyperlinkLine>,
+) -> Vec<HyperlinkLine> {
     for line in &mut lines {
         if line
             .line
@@ -591,25 +668,29 @@ impl AgentMarkdownCell {
 
             // Re-render markdown from source at the current width. Reserve 2 columns for the "• " /
             // " " prefix prepended below.
-            let lines = crate::markdown::render_markdown_agent_with_list_spacing(
-                &self.markdown_source,
-                Some(wrap_width),
-                Some(self.cwd.as_path()),
-                self.inline_visualization_context.as_ref(),
-                list_spacing,
-            );
-            let lines = if self.spoken_artifacts {
-                let mut lines = lines;
-                super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
-                lines
-            } else {
-                lines
+            let markdown = |source: &str| {
+                crate::markdown::render_markdown_agent_with_list_spacing(
+                    source,
+                    Some(wrap_width),
+                    Some(self.cwd.as_path()),
+                    self.inline_visualization_context.as_ref(),
+                    list_spacing,
+                )
             };
-            normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
-                lines,
-                "• ".dim(),
-                "  ".into(),
-            ))
+            let lines = if self.question_titles.is_empty() {
+                let mut lines = markdown(&self.markdown_source);
+                if self.spoken_artifacts {
+                    super::spoken_artifacts::annotate_spoken_artifacts(&mut lines, &self.cwd);
+                }
+                prefix_hyperlink_lines(lines, "• ".dim(), "  ".into())
+            } else {
+                super::async_questions::render(
+                    &self.markdown_source,
+                    &self.question_titles,
+                    markdown,
+                )
+            };
+            normalize_whitespace_only_hyperlink_lines(lines)
         };
 
         if let Some(rendered_lines) = &self.rendered_lines {
@@ -720,6 +801,7 @@ pub(crate) fn new_user_prompt(
         local_image_paths,
         remote_image_urls,
         spoken: false,
+        async_replies: None,
     }
 }
 

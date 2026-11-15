@@ -162,7 +162,10 @@ fn ensure_allowed(
     operation: &str,
 ) -> Result<(), FunctionCallError> {
     let cwd = primary_cwd(invocation);
-    let policy = invocation.turn.file_system_sandbox_policy();
+    let policy = invocation
+        .turn
+        .permission_profile_for_environments(&invocation.step_context.environments)
+        .file_system_sandbox_policy();
     let candidates = policy_candidates_for_path(path);
     let allowed = match access {
         AccessKind::Read => candidates

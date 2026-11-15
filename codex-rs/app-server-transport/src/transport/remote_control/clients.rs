@@ -185,8 +185,12 @@ async fn send_client_management_request_once(
     request: &ClientManagementRequest<'_>,
     action: &str,
 ) -> io::Result<ClientManagementResponse> {
-    let client = create_client_without_request_logging();
-    let auth_headers = auth.request_headers()?;
+    let endpoint = match request {
+        ClientManagementRequest::List { url, .. } | ClientManagementRequest::Revoke { url } => {
+            url.as_str()
+        }
+    };
+    let (client, auth_headers) = auth.request_context(endpoint).await?;
     let request = match request {
         ClientManagementRequest::List { url, params } => {
             let mut query = Vec::new();
@@ -206,7 +210,9 @@ async fn send_client_management_request_once(
                     .to_string(),
                 ));
             }
-            client.get((*url).clone()).query(&query)
+            let mut url = (*url).clone();
+            url.query_pairs_mut().extend_pairs(query);
+            client.get(url)
         }
         ClientManagementRequest::Revoke { url } => client.delete((*url).clone()),
     };
@@ -215,13 +221,16 @@ async fn send_client_management_request_once(
         .headers(auth_headers)
         .send()
         .await
-        .map_err(|err| io::Error::other(format!("failed to {action}: {err}")))?;
+        .map_err(|error| match error {
+            codex_http_client::HttpError::Policy(_) => super::auth::request_error(error),
+            error => io::Error::other(format!("failed to {action}: {error}")),
+        })?;
     let headers = response.headers().clone();
     let status = response.status();
     let body = response
         .bytes()
         .await
-        .map_err(|err| io::Error::other(format!("failed to read {action} response: {err}")))?
+        .map_err(super::auth::request_error)?
         .to_vec();
     Ok(ClientManagementResponse {
         status,

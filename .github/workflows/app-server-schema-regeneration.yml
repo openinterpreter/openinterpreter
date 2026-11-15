@@ -1,0 +1,68 @@
+name: App-server schema review candidate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - .github/workflows/app-server-schema-regeneration.yml
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate exact-source schema for review
+    if: ${{ github.event.pull_request.number == 1981 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'interpreterwork/codex-main-integration-publish-20261112' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify exact source and prepare build
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+
+      - name: Generate stable and experimental exports outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_APP_SERVER_SCHEMA_ROOT="$RUNNER_TEMP/generated-schema"
+          python3 codex-rs/app-server-protocol/scripts/write_schema_fixtures.py \
+            --schema-root "$CODEX_APP_SERVER_SCHEMA_ROOT"
+          python3 codex-rs/app-server-protocol/scripts/write_schema_fixtures.py \
+            --schema-root "$CODEX_APP_SERVER_SCHEMA_ROOT" --experimental
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Bind review artifact to exact source and workflow attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/schema-review"
+          mkdir -p "$destination"
+          cp -a "$RUNNER_TEMP/generated-schema" "$destination/schema"
+          printf '%s\n' "$EXPECTED_SOURCE_SHA" > "$destination/source-sha.txt"
+          printf '%s %s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$destination/run-identity.txt"
+          (cd "$destination" && find schema -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+      - name: Upload review-only generated exports
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: app-server-schema-review-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/schema-review/
+          if-no-files-found: error
+          retention-days: 7

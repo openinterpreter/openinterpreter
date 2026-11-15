@@ -1,0 +1,42 @@
+---
+source: tui/src/history_cell/tests.rs
+expression: lines
+---
+[
+    Line::from_iter([
+        Span::from("• ").dim(),
+        Span::from("Proposed Plan").bold(),
+    ]),
+    Line::from(" "),
+    Line::from(" ").bg(Color::Rgb(244, 244, 244)),
+    Line::from_iter([
+        Span::from("  "),
+        Span::from("## ").fg(Color::Rgb(191, 74, 7)).bold(),
+        Span::from("Plan").fg(Color::Rgb(191, 74, 7)).bold(),
+    ]).bg(Color::Rgb(244, 244, 244)),
+    Line::from("  ").bg(Color::Rgb(244, 244, 244)),
+    Line::from_iter([
+        Span::from("  "),
+        Span::from(" "),
+        Span::from("Step"),
+        Span::from("  "),
+        Span::from(" "),
+        Span::from("  "),
+        Span::from(" "),
+        Span::from("Owner"),
+    ]).fg(Color::Rgb(156, 99, 20)).bg(Color::Rgb(244, 244, 244)).bold(),
+    Line::from_iter([
+        Span::from("  "),
+        Span::from("━━━━━━━━  ━━━━━━━").dim(),
+    ]).bg(Color::Rgb(244, 244, 244)),
+    Line::from_iter([
+        Span::from("  "),
+        Span::from(" "),
+        Span::from("Verify"),
+        Span::from(" "),
+        Span::from("  "),
+        Span::from(" "),
+        Span::from("Codex"),
+    ]).bg(Color::Rgb(244, 244, 244)),
+    Line::from(" ").bg(Color::Rgb(244, 244, 244)),
+]

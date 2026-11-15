@@ -40,7 +40,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -58,6 +58,145 @@ use wiremock::Mock;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_creator_survives_resume_and_forks_use_current_auth() -> Result<()> {
+    use base64::Engine;
+
+    let server = start_mock_server().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    responses::sse(vec![ev_response_created("resp"), ev_completed("resp")]),
+                    "text/event-stream",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let chatgpt_auth = |user_id: &str, account_id: &str| {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"https://api.openai.com/auth": {"chatgpt_user_id": user_id}}).to_string(),
+        );
+        CodexAuth::from_external_chatgpt_tokens(
+            &format!("e30.{claims}.sig"),
+            account_id,
+            /*chatgpt_plan_type*/ None,
+        )
+    };
+    for auth in [
+        chatgpt_auth("creator-user", "creator-account")?,
+        CodexAuth::from_api_key("test"),
+    ] {
+        let expected_creator = (auth.get_chatgpt_user_id(), auth.get_account_id());
+        let mut builder = test_codex().with_auth(auth).with_config(|config| {
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("enable SQLite");
+        });
+        let test = builder.build_with_auto_env(&server).await?;
+        test.submit_turn("persist creator").await?;
+        let thread_id = test.session_configured.thread_id;
+        let rollout_path = test.codex.rollout_path().expect("rollout path");
+        test.codex.shutdown_and_wait().await?;
+        let meta = codex_rollout::read_session_meta_line(&rollout_path)
+            .await?
+            .meta;
+        let stored = test
+            .codex
+            .state_db()
+            .expect("SQLite")
+            .get_thread(thread_id)
+            .await?
+            .expect("thread");
+        assert_eq!(
+            (meta.creator_user_id, meta.creator_account_id),
+            expected_creator
+        );
+        assert_eq!(
+            (stored.creator_user_id, stored.creator_account_id),
+            expected_creator
+        );
+
+        let mut resume_builder = test_codex()
+            .with_auth(chatgpt_auth("resuming-user", "resuming-account")?)
+            .with_config(|config| {
+                config
+                    .features
+                    .enable(Feature::Sqlite)
+                    .expect("enable SQLite");
+            });
+        let resumed = resume_builder
+            .resume(&server, test.home.clone(), rollout_path.clone())
+            .await?;
+        resumed.submit_turn("resume under another account").await?;
+        resumed.codex.shutdown_and_wait().await?;
+        let meta = codex_rollout::read_session_meta_line(&rollout_path)
+            .await?
+            .meta;
+        let stored = resumed
+            .codex
+            .state_db()
+            .expect("SQLite")
+            .get_thread(thread_id)
+            .await?
+            .expect("thread");
+        assert_eq!(
+            (meta.creator_user_id, meta.creator_account_id),
+            expected_creator
+        );
+        assert_eq!(
+            (stored.creator_user_id, stored.creator_account_id),
+            expected_creator
+        );
+
+        let fork = resumed
+            .thread_manager
+            .fork_legacy_thread(
+                codex_core::ForkSnapshot::Interrupted,
+                StartThreadOptions::new(resumed.config.clone()),
+                rollout_path,
+            )
+            .await?;
+        fork.thread
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "persist fork".to_string(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+        wait_for_event(&fork.thread, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+        let fork_path = fork.thread.rollout_path().expect("fork rollout");
+        fork.thread.shutdown_and_wait().await?;
+        let meta = codex_rollout::read_session_meta_line(&fork_path)
+            .await?
+            .meta;
+        let stored = fork
+            .thread
+            .state_db()
+            .expect("SQLite")
+            .get_thread(fork.thread_id)
+            .await?
+            .expect("fork");
+        let expected_fork = (
+            Some("resuming-user".to_string()),
+            Some("resuming-account".to_string()),
+        );
+        assert_eq!(
+            (meta.creator_user_id, meta.creator_account_id),
+            expected_fork
+        );
+        assert_eq!(
+            (stored.creator_user_id, stored.creator_account_id),
+            expected_fork
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn new_thread_is_recorded_in_state_db() -> Result<()> {
@@ -219,6 +358,7 @@ async fn resume_restores_dynamic_tools_from_rollout_with_sqlite_enabled() -> Res
         .thread_manager
         .start_thread(StartThreadOptions {
             dynamic_tools: vec![dynamic_tool],
+            history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Legacy),
             ..StartThreadOptions::new(base_test.config.clone())
         })
         .await?;
@@ -312,7 +452,10 @@ async fn resume_restores_legacy_dynamic_tools_from_rollout_with_sqlite_enabled()
     let base_test = builder.build(&server).await?;
     let started = base_test
         .thread_manager
-        .start_thread(StartThreadOptions::new(base_test.config.clone()))
+        .start_thread(StartThreadOptions {
+            history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Legacy),
+            ..StartThreadOptions::new(base_test.config.clone())
+        })
         .await?;
     let rollout_path = started
         .session_configured
@@ -414,6 +557,10 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
             fs::create_dir_all(parent).expect("should create rollout directory");
             let session_meta_line = SessionMetaLine {
                 meta: SessionMeta {
+                    account_scoped: false,
+                    attached_thread: false,
+                    creator_user_id: None,
+                    creator_account_id: None,
                     session_id: thread_id.into(),
                     id: thread_id,
                     forked_from_id: None,
@@ -447,7 +594,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                 RolloutLine {
                     timestamp: "2026-01-27T12:00:00Z".to_string(),
                     ordinal: None,
-                    item: RolloutItem::SessionMeta(session_meta_line),
+                    item: RolloutItem::SessionMeta(Box::new(session_meta_line)),
                 },
                 RolloutLine {
                     timestamp: "2026-01-27T12:00:01Z".to_string(),
@@ -737,7 +884,9 @@ async fn mcp_call_marks_thread_memory_mode_polluted_when_configured() -> Result<
                 environment_id: "local".to_string(),
                 enabled: true,
                 required: false,
+                startup_readiness: Default::default(),
                 supports_parallel_tool_calls: false,
+                tool_input_schema_max_bytes: None,
                 omit_tools_from: None,
                 disabled_reason: None,
                 startup_timeout_sec: Some(Duration::from_secs(10)),
@@ -771,7 +920,7 @@ async fn mcp_call_marks_thread_memory_mode_polluted_when_configured() -> Result<
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd)),
+                environments: Some(local_requests(cwd)),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -846,7 +995,8 @@ async fn tool_call_logs_include_thread_id() -> Result<()> {
 
     test.submit_turn("run a shell command").await?;
 
-    let log_db_layer = codex_state::log_db::start(db.clone());
+    let log_db_layer =
+        codex_state::log_db::start(db.clone(), Arc::new(codex_feedback::CodexFeedback::new()));
     let subscriber = tracing_subscriber::registry().with(log_db_layer.clone());
     let dispatch = tracing::Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
@@ -855,6 +1005,10 @@ async fn tool_call_logs_include_thread_id() -> Result<()> {
         tracing::info!("ToolCall: exec_command {{\"cmd\":\"echo hello\"}}");
     });
     log_db_layer.flush().await;
+
+    let logs_path = test.config.sqlite.home().join("logs_2.sqlite");
+    assert_eq!(db.sqlite().logs_db_path(), logs_path);
+    assert!(logs_path.is_file());
 
     let mut found = None;
     for _ in 0..80 {

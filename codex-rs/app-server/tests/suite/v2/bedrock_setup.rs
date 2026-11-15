@@ -5,7 +5,10 @@ use codex_app_server_protocol::BedrockDiscoverResponse;
 use codex_app_server_protocol::BedrockSetupParams;
 use codex_app_server_protocol::BedrockSetupResponse;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ModelListParams;
+use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadStartParams;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::login_with_bedrock_api_key;
@@ -115,6 +118,21 @@ async fn discover_bedrock_profiles_and_environment_credentials() -> Result<()> {
     );
     assert!(!codex_home.path().join(".env").exists());
 
+    // The same server must route both the picker and the first thread to Bedrock.
+    let models: ModelListResponse = app_server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
+    let default_model = models.data.iter().find(|model| model.is_default).unwrap();
+    assert!(default_model.model.starts_with("openai."));
+    let thread = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?;
+    assert_eq!(thread.model_provider, "amazon-bedrock");
+    assert_eq!(thread.model, default_model.model);
+
     Ok(())
 }
 
@@ -199,7 +217,11 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
 
     let managed_home = TempDir::new()?;
     let managed_config_path = managed_home.path().join("config.toml");
-    std::fs::write(&managed_config_path, "")?;
+    std::fs::write(&managed_config_path, "model_provider = 'openai'")?;
+    std::fs::write(
+        managed_home.path().join("requirements.toml"),
+        "model_provider = 'amazon-bedrock'",
+    )?;
     login_with_bedrock_api_key(
         managed_home.path(),
         "managed-bedrock-api-key",
@@ -223,7 +245,6 @@ async fn setup_bedrock_profile_and_environment() -> Result<()> {
         .as_table_mut()
         .expect("config should be a table")
         .extend(toml::toml! {
-            model_provider = "amazon-bedrock"
             [model_providers.amazon-bedrock.aws]
             profile = "engineering"
             region = "us-west-2"

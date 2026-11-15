@@ -54,23 +54,26 @@ fn instruction_updates_are_applied_once_in_retained_history() {
         let expected: ResponseItem = ContextualUserFragment::into(CollaborationModeInstructions {
             instructions: instructions.unwrap_or_default().to_string(),
         });
-        let updates = world_state
-            .render_history_diff(previous.as_ref(), &history)
+        let (snapshot, fragments) =
+            world_state.render_history_fragment_diff(previous.as_ref(), &history);
+        let updates = fragments
             .into_iter()
             .map(ContextualUserFragment::into_boxed_response_item)
             .collect::<Vec<_>>();
         assert_eq!(updates, vec![expected]);
         history.extend(updates);
-        previous = Some(world_state.snapshot());
+        previous = Some(snapshot);
 
         assert!(
             world_state
-                .render_history_diff(previous.as_ref(), &history)
+                .render_history_fragment_diff(previous.as_ref(), &history)
+                .1
                 .is_empty()
         );
         assert_eq!(
             world_state
-                .render_history_diff(previous.as_ref(), &[])
+                .render_history_fragment_diff(previous.as_ref(), &[])
+                .1
                 .len(),
             usize::from(instructions.is_some()),
         );
@@ -122,9 +125,11 @@ fn empty_catalog_collaboration_message_suppresses_legacy_instructions() {
 
     assert_eq!(
         state
-            .render_diff(PreviousSectionState::Absent)
+            .render_fragment_diff(PreviousSectionState::Absent)
+            .1
             .expect("explicit empty collaboration message")
-            .render(),
+            .render()
+            .expect_text(),
         format!("{COLLABORATION_MODE_OPEN_TAG}{COLLABORATION_MODE_CLOSE_TAG}")
     );
 }
@@ -169,16 +174,24 @@ fn legacy_collaboration_mode_snapshots_refresh_catalog_messages_once() {
 
             assert_eq!(
                 state
-                    .render_diff(PreviousSectionState::Known(&previous))
+                    .render_fragment_diff(PreviousSectionState::Known(&previous))
+                    .1
                     .expect("legacy snapshot should refresh collaboration instructions")
-                    .render(),
+                    .render()
+                    .expect_text(),
                 format!(
                     "{COLLABORATION_MODE_OPEN_TAG}{instructions}{COLLABORATION_MODE_CLOSE_TAG}"
                 )
             );
             assert!(
                 state
-                    .render_diff(PreviousSectionState::Known(&state.snapshot()))
+                    .render_fragment_diff(PreviousSectionState::Known(
+                        &state
+                            .render_fragment_diff(PreviousSectionState::Absent)
+                            .0
+                            .unwrap()
+                    ))
+                    .1
                     .is_none()
             );
         }

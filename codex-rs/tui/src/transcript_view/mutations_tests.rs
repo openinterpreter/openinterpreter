@@ -361,6 +361,7 @@ fn folding_a_reasoning_only_page_retains_its_find_and_copy_revision() {
     use crate::thread_transcript::fold_trailing_activity_details;
     use crate::thread_transcript::thread_items_to_transcript_cells;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadItemPayload;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnItemsView;
     use codex_app_server_protocol::TurnStatus;
@@ -371,14 +372,18 @@ fn folding_a_reasoning_only_page_retains_its_find_and_copy_revision() {
         "result": {"content": [{"type": "text", "text": "retained call output"}]}, "durationMs": 1
     }))
     .expect("computer call");
-    let reasoning = ThreadItem::Reasoning {
+    let reasoning = ThreadItemPayload::Reasoning {
         id: "reasoning".to_owned(),
         summary: vec!["retained needle  text with exact spacing".to_owned()],
         content: Vec::new(),
     };
     let current = Turn {
         id: "turn".to_owned(),
-        items: vec![call, reasoning],
+        root_turn_id: None,
+        items: vec![
+            codex_app_server_protocol::ThreadItem::untimed(call),
+            codex_app_server_protocol::ThreadItem::untimed(reasoning),
+        ],
         items_view: TurnItemsView::Full,
         status: TurnStatus::Completed,
         error: None,
@@ -390,7 +395,7 @@ fn folding_a_reasoning_only_page_retains_its_find_and_copy_revision() {
         thread_items_to_transcript_cells(
             /*thread_id*/ None,
             &codex_utils_absolute_path::AbsolutePathBuf::current_dir().unwrap(),
-            items.iter().cloned(),
+            items.iter().map(|item| item.payload.clone()),
             RawReasoningVisibility::Hidden,
             /*config*/ None,
         )

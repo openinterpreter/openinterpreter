@@ -1,3 +1,5 @@
+//! Filesystem RPCs on the app-server host, usable by sessions and background requests.
+
 use super::AppServerSession;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -19,12 +21,27 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use uuid::Uuid;
 
 impl AppServerSession {
-    pub(crate) async fn fs_create_directory_all_path(
-        &mut self,
-        path: &AppServerPath,
-    ) -> Result<()> {
+    pub(crate) fn file_system(&self) -> AppServerFileSystem {
+        AppServerFileSystem {
+            request_handle: self.request_handle(),
+        }
+    }
+
+    /// Goal attachments must use the app-server host's authorized filesystem RPC.
+    pub(crate) async fn fs_create_directory_all_path(&self, path: &AppServerPath) -> Result<()> {
+        self.file_system().fs_create_directory_all_path(path).await
+    }
+}
+
+pub(crate) struct AppServerFileSystem {
+    pub(crate) request_handle: AppServerRequestHandle,
+}
+
+impl AppServerFileSystem {
+    pub(crate) async fn fs_create_directory_all_path(&self, path: &AppServerPath) -> Result<()> {
         self.request_fs_path::<FsCreateDirectoryResponse>(
             "fs/createDirectory",
             path,
@@ -42,7 +59,7 @@ impl AppServerSession {
     }
 
     pub(crate) async fn fs_write_file_path(
-        &mut self,
+        &self,
         path: &AppServerPath,
         bytes: Vec<u8>,
     ) -> Result<()> {
@@ -63,7 +80,7 @@ impl AppServerSession {
         .map(drop)
     }
 
-    pub(crate) async fn fs_read_file_path(&mut self, path: &AppServerPath) -> Result<Vec<u8>> {
+    pub(crate) async fn fs_read_file_path(&self, path: &AppServerPath) -> Result<Vec<u8>> {
         let response: FsReadFileResponse = self
             .request_fs_path(
                 "fs/readFile",
@@ -80,7 +97,7 @@ impl AppServerSession {
             .wrap_err("fs/readFile returned invalid base64 data")
     }
 
-    pub(crate) async fn fs_remove_path(&mut self, path: &AppServerPath) -> Result<()> {
+    pub(crate) async fn fs_remove_path(&self, path: &AppServerPath) -> Result<()> {
         self.request_fs_path::<FsRemoveResponse>(
             "fs/remove",
             path,
@@ -99,14 +116,17 @@ impl AppServerSession {
     }
 
     async fn request_fs_path<T: DeserializeOwned>(
-        &mut self,
+        &self,
         method: &str,
         path: &AppServerPath,
         local_request: impl FnOnce(RequestId, AbsolutePathBuf) -> ClientRequest,
         remote_params: impl FnOnce() -> serde_json::Value,
     ) -> Result<T> {
-        let request_id = self.next_request_id();
-        match self.request_handle() {
+        let request_id = RequestId::String(format!("tui-fs-{}", Uuid::new_v4()));
+        match &self.request_handle {
+            AppServerRequestHandle::Cloud(_) => Err(color_eyre::eyre::eyre!(
+                "{method} is unavailable for this backend"
+            )),
             AppServerRequestHandle::Remote(handle) => {
                 let response = handle
                     .request_json_rpc(JSONRPCRequest {
@@ -125,7 +145,7 @@ impl AppServerSession {
             AppServerRequestHandle::InProcess(_) => {
                 let path = AbsolutePathBuf::from_absolute_path_checked(path.as_str())
                     .wrap_err_with(|| format!("invalid local app-server fs path {path}"))?;
-                self.client
+                self.request_handle
                     .request_typed(local_request(request_id, path))
                     .await
                     .wrap_err_with(|| format!("{method} failed in TUI"))

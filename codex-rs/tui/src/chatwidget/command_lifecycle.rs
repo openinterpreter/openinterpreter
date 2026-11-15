@@ -18,8 +18,12 @@ impl ChatWidget {
         self.restore_reasoning_status_header();
     }
 
-    pub(super) fn on_command_execution_started(&mut self, item: ThreadItem) {
-        let ThreadItem::CommandExecution {
+    pub(super) fn on_command_execution_started(
+        &mut self,
+        item: ThreadItemPayload,
+        render_source: ThreadItemRenderSource,
+    ) {
+        let ThreadItemPayload::CommandExecution {
             id,
             command,
             process_id,
@@ -33,7 +37,7 @@ impl ChatWidget {
         let (_command, parsed_cmd) = command_execution_command_and_parsed(command, command_actions);
         self.flush_answer_stream_with_separator();
         if is_unified_exec_source(*source) {
-            if *source == ExecCommandSource::UnifiedExecStartup {
+            if *source == ExecCommandSource::UnifiedExecStartup && !render_source.is_replay() {
                 self.track_unified_exec_process_begin(id, process_id.as_deref(), command);
             }
             if !self.bottom_pane.is_task_running() {
@@ -132,8 +136,8 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn on_command_execution_completed(&mut self, item: ThreadItem) {
-        let ThreadItem::CommandExecution {
+    pub(super) fn on_command_execution_completed(&mut self, item: ThreadItemPayload) {
+        let ThreadItemPayload::CommandExecution {
             id,
             process_id,
             source,
@@ -191,11 +195,55 @@ impl ChatWidget {
         self.sync_unified_exec_footer();
     }
 
+    pub(super) fn clear_background_terminals(&mut self) {
+        self.pending_terminal_restore = None;
+        self.unified_exec_processes.clear();
+        self.sync_unified_exec_footer();
+    }
+
+    pub(crate) fn begin_background_terminal_restore(&mut self) -> uuid::Uuid {
+        let request_id = uuid::Uuid::new_v4();
+        self.pending_terminal_restore = Some((request_id, HashSet::new()));
+        request_id
+    }
+
+    pub(crate) fn restore_background_terminals(
+        &mut self,
+        request_id: uuid::Uuid,
+        terminals: Vec<codex_app_server_protocol::ThreadBackgroundTerminal>,
+    ) {
+        let Some((_, exited)) = self
+            .pending_terminal_restore
+            .take_if(|(id, _)| *id == request_id)
+        else {
+            return;
+        };
+        for terminal in terminals {
+            if !exited.contains(&terminal.item_id)
+                && !self
+                    .unified_exec_processes
+                    .iter()
+                    .any(|process| process.key == terminal.process_id)
+            {
+                self.unified_exec_processes.push(UnifiedExecProcessSummary {
+                    key: terminal.process_id,
+                    call_id: terminal.item_id,
+                    command_display: terminal.command,
+                    recent_chunks: Vec::new(),
+                });
+            }
+        }
+        self.sync_unified_exec_footer();
+    }
+
     pub(super) fn track_unified_exec_process_end(
         &mut self,
         call_id: &str,
         process_id: Option<&str>,
     ) {
+        if let Some((_, exited)) = &mut self.pending_terminal_restore {
+            exited.insert(call_id.to_owned());
+        }
         let key = process_id.unwrap_or(call_id);
         let before = self.unified_exec_processes.len();
         self.unified_exec_processes
@@ -240,8 +288,8 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn handle_command_execution_started_now(&mut self, item: ThreadItem) {
-        let ThreadItem::CommandExecution {
+    pub(crate) fn handle_command_execution_started_now(&mut self, item: ThreadItemPayload) {
+        let ThreadItemPayload::CommandExecution {
             id,
             command,
             source,
@@ -319,7 +367,7 @@ impl ChatWidget {
     /// standalone history entry instead of replacing or flushing the unrelated active exploring
     /// cell. If this method treated every unknown end as "complete the active cell", the UI could
     /// merge unrelated commands and hide still-running exploring work.
-    pub(crate) fn handle_command_execution_completed_now(&mut self, item: ThreadItem) {
+    pub(crate) fn handle_command_execution_completed_now(&mut self, item: ThreadItemPayload) {
         enum ExecEndTarget {
             // Normal case: the active exec cell already tracks this call id.
             ActiveTracked,
@@ -330,7 +378,7 @@ impl ChatWidget {
             NewCell,
         }
 
-        let ThreadItem::CommandExecution {
+        let ThreadItemPayload::CommandExecution {
             id,
             command,
             process_id: _,
@@ -351,13 +399,6 @@ impl ChatWidget {
             .map(codex_app_server_protocol::CommandAction::into_core)
             .collect();
         let duration = Duration::from_millis(duration_ms.unwrap_or_default().max(0) as u64);
-        let exit_code = if status == codex_app_server_protocol::CommandExecutionStatus::Completed {
-            exit_code.unwrap_or_default()
-        } else {
-            exit_code.filter(|code| *code != 0).unwrap_or(1)
-        };
-        let aggregated_output = aggregated_output.unwrap_or_default();
-
         let running = self.running_commands.remove(&id);
         if self.suppressed_exec_calls.remove(&id) {
             return;
@@ -367,8 +408,6 @@ impl ChatWidget {
             None => (event_command, event_parsed, source),
         };
         let parsed = self.annotate_skill_reads_in_parsed_cmd(parsed);
-        let is_unified_exec_interaction =
-            matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let is_user_shell = source == ExecCommandSource::UserShell;
         // Completion-only replay has no begin event to join adjacent exploration. Extend only
         // a finished, compatible group; an unrelated running group must retain orphan routing.
@@ -410,11 +449,7 @@ impl ChatWidget {
             None => ExecEndTarget::NewCell,
         };
 
-        let output = if is_unified_exec_interaction {
-            CommandOutput::new(exit_code, String::new())
-        } else {
-            CommandOutput::new(exit_code, aggregated_output)
-        };
+        let output = CommandOutput::from_execution(status, exit_code, source, aggregated_output);
 
         match end_target {
             ExecEndTarget::ActiveTracked => {

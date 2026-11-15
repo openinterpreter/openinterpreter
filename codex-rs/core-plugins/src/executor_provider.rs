@@ -3,8 +3,10 @@
 
 use crate::PluginProvider;
 use crate::manifest::parse_plugin_manifest_uri;
+use codex_exec_server::CapabilityRootDiscovery;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_plugin::ResolvedPlugin;
@@ -14,13 +16,19 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
 use codex_utils_plugins::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
 
+const MAX_CONCURRENT_MANIFEST_PROBES: usize = 256;
+
 /// Failure to resolve an environment-owned capability root as a plugin package.
 #[derive(Debug, Error)]
 pub enum ExecutorPluginProviderError {
+    #[error("discovery failed for selected capability root `{root_id}`")]
+    DiscoveryFailed { root_id: String },
     #[error(
         "selected capability root `{root_id}` references unavailable environment `{environment_id}`"
     )]
@@ -82,6 +90,13 @@ pub struct ExecutorPluginProvider {
     environment_manager: Arc<EnvironmentManager>,
 }
 
+/// Ownership of a selected root, independently of whether its manifest can be parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginRootOwnership {
+    Plugin,
+    Standalone,
+}
+
 /// A resolved plugin paired with the concrete filesystem used to read it.
 #[derive(Clone)]
 pub struct ResolvedExecutorPlugin {
@@ -107,6 +122,62 @@ impl ExecutorPluginProvider {
         Self {
             environment_manager,
         }
+    }
+
+    /// Classifies ownership before capability parsing. Failed discovery or metadata
+    /// access returns an error, not evidence that a root is standalone.
+    pub async fn root_ownership(
+        &self,
+        selected_root: &SelectedCapabilityRoot,
+        discovery: Option<&CapabilityRootDiscovery>,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> Result<PluginRootOwnership, ExecutorPluginProviderError> {
+        let CapabilityRootLocation::Environment {
+            environment_id,
+            path,
+        } = &selected_root.location;
+        if let Some(discovery) = discovery {
+            if discovery.error.is_some() {
+                return Err(ExecutorPluginProviderError::DiscoveryFailed {
+                    root_id: selected_root.id.clone(),
+                });
+            }
+            if discovery.plugin.is_some()
+                || discovery.namespace_manifests.iter().any(|manifest| {
+                    manifest
+                        .path
+                        .parent()
+                        .and_then(|directory| directory.parent())
+                        .is_some_and(|plugin_root| path.starts_with(&plugin_root))
+                })
+            {
+                return Ok(PluginRootOwnership::Plugin);
+            }
+        }
+        let environment = self
+            .environment_manager
+            .get_environment(environment_id)
+            .ok_or_else(|| ExecutorPluginProviderError::UnavailableEnvironment {
+                root_id: selected_root.id.clone(),
+                environment_id: environment_id.clone(),
+            })?;
+        let file_system = environment.get_filesystem();
+        // Warning-free discovery can still omit hidden ancestor manifests.
+        let manifest = find_manifest(
+            selected_root,
+            std::iter::successors(Some(path.clone()), PathUri::parent),
+            file_system.as_ref(),
+            GetMetadataOptions {
+                follow_symlinks: false,
+            },
+            sandbox,
+        )
+        .await?;
+        Ok(if manifest.is_some() {
+            PluginRootOwnership::Plugin
+        } else {
+            PluginRootOwnership::Standalone
+        })
     }
 
     /// Resolves a plugin and retains the exact filesystem used for package access.
@@ -168,40 +239,15 @@ async fn resolve_plugin_root(
         });
     }
 
-    let mut manifest_path = None;
-    for relative_path in DISCOVERABLE_PLUGIN_MANIFEST_PATHS {
-        let candidate_uri = plugin_root.join(relative_path).map_err(|source| {
-            ExecutorPluginProviderError::InvalidManifestPath {
-                root_id: root_id.clone(),
-                root: plugin_root.clone(),
-                relative_path,
-                source,
-            }
-        })?;
-        match file_system
-            .get_metadata(
-                &candidate_uri,
-                GetMetadataOptions::default(),
-                /*sandbox*/ None,
-            )
-            .await
-        {
-            Ok(metadata) if metadata.is_file => {
-                manifest_path = Some(candidate_uri);
-                break;
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ExecutorPluginProviderError::InspectManifest {
-                    root_id: root_id.clone(),
-                    path: candidate_uri,
-                    source,
-                });
-            }
-        }
-    }
-    let Some(manifest_uri) = manifest_path else {
+    let Some(manifest_uri) = find_manifest(
+        selected_root,
+        std::iter::once(plugin_root.clone()),
+        file_system,
+        GetMetadataOptions::default(),
+        /*sandbox*/ None,
+    )
+    .await?
+    else {
         return Ok(None);
     };
     let contents = file_system
@@ -238,6 +284,104 @@ async fn resolve_plugin_root(
     })?;
 
     Ok(Some(plugin))
+}
+
+async fn find_manifest(
+    selected_root: &SelectedCapabilityRoot,
+    plugin_roots: impl Iterator<Item = PathUri> + Send,
+    file_system: &dyn ExecutorFileSystem,
+    metadata_options: GetMetadataOptions,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<Option<PathUri>, ExecutorPluginProviderError> {
+    let root_id = &selected_root.id;
+    let roots = futures::stream::iter(plugin_roots)
+        .map(|root| async move {
+            // Keep lexical ancestors, but resolve aliases before no-follow marker probes.
+            // Native anchors need no resolution; `file:///C:` converts to a drive-relative path.
+            if metadata_options.follow_symlinks || root.parent().is_none() {
+                Ok(root)
+            } else {
+                file_system
+                    .canonicalize(&root, sandbox)
+                    .await
+                    .map_err(|source| ExecutorPluginProviderError::InspectRoot {
+                        root_id: root_id.clone(),
+                        path: root.clone(),
+                        source,
+                    })
+            }
+        })
+        .buffered(MAX_CONCURRENT_MANIFEST_PROBES);
+    let probes = roots
+        .map_ok(|root| {
+            futures::stream::iter(
+                (0..DISCOVERABLE_PLUGIN_MANIFEST_PATHS.len())
+                    .map(move |index| Ok((root.clone(), index))),
+            )
+        })
+        .try_flatten();
+    // Pipeline remote metadata calls while consuming results in ancestor/manifest priority order.
+    let mut results = probes
+        .map(|probe| async move {
+            let (root, marker_index) = probe?;
+            let relative_path = DISCOVERABLE_PLUGIN_MANIFEST_PATHS[marker_index];
+            let candidate_uri = root.join(relative_path).map_err(|source| {
+                ExecutorPluginProviderError::InvalidManifestPath {
+                    root_id: root_id.clone(),
+                    root,
+                    relative_path,
+                    source,
+                }
+            })?;
+            match file_system
+                .get_metadata(&candidate_uri, metadata_options, sandbox)
+                .await
+            {
+                Ok(metadata)
+                    if metadata.is_file
+                        || (!metadata_options.follow_symlinks && metadata.is_symlink) =>
+                {
+                    return Ok(Some(candidate_uri));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(ExecutorPluginProviderError::InspectManifest {
+                        root_id: root_id.clone(),
+                        path: candidate_uri,
+                        source,
+                    });
+                }
+            }
+            // A symlinked marker directory can hide its manifest, including in an ancestor.
+            if !metadata_options.follow_symlinks
+                && let Some(directory) = candidate_uri.parent()
+            {
+                match file_system
+                    .get_metadata(&directory, metadata_options, sandbox)
+                    .await
+                {
+                    Ok(metadata) if metadata.is_symlink => return Ok(Some(candidate_uri)),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(ExecutorPluginProviderError::InspectManifest {
+                            root_id: root_id.clone(),
+                            path: directory,
+                            source,
+                        });
+                    }
+                }
+            }
+            Ok(None)
+        })
+        .buffered(MAX_CONCURRENT_MANIFEST_PROBES);
+    while let Some(result) = results.next().await {
+        if let Some(manifest) = result? {
+            return Ok(Some(manifest));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

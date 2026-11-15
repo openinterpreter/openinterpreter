@@ -9,39 +9,39 @@ source of truth for every field is the generated schema in
 
 ## Top-Level Keys
 
-| Key | Values | Purpose |
-| --- | ------ | ------- |
-| `model` | string | Default model id. |
-| `model_provider` | provider id | Provider entry used for `model`. |
-| `model_reasoning_effort` | `minimal`, `low`, `medium`, `high`, `xhigh` | Reasoning budget for supported models. |
-| `model_reasoning_summary` | `auto`, `concise`, `detailed`, `none` | How much reasoning summary to show. |
-| `model_verbosity` | `low`, `medium`, `high` | Verbosity for supported Responses API models. |
-| `approval_policy` | `untrusted`, `on-request`, `never` | When to ask before running commands. |
-| `approvals_reviewer` | `user`, `auto_review` | Who reviews eligible approval prompts. |
-| `sandbox_mode` | `read-only`, `workspace-write`, `danger-full-access` | Local command sandbox. |
-| `default_permissions` | profile name | Selects a beta permissions profile. |
-| `personality` | `friendly`, `pragmatic`, `none` | TUI communication style. |
-| `web_search` | `cached`, `live`, `disabled` | Web search behavior. |
-| `log_dir` | path | Directory for logs. |
-| `file_opener` | `vscode`, `vscode-insiders`, `windsurf`, `cursor`, `none` | Editor used for file citations. |
-| `harness` | string | Open Interpreter harness compatibility mode. |
-| `harness_guidance` | boolean | Allow OI guidance inside harness mode. |
-| `check_for_update_on_startup` | boolean | Enable managed standalone update checks. |
+| Key                           | Values                                                    | Purpose                                       |
+| ----------------------------- | --------------------------------------------------------- | --------------------------------------------- |
+| `model`                       | string                                                    | Default model id.                             |
+| `model_provider`              | provider id                                               | Provider entry used for `model`.              |
+| `model_reasoning_effort`      | `minimal`, `low`, `medium`, `high`, `xhigh`               | Reasoning budget for supported models.        |
+| `model_reasoning_summary`     | `auto`, `concise`, `detailed`, `none`                     | How much reasoning summary to show.           |
+| `model_verbosity`             | `low`, `medium`, `high`                                   | Verbosity for supported Responses API models. |
+| `approval_policy`             | `untrusted`, `on-request`, `never`                        | When to ask before running commands.          |
+| `approvals_reviewer`          | `user`, `auto_review`                                     | Who reviews eligible approval prompts.        |
+| `sandbox_mode`                | `read-only`, `workspace-write`, `danger-full-access`      | Local command sandbox.                        |
+| `default_permissions`         | profile name                                              | Selects a beta permissions profile.           |
+| `personality`                 | `friendly`, `pragmatic`, `none`                           | TUI communication style.                      |
+| `web_search`                  | `cached`, `live`, `disabled`                              | Web search behavior.                          |
+| `log_dir`                     | path                                                      | Directory for logs.                           |
+| `file_opener`                 | `vscode`, `vscode-insiders`, `windsurf`, `cursor`, `none` | Editor used for file citations.               |
+| `harness`                     | string                                                    | Open Interpreter harness compatibility mode.  |
+| `harness_guidance`            | boolean                                                   | Allow OI guidance inside harness mode.        |
+| `check_for_update_on_startup` | boolean                                                   | Enable managed standalone update checks.      |
 
 ## Feature Flags
 
-| Key | Default posture | Purpose |
-| --- | --------------- | ------- |
-| `features.apps` | off | App/connectors surface. |
-| `features.plugins` | off | Plugin bundles. |
-| `features.hooks` | on | Lifecycle hooks. |
-| `features.memories` | off | Persistent memory generation/use. |
-| `features.multi_agent` | on | Subagent tools and `/agent`. |
-| `features.shell_tool` | on | Built-in shell command tool. |
-| `features.shell_snapshot` | on | Shell environment snapshotting. |
-| `features.unified_exec` | on except where unsupported | PTY-backed exec tool. |
-| `features.undo` | off | Undo support where available. |
-| `features.network_proxy` | off | Sandboxed network proxy controls. |
+| Key                       | Default posture             | Purpose                           |
+| ------------------------- | --------------------------- | --------------------------------- |
+| `features.apps`           | off                         | App/connectors surface.           |
+| `features.plugins`        | off                         | Plugin bundles.                   |
+| `features.hooks`          | on                          | Lifecycle hooks.                  |
+| `features.memories`       | off                         | Persistent memory generation/use. |
+| `features.multi_agent`    | on                          | Subagent tools and `/agent`.      |
+| `features.shell_tool`     | on                          | Built-in shell command tool.      |
+| `features.shell_snapshot` | on                          | Shell environment snapshotting.   |
+| `features.unified_exec`   | on except where unsupported | PTY-backed exec tool.             |
+| `features.undo`           | off                         | Undo support where available.     |
+| `features.network_proxy`  | off                         | Sandboxed network proxy controls. |
 
 ## Provider Tables
 

@@ -17,6 +17,23 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 
 impl McpToolCallCell {
+    pub(super) fn compact_tool_name(&self) -> String {
+        let mut label = self
+            .invocation
+            .arguments
+            .as_ref()
+            .filter(|_| self.result_kind() == McpResultKind::NodeRepl)
+            .and_then(|arguments| arguments.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| format!("{}.{}", self.invocation.server, self.invocation.tool));
+        if let Some(environment_id) = &self.invocation.environment_id {
+            label.push_str(&format!(" (environment {environment_id})"));
+        }
+        label
+    }
+
     pub(super) fn compact_mcp_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let status = self.success();
         let (marker, verb) = match status {
@@ -32,16 +49,7 @@ impl McpToolCallCell {
                 "Calling",
             ),
         };
-        let title = self
-            .invocation
-            .arguments
-            .as_ref()
-            .filter(|_| self.result_kind() == McpResultKind::NodeRepl)
-            .and_then(|arguments| arguments.get("title"))
-            .and_then(serde_json::Value::as_str)
-            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| format!("{}.{}", self.invocation.server, self.invocation.tool));
+        let title = self.compact_tool_name();
         let mut lines = vec![clipped_line(
             Line::from(vec![
                 marker,

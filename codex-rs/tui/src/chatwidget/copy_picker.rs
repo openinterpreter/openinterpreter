@@ -69,7 +69,7 @@ impl ChatWidget {
             );
         }
         if choices.is_empty() {
-            self.copy_last_agent_markdown();
+            self.add_error_message("No agent response to copy".into());
             return;
         }
 
@@ -87,7 +87,7 @@ impl ChatWidget {
                         tx.send(AppEvent::CopySelection {
                             text: Arc::clone(&text),
                             label: label.clone(),
-                            format,
+                            format: format.clone(),
                         });
                     })],
                     dismiss_on_select: true,

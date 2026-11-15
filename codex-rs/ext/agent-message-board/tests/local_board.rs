@@ -635,6 +635,8 @@ fn board_tool_call(name: &str, args: serde_json::Value) -> codex_tools::ToolCall
         source: codex_tools::ToolCallSource::Direct,
         conversation_history: codex_tools::ConversationHistory::default(),
         turn_item_emitter: Arc::new(codex_tools::NoopTurnItemEmitter),
+        attachment_store: Arc::new(codex_attachment_store::InlineAttachmentStore),
+        ephemeral: false,
         environments: vec![],
         payload: codex_tools::ToolPayload::Function {
             arguments: args.to_string(),

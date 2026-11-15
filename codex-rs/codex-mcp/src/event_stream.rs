@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::auth::McpAuthProvider;
 use anyhow::Result;
 use anyhow::bail;
-use codex_api::SharedAuthProvider;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_exec_server::Environment;
@@ -35,7 +35,7 @@ pub(crate) struct EventStreamConnectionSettings {
     pub oauth_refresh_mode: McpOAuthRefreshMode,
     pub runtime_context: McpRuntimeContext,
     pub resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
-    pub auth_provider: Option<SharedAuthProvider>,
+    pub auth_provider: Option<McpAuthProvider>,
     pub auth_manager: Option<Arc<AuthManager>>,
     pub auth: Option<CodexAuth>,
     pub protocol_mode: McpProtocolMode,
@@ -79,7 +79,8 @@ impl McpEventStreamOpener {
                 let startup_timeout = connection.server.config().startup_timeout_sec
                     .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
                 let client = Arc::new(tokio::time::timeout(startup_timeout, make_rmcp_client(
-                    CODEX_APPS_MCP_SERVER_NAME,
+                    /*ema_auth*/ None,
+                    &crate::McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
                     connection.server.clone(),
                     connection.store_mode,
                     connection.keyring_backend_kind,

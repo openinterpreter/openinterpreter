@@ -14,6 +14,10 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-core-plugin-common = { workspace = true }
+codex-api = { workspace = true }
+futures = { workspace = true }
+codex-guardian-context = { workspace = true }
 codex-history = { workspace = true }
 codex-config = { workspace = true }
 codex-context-fragments = { workspace = true }
@@ -25,6 +29,7 @@ codex-tools = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

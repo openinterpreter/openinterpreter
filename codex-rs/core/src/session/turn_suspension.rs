@@ -1,10 +1,12 @@
 use super::handlers;
 use super::session::Session;
 use crate::state::TaskKind;
+use crate::thread_manager::AgentTreeShutdownFailure;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::turn_input::SuspendTurnOutcome;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,19 +24,6 @@ pub(super) async fn suspend_turn_and_shutdown(
         if task.kind != TaskKind::Regular {
             return Ok(SuspendTurnOutcome::UnsupportedTask);
         }
-    }
-
-    // This is a snapshot of currently loaded descendants, not a spawn-admission seal.
-    // Previously closed descendants and concurrent future spawns remain best effort.
-    if session
-        .services
-        .agent_control
-        .list_live_agent_subtree_thread_ids(session.thread_id)
-        .await?
-        .len()
-        > 1
-    {
-        return Ok(SuspendTurnOutcome::HasLiveDescendants);
     }
 
     let live_thread = session
@@ -67,6 +56,8 @@ pub(super) async fn suspend_turn_and_shutdown(
         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
     })?;
     let turn_id = task.turn_context.sub_id.clone();
+    // A suspended task emits no terminal outcome.
+    drop(task.outcome_handoff);
     // Normal shutdown records a terminal turn event, preventing another worker from
     // recovering this turn under its original ID. Cancel the task without that event.
     task.cancellation_token.cancel();
@@ -93,9 +84,22 @@ pub(super) async fn suspend_turn_and_shutdown(
             let _ = task_handle.await;
         }
     }
-    // Pending accepted input and interactive waiters live only in this process. Handoff
-    // intentionally drops that state; persisting or replaying it needs a separate protocol.
+    // Save any initial input the task had not claimed so a new worker can recover the turn.
+    let recorded = session
+        .record_pending_initial_input(
+            &task.turn_context,
+            &turn.turn_state,
+            task.pending_initial_input,
+            /*abort_reason*/ None,
+        )
+        .await;
+    // Other pending input and interactive waiters remain best effort across handoff.
     session.input_queue.clear_pending(&turn).await;
+
+    // The root task has stopped without a terminal event. Fence new starts and stop every
+    // other local session, even if the suspension caller disconnects during cleanup.
+    // The host owns the separate tree-cleanup wait and any persistence-writer fencing.
+    session.services.local_agent_runtime.request_shutdown();
 
     // Stop all producers before flushing their final history and closing its writer.
     // If either persistence step fails, do not report success: the current worker
@@ -116,4 +120,40 @@ pub(super) async fn suspend_turn_and_shutdown(
         })
         .await;
     Ok(SuspendTurnOutcome::Suspended { turn_id })
+}
+
+pub(super) async fn stop_tree_member(session: &Arc<Session>) -> bool {
+    let runtime = &session.services.local_agent_runtime;
+    let submission_id = super::new_submission_id();
+    if let Some(root) = runtime.suspension_root()
+        && session.live_thread().is_some()
+        && (root == session.thread_id
+            || session.multi_agent_version() == Some(MultiAgentVersion::V2)
+                && session
+                    .state
+                    .lock()
+                    .await
+                    .session_configuration
+                    .session_source
+                    .get_agent_path()
+                    .is_some())
+    {
+        match suspend_turn_and_shutdown(session, submission_id.clone()).await {
+            Ok(SuspendTurnOutcome::Suspended { turn_id }) => {
+                runtime.record_suspended_turn(session.thread_id, turn_id);
+                return true;
+            }
+            Ok(SuspendTurnOutcome::NotActive | SuspendTurnOutcome::UnsupportedTask) => {}
+            Err(error) => {
+                runtime.record_shutdown_failure(AgentTreeShutdownFailure::operation_failed(
+                    "tree_suspension",
+                    "suspend_regular_turn",
+                    Some(session.thread_id),
+                    "suspension_failed",
+                ));
+                warn!(thread_id = %session.thread_id, %error, "failed to suspend agent turn");
+            }
+        }
+    }
+    handlers::shutdown(session, submission_id).await
 }

@@ -9,7 +9,9 @@ use super::StatusLineItem;
 use super::TerminalTitleItem;
 use super::ThreadId;
 use crate::status::StatusHistoryHandle;
+use crate::status::thread_cost_micros;
 use codex_app_server_protocol::ThreadUsage;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ThreadUsageOutcome {
@@ -38,8 +40,7 @@ struct SelectedThreadUsage {
 pub(super) struct ThreadUsageState {
     thread_id: Option<ThreadId>,
     estimate: Option<ThreadUsage>,
-    pending_request_id: Option<u64>,
-    next_request_id: u64,
+    pending_request_id: Option<Uuid>,
     requested: bool,
     feature_disabled: bool,
     status_history_handles: Vec<StatusHistoryHandle>,
@@ -49,18 +50,14 @@ pub(super) struct ThreadUsageState {
     settlement_attempts: usize,
     settlement_baseline_credits_micros: Option<i64>,
     settlement_baseline_usd_micros: Option<i64>,
-    settlement_request_id: Option<u64>,
+    settlement_request_id: Option<Uuid>,
     settlement_refresh_due_at: Option<Instant>,
     pub(super) replaying_turn_completion: bool,
 }
 
 impl ChatWidget {
     pub(super) fn clear_thread_usage_state(&mut self) {
-        let next_request_id = self.thread_usage.next_request_id;
-        self.thread_usage = ThreadUsageState {
-            next_request_id,
-            ..ThreadUsageState::default()
-        };
+        self.thread_usage = ThreadUsageState::default();
     }
 
     pub(super) fn ensure_thread_usage_requested(&mut self) {
@@ -98,7 +95,7 @@ impl ChatWidget {
             .thread_usage
             .estimate
             .as_ref()
-            .and_then(|estimate| estimate.estimated_usage_usd_micros);
+            .and_then(|estimate| thread_cost_micros(estimate, self.plan_type));
         self.schedule_next_thread_usage_settlement();
         self.request_thread_usage();
     }
@@ -177,16 +174,19 @@ impl ChatWidget {
         self.thread_usage.settlement_refresh_due_at = None;
     }
 
+    pub(crate) fn is_pending_thread_usage(&self, thread_id: ThreadId, request_id: Uuid) -> bool {
+        self.thread_id == Some(thread_id)
+            && self.thread_usage.thread_id == Some(thread_id)
+            && self.thread_usage.pending_request_id == Some(request_id)
+    }
+
     pub(crate) fn finish_thread_usage_refresh(
         &mut self,
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
         result: Result<ThreadUsageOutcome, String>,
     ) -> bool {
-        if self.thread_id != Some(thread_id)
-            || self.thread_usage.thread_id != Some(thread_id)
-            || self.thread_usage.pending_request_id != Some(request_id)
-        {
+        if !self.is_pending_thread_usage(thread_id, request_id) {
             return false;
         }
 
@@ -252,7 +252,7 @@ impl ChatWidget {
                     usage.groups.clone_from(&previous_usage.groups);
                 }
                 let estimated_credits_micros = usage.estimated_usage_credits_micros;
-                let estimated_usd_micros = usage.estimated_usage_usd_micros;
+                let estimated_usd_micros = thread_cost_micros(&usage, self.plan_type);
                 self.thread_usage.estimate = Some(usage);
                 if let Some(baseline) = self.thread_usage.settlement_baseline_credits_micros {
                     if !post_turn_request {
@@ -268,10 +268,10 @@ impl ChatWidget {
                     } else {
                         let mut selected = self.selected_thread_usage();
                         if !self.thread_usage.status_history_handles.is_empty() {
-                            selected.credits = true;
-                            selected.estimated_cost |=
-                                self.thread_usage.settlement_baseline_usd_micros.is_some()
-                                    || estimated_usd_micros.is_some();
+                            selected.credits = self.plan_type != Some(PlanType::Ent26);
+                            selected.estimated_cost |= self.plan_type == Some(PlanType::Ent26)
+                                || self.thread_usage.settlement_baseline_usd_micros.is_some()
+                                || estimated_usd_micros.is_some();
                         }
                         let credits_settled =
                             !selected.credits || estimated_credits_micros > baseline;
@@ -323,6 +323,16 @@ impl ChatWidget {
         true
     }
 
+    pub(super) fn status_line_thread_credits_micros(&self) -> Option<i64> {
+        self.estimated_thread_usage()
+            .filter(|_| self.plan_type != Some(PlanType::Ent26))
+            .map(|usage| usage.estimated_usage_credits_micros)
+    }
+
+    pub(super) fn status_line_thread_cost_micros(&self) -> Option<i64> {
+        thread_cost_micros(self.estimated_thread_usage()?, self.plan_type)
+    }
+
     pub(super) fn estimated_thread_usage(&self) -> Option<&ThreadUsage> {
         self.thread_usage.estimate.as_ref()
     }
@@ -335,9 +345,7 @@ impl ChatWidget {
             return;
         }
 
-        let request_id = self.thread_usage.next_request_id;
-        self.thread_usage.next_request_id =
-            self.thread_usage.next_request_id.wrapping_add(/*rhs*/ 1);
+        let request_id = Uuid::new_v4();
         self.thread_usage.pending_request_id = Some(request_id);
         self.thread_usage.requested = true;
         self.thread_usage.thread_id = Some(thread_id);
@@ -361,7 +369,8 @@ impl ChatWidget {
             && matches!(
                 self.plan_type,
                 Some(
-                    PlanType::Business
+                    PlanType::Ent26
+                        | PlanType::Business
                         | PlanType::EnterpriseCbpUsageBased
                         | PlanType::EnterpriseCbpAutomation
                 )
@@ -389,6 +398,7 @@ impl ChatWidget {
                 Ok(_) | Err(_) => {}
             }
         }
+        selected.credits &= self.plan_type != Some(PlanType::Ent26);
         selected
     }
 

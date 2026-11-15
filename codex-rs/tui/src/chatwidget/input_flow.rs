@@ -60,7 +60,7 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
                 let should_submit_now = self.is_session_configured()
                     && !self.is_plan_streaming_in_tui()
-                    && !self.input_queue.suppress_queue_autosend
+                    && !self.input_queue.submissions_paused()
                     && !self.input_queue.rate_limit_recovery_pending
                     && (!self.input_queue.user_turn_pending_start
                         || self.turn_lifecycle.agent_turn_running);
@@ -77,7 +77,12 @@ impl ChatWidget {
                     self.reasoning_header = None;
                     self.reasoning_summary_parts.clear();
                     self.set_status_header(String::from("Working"));
-                    self.submit_user_message(user_message);
+                    self.submit_user_message_with_history_and_shell_escape_policy(
+                        user_message,
+                        UserMessageHistoryRecord::UserMessageText,
+                        ShellEscapePolicy::Allow,
+                        UserMessageSource::DirectEnter,
+                    );
                 } else {
                     self.queue_user_message(user_message);
                 }
@@ -123,6 +128,12 @@ impl ChatWidget {
     }
 
     pub(super) fn on_modal_or_popup_closed(&mut self) {
+        if self.apply_pending_permission_profile() {
+            return;
+        }
+        if self.cancel_pending_permission_profile_selection() {
+            return;
+        }
         if self.input_queue.suppress_queue_autosend {
             self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
         } else {
@@ -168,9 +179,10 @@ impl ChatWidget {
         if self.has_misalignment_policy_violation() {
             return false;
         }
-        let should_run_now = self.is_session_configured()
+        let should_run_now = !self.thread_stream_disconnected
+            && self.is_session_configured()
             && !self.is_user_turn_pending_or_running()
-            && !self.input_queue.suppress_queue_autosend
+            && !self.input_queue.submissions_paused()
             && !self.input_queue.rate_limit_recovery_pending;
         if action != QueuedInputAction::ParseSlash {
             self.empty_state_animation.borrow_mut().dismiss();
@@ -205,7 +217,9 @@ impl ChatWidget {
                 .queued_user_messages
                 .push_back(QueuedUserMessage {
                     user_message,
+                    prepared_images: None,
                     action,
+                    delivery: MessageDelivery::Unsent,
                     pending_pastes,
                     source,
                 });
@@ -233,11 +247,14 @@ impl ChatWidget {
 
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
-        if !self.is_session_configured()
+        if self.thread_stream_disconnected
+            || !self.is_session_configured()
+            || self.fork_in_progress
             || self.has_misalignment_policy_violation()
-            || self.input_queue.suppress_queue_autosend
+            || self.input_queue.submissions_paused()
             || self.input_queue.rate_limit_recovery_pending
             || self.input_queue.recovered_queue
+            || self.input_queue.has_unconfirmed_messages()
         {
             return false;
         }
@@ -249,8 +266,13 @@ impl ChatWidget {
         }
         let mut submitted_follow_up = false;
         while !self.is_user_turn_pending_or_running() {
-            let Some((queued_message, history_record)) = self.pop_next_queued_user_message() else {
+            let Some((mut queued_message, history_record)) = self.pop_next_queued_user_message()
+            else {
                 break;
+            };
+            queued_message.source = match queued_message.source {
+                UserMessageSource::DirectEnter => UserMessageSource::Prompt,
+                source => source,
             };
             match queued_message.action {
                 QueuedInputAction::Plain => {
@@ -268,6 +290,7 @@ impl ChatWidget {
                 QueuedInputAction::Literal => {
                     let QueuedUserMessage {
                         user_message,
+                        prepared_images,
                         pending_pastes,
                         source,
                         ..
@@ -374,9 +397,8 @@ impl ChatWidget {
         mut collaboration_mode: CollaborationModeMask,
     ) {
         if self.blocks_direct_input {
-            self.add_error_message(if self.external_writer_view {
-                "This thread is open elsewhere. Close it there and retry resume to continue."
-                    .to_string()
+            self.add_error_message(if let Some(reason) = self.read_only_thread {
+                reason.message().to_string()
             } else {
                 PARENT_OWNED_INPUT_MESSAGE.to_string()
             });

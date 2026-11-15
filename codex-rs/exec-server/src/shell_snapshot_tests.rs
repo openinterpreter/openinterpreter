@@ -11,10 +11,12 @@ use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 use super::CapturePurpose;
+use super::MAX_FILE_SNAPSHOT_BYTES;
 use super::MAX_SNAPSHOT_ATTEMPTS;
 use super::MAX_SNAPSHOT_BYTES;
 use super::SNAPSHOT_RETRY_BACKOFF;
 use super::ShellSnapshotCache;
+use super::SnapshotReplay;
 use super::parse_snapshot;
 use crate::process_sandbox::prepare_exec_request_with_telemetry;
 use crate::process_telemetry::ProcessTelemetry;
@@ -85,6 +87,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
     )?;
     let telemetry = ExecServerTelemetry::new(metrics.clone());
 
+    let mut expected_commands = BTreeMap::new();
     for attempt in 1..=5 {
         if attempt == recovery_attempt {
             std::fs::write(
@@ -98,6 +101,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
             &ProcessTelemetry::default(),
         )
         .await
@@ -108,6 +112,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
             &ProcessTelemetry::default(),
         )
         .await
@@ -118,22 +123,38 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
         } else {
             CapturePurpose::Execution
         };
+        let credential_brokers = codex_network_proxy::RemoteCredentialBrokerCache::default();
         let (first, second) = tokio::join!(
             biased;
-            cache.prepare(&params, &mut prepared, &telemetry, purpose),
-            cache.prepare(&params, &mut concurrent, &telemetry, CapturePurpose::Execution),
+            cache.prepare(&params, &mut prepared, &telemetry, purpose, &credential_brokers),
+            cache.prepare(&params, &mut concurrent, &telemetry, CapturePurpose::Execution, &credential_brokers),
         );
-        if prewarming {
+        let first = if prewarming {
             first.expect_err("prewarm must report failure without caching it");
+            None
         } else {
-            first.expect("capture failure must preserve command fallback");
+            first.expect("capture failure must preserve command fallback")
+        };
+        let second = second.expect("waiting command must complete even when prewarm fails");
+        for (prepared, reader) in [(&mut prepared, first), (&mut concurrent, second)] {
+            if let Some(reader) = reader {
+                let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
+                prepared.command[2] =
+                    prepared.command[2].replace(&format!("/dev/fd/{fd}"), "/dev/fd/SNAPSHOT");
+            }
         }
-        second.expect("waiting command must complete even when prewarm fails");
         assert_eq!(
             (&prepared.command, &prepared.env),
             (&concurrent.command, &concurrent.env)
         );
 
+        let outcome = if concurrent.command != params.argv {
+            "used"
+        } else {
+            "fallback"
+        };
+        *expected_commands.entry(outcome.to_string()).or_insert(0) +=
+            if prewarming { 1 } else { 2 };
         tokio::time::pause();
         if attempt < recovery_attempt || recovery_attempt > MAX_SNAPSHOT_ATTEMPTS {
             cache
@@ -142,9 +163,11 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
                     &mut prepared,
                     &telemetry,
                     CapturePurpose::Execution,
+                    &credential_brokers,
                 )
                 .await
                 .expect("capture must stay cached during backoff");
+            *expected_commands.entry("fallback".to_string()).or_insert(0) += 1;
             assert_eq!(
                 (&prepared.command, &prepared.env),
                 (&params.argv, &params.env)
@@ -166,6 +189,8 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
     let snapshot = metrics.snapshot()?;
     let mut counters = BTreeMap::new();
     let mut durations = BTreeMap::new();
+    let mut commands = BTreeMap::new();
+    let mut waits = BTreeMap::new();
     for metric in snapshot
         .scope_metrics()
         .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
@@ -195,9 +220,41 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
                     durations.insert(tags, point.count());
                 }
             }
+            "codex.shell_snapshot.command" => {
+                let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                    panic!("expected command counter");
+                };
+                for point in sum.data_points() {
+                    let outcome = point
+                        .attributes()
+                        .find(|tag| tag.key.as_str() == "outcome")
+                        .unwrap()
+                        .value
+                        .to_string();
+                    *commands.entry(outcome).or_insert(0) += point.value();
+                }
+            }
+            "codex.shell_snapshot.wait_ms" => {
+                let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                    panic!("expected wait histogram");
+                };
+                for point in histogram.data_points() {
+                    let outcome = point
+                        .attributes()
+                        .find(|tag| tag.key.as_str() == "outcome")
+                        .unwrap()
+                        .value
+                        .to_string();
+                    *waits.entry(outcome).or_insert(0) += point.count();
+                }
+            }
             _ => {}
         }
     }
+    assert_eq!(
+        (commands, waits),
+        (expected_commands.clone(), expected_commands)
+    );
     let mut expected_counters = BTreeMap::new();
     let mut expected_durations = BTreeMap::new();
     let captures = prewarm_fails_first
@@ -240,7 +297,15 @@ fn snapshot_size_limit_counts_state_and_environment_before_filtering() {
         r#set: HashMap::new(),
         include_only: Vec::new(),
     };
-    assert!(parse_snapshot(ShellType::Bash, oversized.as_bytes(), Some(&policy)).is_err());
+    assert!(
+        parse_snapshot(
+            ShellType::Bash,
+            oversized.as_bytes(),
+            Some(&policy),
+            SnapshotReplay::Environment,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -249,13 +314,23 @@ fn snapshot_filters_profile_exports_after_capture() {
         inherit: ShellEnvironmentPolicyInherit::All,
         ignore_default_excludes: false,
         exclude: vec!["PROFILE_DENIED".to_string()],
-        r#set: HashMap::from([("PROFILE_ALLOWED".to_string(), "override".to_string())]),
-        include_only: vec!["PROFILE_*".to_string()],
+        r#set: HashMap::from([
+            ("PROFILE_ALLOWED".to_string(), "override".to_string()),
+            ("CODEX_THREAD_ID".to_string(), "policy-thread".to_string()),
+            ("CODEX_TOOL_CALL_ID".to_string(), "policy-call".to_string()),
+        ]),
+        // Metadata must survive policy filtering so the cache owns its removal.
+        include_only: vec![
+            "PROFILE_*".to_string(),
+            "CODEX_THREAD_ID".to_string(),
+            "CODEX_TOOL_CALL_ID".to_string(),
+        ],
     };
     let snapshot = parse_snapshot(
         ShellType::Bash,
         b"profile \xff noise\n# Snapshot file\nfunction profile_helper() { :; }\n\0alias profile_alias='profile_helper'\n\0PROFILE_DENIED\0export PROFILE_DENIED=denied\n\0NON_UTF8\0export NON_UTF8='\xff'\n\0\0PROFILE_ALLOWED=profile\0PROFILE_DENIED=denied\0PROFILE_SECRET=secret\0PWD=/tmp\0NON_UTF8=\xff\0",
         Some(&policy),
+        SnapshotReplay::Environment,
     )
     .expect("snapshot should parse");
 
@@ -286,6 +361,7 @@ fn snapshot_preserves_profile_exports_with_restrictive_inheritance() {
             ShellType::Bash,
             b"# Snapshot file\n\0\0\0PROFILE_ALLOWED=profile\0SDKROOT=/sdk\0PROFILE_SECRET=secret\0PROFILE_DENIED=denied\0",
             Some(&policy),
+            SnapshotReplay::Environment,
         )
         .expect("snapshot should parse");
 
@@ -318,8 +394,13 @@ fn snapshot_caches_only_unmanaged_proxy_state() {
         ),
     ] {
         let output = format!("# Snapshot file\n\0\0\0{exports}");
-        let snapshot = parse_snapshot(ShellType::Bash, output.as_bytes(), /*env_policy*/ None)
-            .expect("snapshot should parse");
+        let snapshot = parse_snapshot(
+            ShellType::Bash,
+            output.as_bytes(),
+            /*env_policy*/ None,
+            SnapshotReplay::Environment,
+        )
+        .expect("snapshot should parse");
 
         assert_eq!(snapshot.environment, expected);
     }

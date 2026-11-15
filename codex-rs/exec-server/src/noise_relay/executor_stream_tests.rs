@@ -11,7 +11,7 @@ use tokio::time::timeout;
 
 use super::ClosedNoiseVirtualStream;
 use super::spawn_noise_virtual_stream;
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::connection::CHANNEL_CAPACITY;
 use crate::noise_channel::InitiatorHandshake;
 use crate::noise_channel::NoiseChannelIdentity;
@@ -92,7 +92,7 @@ async fn processor_exit_reports_closed_virtual_stream() -> Result<()> {
     let mut stream = spawn_noise_virtual_stream(
         "stream-1".to_string(),
         /*instance_id*/ 7,
-        ConnectionProcessor::new(ExecServerRuntimePaths::new(
+        ConnectionProcessor::new(ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             /*codex_linux_sandbox_exe*/ None,
         )?),

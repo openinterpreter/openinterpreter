@@ -15,9 +15,15 @@
 //! every column's width and reshape all prior rows.  The holdback mechanism
 //! (`table_holdback_state`) detects pipe-table patterns (header + delimiter
 //! pair) in the accumulated source and keeps content from the table header
-//! onward as mutable tail until the stream finalizes. Holdback is enabled for
-//! agent and proposed-plan streams. Lines in `Outside` and `Markdown` fence
-//! contexts are scanned; lines inside non-markdown fences are skipped.
+//! onward as mutable tail until its containing top-level block is stable.
+//! Holdback is enabled for agent and proposed-plan streams. Lines in `Outside`
+//! and `Markdown` fence contexts are scanned; lines inside non-markdown fences
+//! are skipped.
+//!
+//! Transformable fences stay mutable while their containing top-level block is last. Markdown
+//! fences may gain literal delimiters when table rendering is disabled. For Mermaid, the closing fence replaces
+//! source with a diagram, and resizing can replace a diagram that no longer fits with its source.
+//! Once another block starts, the diagram enters scrollback so later prose does not grow the tail.
 //!
 //! Transformable fences stay mutable while their containing top-level block is last. Markdown
 //! fences may gain literal delimiters when table rendering is disabled. For Mermaid, the closing fence replaces
@@ -161,7 +167,6 @@ impl StreamCore {
         {
             let source = self.state.collector.committed_source();
             let committed_source = &source[range];
-            self.holdback_scanner.push_source_chunk(committed_source);
             self.render.append(
                 source,
                 committed_source,
@@ -170,6 +175,8 @@ impl StreamCore {
                 self.render_mode,
                 self.inline_visualization_context.as_ref(),
             );
+            self.holdback_scanner
+                .scan(source, self.render.completed_source_len);
             enqueued = self.sync_stable_queue();
         }
         let preview_changed = self.refresh_preview();
@@ -669,6 +676,34 @@ impl StreamController {
         self.core.has_tail()
     }
 
+    /// Include the unterminated line when handing an in-flight answer to another view.
+    pub(crate) fn source_snapshot(&self) -> String {
+        let collector = &self.core.state.collector;
+        format!(
+            "{}{}",
+            collector.committed_source(),
+            collector.pending_source()
+        )
+    }
+
+    /// Completion must repair emitted rows when reference definitions can change earlier blocks.
+    pub(crate) fn needs_scrollback_reflow(&self) -> bool {
+        if self.has_live_tail() || self.core.render.has_reference_link_definition {
+            return true;
+        }
+        if self.core.render_mode == HistoryRenderMode::Raw
+            || self.core.state.collector.pending_source().is_empty()
+        {
+            return false;
+        }
+        let source = self.source_snapshot();
+        pulldown_cmark::Parser::new(&source)
+            .reference_definitions()
+            .iter()
+            .next()
+            .is_some()
+    }
+
     pub(crate) fn clear_queue(&mut self) {
         self.core.state.clear_queue();
         self.core.enqueued_stable_len = self.core.emitted_stable_len;
@@ -861,7 +896,7 @@ impl PlanStreamController {
         let plan_style = proposed_plan_style();
         let plan_lines = prefix_hyperlink_lines(plan_lines, "  ".into(), "  ".into())
             .into_iter()
-            .map(|line| line.style(plan_style))
+            .map(|line| history_cell::style_proposed_plan_line(line, plan_style))
             .collect::<Vec<_>>();
         out_lines.extend(plan_lines);
         out_lines
@@ -1357,8 +1392,8 @@ mod tests {
             "   This paragraph belongs to the same list item.".to_string(),
             "".to_string(),
             "4. Second loose item with a nested list after a blank line.".to_string(),
-            "    - Nested bullet under a loose item".to_string(),
-            "    - Another nested bullet".to_string(),
+            "    • Nested bullet under a loose item".to_string(),
+            "    • Another nested bullet".to_string(),
         ];
         assert_eq!(
             streamed, expected,
@@ -1430,6 +1465,65 @@ mod tests {
             "expected pre-table line to commit independently: {committed:?}",
         );
         assert!(idle, "only pre-table content should have been queued");
+
+        ctrl.push(
+            "| first | row |\n\nAfter table.\n\n| Next | Table |\n| --- | --- |\n| second | row |\n",
+        );
+        let (cell, idle) = ctrl.on_commit_tick_batch(usize::MAX);
+        let committed = cell.expect("completed table and prose should enter scrollback");
+        assert!(idle);
+        assert!(ctrl.has_live_tail(), "the later table must stay mutable");
+        insta::assert_debug_snapshot!(
+            "completed_table_scrollback",
+            lines_to_plain_strings(&committed.transcript_lines(u16::MAX)),
+        );
+
+        let context = InlineVisualizationContext::new(&test_cwd(), codex_protocol::ThreadId::new())
+            .expect("visualization context");
+        for (context, definition) in [
+            (None, "[ref]: https://example.com\n"),
+            (Some(context), "[ref]: https://example.com\n"),
+            (None, "[ref]: https://example.com"),
+        ] {
+            let mut ctrl = StreamController::new_with_inline_visualizations(
+                Some(80),
+                &test_cwd(),
+                HistoryRenderMode::Rich,
+                context,
+            );
+            let mut committed = Vec::new();
+            for delta in [
+                "| Key | Value |\n| --- | --- |\n| [A][ref] | row |\n",
+                "\nAfter table.\n\n",
+                definition,
+            ] {
+                ctrl.push(delta);
+                if let (Some(cell), _) = ctrl.on_commit_tick_batch(usize::MAX) {
+                    committed.extend(lines_to_plain_strings(&cell.transcript_lines(u16::MAX)));
+                }
+            }
+            assert!(committed.iter().any(|line| line.contains("[A][ref]")));
+            assert!(
+                !ctrl.has_live_tail(),
+                "the completed table should be released"
+            );
+            assert!(
+                ctrl.needs_scrollback_reflow(),
+                "late definitions must repair scrollback"
+            );
+            let (_, source) = ctrl.finalize();
+            let rendered = render_source(
+                source.as_deref().unwrap(),
+                Some(80),
+                &test_cwd(),
+                HistoryRenderMode::Rich,
+                /*inline_visualization_context*/ None,
+            );
+            insta::assert_debug_snapshot!(
+                "completed_table_reference",
+                lines_to_plain_strings(&visible_lines(rendered))
+            );
+        }
     }
 
     #[test]
@@ -1767,6 +1861,10 @@ mod tests {
                 "live view diverged after delta: {delta:?}"
             );
         }
+        assert!(
+            !ctrl.has_live_tail(),
+            "completed tables and prose should enter scrollback before finalization",
+        );
     }
 
     #[test]
@@ -1852,30 +1950,41 @@ mod tests {
 
     #[test]
     fn finalized_plan_stream_preserves_semantic_url_fragments() {
-        let destination = "https://example.com/a/very/long/path/to/a/table/artifact";
-        let source = format!("| Step | URL |\n| --- | --- |\n| Verify | {destination} |\n");
-        let mut ctrl = PlanStreamController::new(
-            /*width*/ Some(32),
-            &test_cwd(),
-            HistoryRenderMode::Rich,
+        crate::terminal_palette::with_test_default_colors(
+            crate::terminal_probe::DefaultColors {
+                fg: (30, 30, 30),
+                bg: (255, 255, 255),
+            },
+            || {
+                let destination = "https://example.com/a/very/long/path/to/a/table/artifact";
+                let source = format!(
+                    "# Plan\n\n> Quote\n\n| Step | URL |\n| --- | --- |\n| Verify | {destination} |\n"
+                );
+                let mut ctrl = PlanStreamController::new(
+                    /*width*/ Some(32),
+                    &test_cwd(),
+                    HistoryRenderMode::Rich,
+                );
+                ctrl.push(&source);
+
+                let (cell, _) = ctrl.finalize();
+                let lines = cell
+                    .expect("final plan stream table cell")
+                    .display_hyperlink_lines(/*width*/ 32);
+                insta::assert_debug_snapshot!(lines);
+                let linked_rows = lines
+                    .iter()
+                    .filter(|line| !line.hyperlinks.is_empty())
+                    .collect::<Vec<_>>();
+
+                assert!(linked_rows.len() > 1);
+                assert!(linked_rows.iter().all(|line| {
+                    line.hyperlinks
+                        .iter()
+                        .all(|link| link.destination == destination)
+                }));
+            },
         );
-        ctrl.push(&source);
-
-        let (cell, _) = ctrl.finalize();
-        let lines = cell
-            .expect("final plan stream table cell")
-            .display_hyperlink_lines(/*width*/ 32);
-        let linked_rows = lines
-            .iter()
-            .filter(|line| !line.hyperlinks.is_empty())
-            .collect::<Vec<_>>();
-
-        assert!(linked_rows.len() > 1);
-        assert!(linked_rows.iter().all(|line| {
-            line.hyperlinks
-                .iter()
-                .all(|link| link.destination == destination)
-        }));
     }
 
     #[test]
@@ -1973,7 +2082,7 @@ mod tests {
         let mut source = String::new();
         for chunk in chunks {
             source.push_str(chunk);
-            scanner.push_source_chunk(chunk);
+            scanner.scan(&source, /*completed_source_len*/ 0);
             assert_eq!(
                 scanner.state(),
                 table_holdback_state(&source),
@@ -1985,12 +2094,15 @@ mod tests {
     #[test]
     fn incremental_holdback_detects_header_delimiter_across_chunk_boundary() {
         let mut scanner = TableHoldbackScanner::new();
-        scanner.push_source_chunk("| A | B |\n");
+        scanner.scan("| A | B |\n", /*completed_source_len*/ 0);
         assert_eq!(
             scanner.state(),
             TableHoldbackState::PendingHeader { header_start: 0 }
         );
-        scanner.push_source_chunk("| --- | --- |\n");
+        scanner.scan(
+            "| A | B |\n| --- | --- |\n",
+            /*completed_source_len*/ 0,
+        );
         assert_eq!(
             scanner.state(),
             TableHoldbackState::Confirmed { table_start: 0 }

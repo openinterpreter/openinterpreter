@@ -10,7 +10,55 @@ use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
 
+/// Snapshot of the exact editor target before a delayed clipboard read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClipboardPasteTarget {
+    Draft(String, super::super::textarea::EditTarget),
+    HistorySearch(String),
+    VimSearch(String, super::super::textarea::EditTarget),
+}
+
 impl ChatComposer {
+    pub(in crate::bottom_pane) fn finish_copy(
+        &mut self,
+        completion: &(u64, crate::clipboard_copy::worker::CopyResult),
+        current: bool,
+    ) -> Option<usize> {
+        self.draft.textarea.finish_copy(completion, current)
+    }
+
+    /// Drop the draft's painted selection without changing its text or cursor.
+    pub(crate) fn clear_mouse_selection(&mut self) {
+        self.end_mouse_drag();
+        let cursor = self.draft.textarea.cursor();
+        self.draft.textarea.set_cursor(cursor);
+    }
+
+    pub(crate) fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<ClipboardPasteTarget> {
+        let allowed = self.draft.input_enabled
+            && !self.blocks_direct_input
+            && (shortcut.is_some()
+                || (self.history_search.is_none()
+                    && self.draft.textarea.vim_query().is_none()
+                    && self.draft.textarea.mouse_selection_range().is_none()));
+        if !allowed {
+            return None;
+        }
+        Some(if let Some(search) = &self.history_search {
+            ClipboardPasteTarget::HistorySearch(search.query.clone())
+        } else if let Some(search) = self.draft.textarea.vim_query() {
+            ClipboardPasteTarget::VimSearch(
+                search.editor.text().to_string(),
+                search.editor.edit_target(),
+            )
+        } else {
+            ClipboardPasteTarget::Draft(self.current_text(), self.draft.textarea.edit_target())
+        })
+    }
+
     pub(crate) fn copy_selection(
         &mut self,
         event: &TuiEvent,
@@ -36,6 +84,9 @@ impl ChatComposer {
         let text = &self.draft.textarea.text()[range];
         let char_count = text.chars().count();
         let result = copy(text);
+        if let Ok(CopyStatus::Pending(id)) = result {
+            self.draft.textarea.defer_copy(id);
+        }
         if matches!(event, TuiEvent::Mouse(_)) && result == Ok(CopyStatus::Confirmed) {
             self.draft.textarea.set_cursor(self.draft.textarea.cursor());
         }

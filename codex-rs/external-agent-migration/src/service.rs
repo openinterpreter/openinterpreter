@@ -6,6 +6,7 @@ use crate::config_values::write_toml_file;
 use crate::memory_import;
 use crate::migration_source::ExternalAgentSource;
 use crate::migration_source::InstructionSourceGroup;
+use crate::migration_source::SkillImportMode;
 pub use crate::model::DetectedConnectorCandidate;
 pub use crate::model::DetectedConnectorSource;
 pub use crate::model::ExternalAgentConfigDetectOptions;
@@ -44,6 +45,7 @@ use codex_core::config::Config;
 use codex_core_plugins::PluginsManager;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_login::AuthManager;
+use codex_protocol::MemoryVersion;
 use codex_protocol::protocol::Product;
 use codex_rollout::StateDbHandle;
 use serde_json::Value as JsonValue;
@@ -73,7 +75,9 @@ pub struct ExternalAgentConfigService {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) source: ExternalAgentSource,
     pub(crate) session_import_limits: ExternalAgentSessionImportLimits,
+    pub(super) skill_import_mode: SkillImportMode,
     state_db: Option<StateDbHandle>,
+    pub(crate) memory_version: MemoryVersion,
 }
 
 impl ExternalAgentConfigService {
@@ -93,13 +97,16 @@ impl ExternalAgentConfigService {
             analytics_events_client: Some(analytics_events_client),
             auth_manager,
             source,
+            skill_import_mode: SkillImportMode::All,
             session_import_limits: ExternalAgentSessionImportLimits::default(),
             state_db,
+            memory_version: MemoryVersion::V1,
         }
     }
 
     pub fn with_migration_source(&self, migration_source: Option<&str>) -> Self {
-        let source = ExternalAgentSource::from_migration_source(migration_source);
+        let (source, skill_import_mode) =
+            ExternalAgentSource::from_migration_source(migration_source);
         let external_agent_home = default_external_agent_home(source);
         let connector_metadata_roots = source.connector_metadata_roots(&external_agent_home);
         Self {
@@ -109,9 +116,17 @@ impl ExternalAgentConfigService {
             analytics_events_client: self.analytics_events_client.clone(),
             auth_manager: Arc::clone(&self.auth_manager),
             source,
+            skill_import_mode,
             session_import_limits: self.session_import_limits,
             state_db: self.state_db.clone(),
+            memory_version: self.memory_version,
         }
+    }
+
+    pub fn with_memory_version(&self, selection: MemoryVersion) -> Self {
+        let mut service = self.clone();
+        service.memory_version = selection;
+        service
     }
 
     pub fn with_session_import_limits(&self, limits: ExternalAgentSessionImportLimits) -> Self {
@@ -167,8 +182,10 @@ impl ExternalAgentConfigService {
                 /*auth*/ None,
             ),
             source,
+            skill_import_mode: SkillImportMode::All,
             session_import_limits: ExternalAgentSessionImportLimits::default(),
             state_db: None,
+            memory_version: MemoryVersion::V1,
         }
     }
 
@@ -402,6 +419,7 @@ impl ExternalAgentConfigService {
                             &self.codex_home,
                             &self.external_agent_home,
                             self.state_db.as_ref(),
+                            self.memory_version,
                             selected_memory,
                         )
                         .await?;
@@ -410,7 +428,9 @@ impl ExternalAgentConfigService {
                             ExternalAgentConfigMigrationItemType::Memory,
                             /*skills_count*/ None,
                         );
-                        let target_path = memory_import::resources_root(&self.codex_home);
+                        let target_path = memory_import::resources_root(
+                            &self.codex_home.join(MemoryVersion::V2.directory_name()),
+                        );
                         for project_key in memory_outcome.synchronized_projects {
                             item_result.record_success(
                                 Some(project_key),
@@ -702,7 +722,7 @@ impl ExternalAgentConfigService {
             return Ok(Vec::new());
         };
         let source_skills_dir_names = self.source.skills_dir_names(&scope);
-        let (source_config_dir, target_skills) = match scope {
+        let (source_config_dir, target_skills) = match &scope {
             MigrationScope::Home => (
                 self.external_agent_home.clone(),
                 self.home_target_skills_dir(),
@@ -728,7 +748,13 @@ impl ExternalAgentConfigService {
             for entry in fs::read_dir(&source_skills_dir)? {
                 let entry = entry?;
                 let file_type = entry.file_type()?;
-                if !file_type.is_dir() {
+                if !file_type.is_dir()
+                    || self.source.is_reserved_skill_directory(
+                        &scope,
+                        &entry.file_name(),
+                        self.skill_import_mode,
+                    )
+                {
                     continue;
                 }
 
@@ -737,7 +763,13 @@ impl ExternalAgentConfigService {
                     continue;
                 }
 
-                copy_dir_recursive(&entry.path(), &target, self.source.rewrite_profile())?;
+                copy_dir_recursive(
+                    &entry.path(),
+                    &target,
+                    self.source.rewrite_profile(),
+                    self.source
+                        .excluded_skill_subdirectory(&scope, &entry.file_name()),
+                )?;
                 copied_names.push(entry.file_name().to_string_lossy().to_string());
             }
         }

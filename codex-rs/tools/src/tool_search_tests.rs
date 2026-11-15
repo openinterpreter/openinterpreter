@@ -79,8 +79,12 @@ fn top_level_function_search_results_use_the_default_namespace() {
         ),
         output_schema: Some(serde_json::json!({ "type": "object" }).into()),
     };
+    let mut configured_function_tool = function_tool.clone();
+    configured_function_tool
+        .parameters
+        .mcp_input_schema_max_bytes = Some(20_000);
     let search_info = ToolSearchInfo::from_tool_spec(
-        ToolSpec::Function(function_tool.clone()),
+        ToolSpec::Function(configured_function_tool),
         /*source_info*/ None,
     )
     .expect("top-level function should be searchable");
@@ -152,7 +156,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
         /*required*/ None,
         /*additional_properties*/ None,
     );
-    schedule_schema.description = Some("Schedule settings.".to_string());
+    schedule_schema.description = Some("Schedule settings.".into());
     let mut parameters = JsonSchema::object(
         BTreeMap::from([
             (
@@ -164,7 +168,7 @@ fn default_search_text_uses_model_visible_namespace_metadata_once() {
         /*required*/ None,
         /*additional_properties*/ None,
     );
-    parameters.description = Some("Automation options.".to_string());
+    parameters.description = Some("Automation options.".into());
     let spec = ToolSpec::Namespace(crate::ResponsesApiNamespace {
         name: "codex_app".to_string(),
         description: "Manage Codex automations.".to_string(),
@@ -211,11 +215,15 @@ fn mixed_namespaced_function_and_custom_tools_are_searchable() {
             definition: "start: \"patch\"".to_string(),
         },
     };
+    let mut configured_function_tool = function_tool.clone();
+    configured_function_tool
+        .parameters
+        .mcp_input_schema_max_bytes = Some(20_000);
     let spec = ToolSpec::Namespace(crate::ResponsesApiNamespace {
         name: "editor".to_string(),
         description: "Editing tools".to_string(),
         tools: vec![
-            ResponsesApiNamespaceTool::Function(function_tool.clone()),
+            ResponsesApiNamespaceTool::Function(configured_function_tool),
             ResponsesApiNamespaceTool::Custom(custom_tool.clone()),
         ],
     });

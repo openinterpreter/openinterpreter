@@ -106,6 +106,38 @@ fn inaccessible_history_tail_is_preserved_for_non_destructive_append() {
 }
 
 #[test]
+fn appending_to_unchanged_history_tail_preserves_existing_rows() {
+    let width = 52;
+    let height = 8;
+    let backend = VT100Backend::new(width, height);
+    let mut terminal = Terminal::with_options(backend).expect("terminal");
+    terminal.set_viewport_area(Rect::new(
+        /*x*/ 0, /*y*/ 0, width, /*height*/ 2,
+    ));
+    insert_history_lines(
+        &mut terminal,
+        vec![Line::from("/status"), Line::from("Account: business")],
+    )
+    .expect("insert initial status card");
+    let replacement = plain_hyperlink_lines(vec![Line::from("Thread usage: 50 credits")]);
+
+    assert!(
+        replace_visible_terminal_history_tail(
+            &mut terminal,
+            /*previous_lines*/ &[],
+            &replacement,
+            InsertHistoryMode::Standard,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("append late billing details")
+    );
+    assert_eq!(
+        terminal.backend().vt100().screen().contents(),
+        "/status\nAccount: business\nThread usage: 50 credits"
+    );
+}
+
+#[test]
 fn replacing_soft_wrapped_history_counts_physical_terminal_rows() {
     let width = 12;
     let height = 8;

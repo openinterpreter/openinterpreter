@@ -1,6 +1,7 @@
 use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_attachment_store::AttachmentMetadata;
 use codex_attachment_store::AttachmentStore;
 use codex_attachment_store::AttachmentStoreError;
 use codex_attachment_store::AttachmentStoreErrorKind;
@@ -43,7 +44,7 @@ use core_test_support::responses::strip_metadata;
 use core_test_support::responses::strip_response_item_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -53,6 +54,7 @@ use image::ImageBuffer;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,6 +66,10 @@ const UPLOADED_FILE_ID: &str = "file_uploaded_image";
 #[derive(Default)]
 pub(super) struct RecordingFileAttachmentStore {
     pub(super) uploads: Mutex<Vec<UploadRequest>>,
+    pub(super) resolves: Mutex<HashMap<String, usize>>,
+    pub(super) resolve_errors: Mutex<HashMap<String, AttachmentStoreErrorKind>>,
+    pub(super) resolve_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub(super) available_by_default: bool,
 }
 
 impl AttachmentStore for RecordingFileAttachmentStore {
@@ -79,10 +85,34 @@ impl AttachmentStore for RecordingFileAttachmentStore {
     fn resolve<'a>(&'a self, request: ResolveRequest<'a>) -> ResolveFuture<'a> {
         let file_id = request.file_id;
         Box::pin(async move {
-            Err(AttachmentStoreError::new(
-                AttachmentStoreErrorKind::NotFound,
-                format!("attachment `{file_id}` was not found"),
-            ))
+            *self
+                .resolves
+                .lock()
+                .expect("resolves lock")
+                .entry(file_id.to_string())
+                .or_default() += 1;
+            if let Some(barrier) = &self.resolve_barrier {
+                barrier.wait().await;
+            }
+            if let Some(kind) = self
+                .resolve_errors
+                .lock()
+                .expect("resolve errors lock")
+                .get(file_id)
+            {
+                return Err(AttachmentStoreError::new(
+                    *kind,
+                    format!("attachment `{file_id}` could not be resolved"),
+                ));
+            }
+            if self.available_by_default {
+                Ok(AttachmentMetadata::default())
+            } else {
+                Err(AttachmentStoreError::new(
+                    AttachmentStoreErrorKind::NotFound,
+                    format!("attachment `{file_id}` was not found"),
+                ))
+            }
         })
     }
 }
@@ -188,7 +218,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -216,6 +246,8 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -286,7 +318,7 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
                 },
             ])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(cwd.abs())),
+                environments: Some(local_requests(cwd.abs())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -314,6 +346,8 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
 
     let image_url = extract_image_url(&actual).expect("expected image url in rollout");
     let expected = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![
@@ -390,6 +424,8 @@ async fn file_image_passes_through_request_and_rollout() -> anyhow::Result<()> {
     assert_eq!(
         strip_response_item_id(strip_metadata(actual)),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -597,8 +633,8 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let image_path = initial.cwd.path().join("large-image.png");
     ImageBuffer::from_pixel(
-        /*width*/ 2304,
-        /*height*/ 864,
+        /*width*/ 6400,
+        /*height*/ 256,
         Rgba([12u8, 34, 56, 255]),
     )
     .save(&image_path)?;
@@ -735,7 +771,7 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
 
     let expected_notice = concat!(
         "<image_resize_notice>\n",
-        "Image 1 of 1 in the preceding user message was resized from 2304x864 to 2048x768 pixels.\n",
+        "Image 1 of 1 in the preceding user message was resized from 6400x256 to 6000x240 pixels.\n",
         "</image_resize_notice>"
     );
     let resize_notices = request
@@ -829,11 +865,11 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
             else {
                 return None;
             };
-            matches!(envelope.item, ResponseItem::Message { role, .. } if role == "developer")
-                .then(|| envelope.metadata.map(|metadata| metadata.client_authored))
+            matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer")
+                .then(|| envelope.is_always_retained())
         })
         .collect::<Vec<_>>();
-    assert_eq!(persisted_developer_metadata, vec![None, Some(true)]);
+    assert_eq!(persisted_developer_metadata, vec![false, true]);
 
     Ok(())
 }

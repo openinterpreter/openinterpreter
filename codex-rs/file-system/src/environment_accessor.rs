@@ -6,6 +6,7 @@ use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FileMetadata;
 use crate::FileSystemReadStream;
+use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
 use crate::GetMetadataOptions;
 use crate::ReadDirectoryEntry;
@@ -14,12 +15,15 @@ use crate::RemoveOptions;
 use crate::WalkOptions;
 use crate::WalkOutcome;
 use crate::WriteFileOptions;
+use bytes::Bytes;
 use codex_utils_path_uri::PathUri;
+use futures::stream::BoxStream;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::oneshot;
 
 /// Filesystem operations authorized by the environment that supplied this borrowed accessor.
 ///
@@ -28,6 +32,16 @@ use std::sync::Weak;
 pub trait EnvironmentAccess: Send + Sync {
     /// Identifies the filesystem and captured permissions without granting access to either.
     fn cache_key(&self) -> EnvironmentAccessKey;
+
+    /// Watches a previously observed set of missing paths. Accessors that cannot
+    /// prove the observation is unrestricted should leave this unsupported.
+    fn watch_missing(
+        &self,
+        _missing: Vec<PathUri>,
+        _present: Option<PathUri>,
+    ) -> ExecutorFileSystemFuture<'static, Option<oneshot::Receiver<()>>> {
+        Box::pin(async { Ok(None) })
+    }
 
     fn canonicalize<'a>(&'a self, path: &'a PathUri) -> ExecutorFileSystemFuture<'a, PathUri>;
 
@@ -49,6 +63,13 @@ pub trait EnvironmentAccess: Send + Sync {
         contents: Vec<u8>,
         options: WriteFileOptions,
     ) -> ExecutorFileSystemFuture<'a, ()>;
+
+    /// Stream a replacement under the captured environment's write permissions.
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+    ) -> ExecutorFileSystemFuture<'a, u64>;
 
     fn create_directory<'a>(
         &'a self,
@@ -134,6 +155,14 @@ impl PartialEq for EnvironmentAccessKey {
 
 impl Eq for EnvironmentAccessKey {}
 
+impl EnvironmentAccessKey {
+    /// Compares filesystem identity only; the caller must still authorize every
+    /// read with its current accessor, not with this cache key.
+    pub fn same_file_system(&self, other: &Self) -> bool {
+        self.file_system.ptr_eq(&other.file_system)
+    }
+}
+
 impl Hash for EnvironmentAccessKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.file_system.as_ptr().cast::<()>().hash(state);
@@ -188,6 +217,29 @@ impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
         self.key.clone()
     }
 
+    fn watch_missing(
+        &self,
+        missing: Vec<PathUri>,
+        present: Option<PathUri>,
+    ) -> ExecutorFileSystemFuture<'static, Option<oneshot::Receiver<()>>> {
+        if self
+            .key
+            .sandbox
+            .as_ref()
+            .is_some_and(|context| context.should_read_from_sandbox())
+        {
+            return Box::pin(async { Ok(None) });
+        }
+        // Keep the exact filesystem alive only while registering the observation;
+        // the opaque key cannot grant access to a different filesystem or sandbox.
+        match self.key.file_system.upgrade() {
+            Some(file_system) => {
+                Box::pin(async move { file_system.watch_missing(missing, present).await })
+            }
+            None => Box::pin(async { Ok(None) }),
+        }
+    }
+
     fn canonicalize<'a>(&'a self, path: &'a PathUri) -> ExecutorFileSystemFuture<'a, PathUri> {
         self.file_system
             .canonicalize(path, self.key.sandbox.as_deref())
@@ -218,6 +270,15 @@ impl EnvironmentAccess for FileSystemEnvironmentAccessor<'_> {
     ) -> ExecutorFileSystemFuture<'a, ()> {
         self.file_system
             .write_file(path, contents, options, self.key.sandbox.as_deref())
+    }
+
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+    ) -> ExecutorFileSystemFuture<'a, u64> {
+        self.file_system
+            .write_file_stream(path, contents, self.key.sandbox.as_deref())
     }
 
     fn create_directory<'a>(

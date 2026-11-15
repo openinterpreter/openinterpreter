@@ -4,6 +4,7 @@ use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event::RateLimitRefreshOrigin;
 use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
+use crate::clock_format::ClockFormat;
 use crate::tui::FrameRequester;
 use chrono::TimeZone;
 use codex_app_server_protocol::RateLimitReachedType;
@@ -37,7 +38,7 @@ fn notice_details_fit_without_truncating_the_warning() {
         Some((now + chrono::Duration::hours(/*hours*/ 1)).timestamp());
     let mut lines = Vec::new();
     for width in [47, 46, 28, 18, 12, 11] {
-        let line = state.line(width, now);
+        let line = state.line(width, now, ClockFormat::TwelveHour);
         assert!(
             line.as_ref()
                 .is_none_or(|line| line.width() <= usize::from(width))
@@ -66,7 +67,7 @@ fn notice_shows_only_valid_future_reset_times() {
     ] {
         state.primary.as_mut().unwrap().resets_at = reset;
         assert_eq!(
-            state.line(/*width*/ 80, now),
+            state.line(/*width*/ 80, now, ClockFormat::TwelveHour),
             Some(
                 Line::from(format!("⚠ 5h limit: 8% left{expected} · /status"))
                     .style(crate::style::warning_notice_style().bold())
@@ -91,7 +92,7 @@ fn notice_emphasis_tracks_utilization_without_claiming_a_hard_stop() {
         };
         let style = crate::style::warning_notice_style();
         assert_eq!(
-            state.line(/*width*/ 80, notice_time()),
+            state.line(/*width*/ 80, notice_time(), ClockFormat::TwelveHour),
             Some(
                 Line::from(format!("⚠ 5h limit: {remaining} left · /status")).style(if bold {
                     style.bold()

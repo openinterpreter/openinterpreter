@@ -98,15 +98,15 @@ fn reset_credit_options_use_generic_copy_when_backend_copy_is_missing() {
     credit.reset_type = RateLimitResetType::Unknown;
 
     assert_eq!(
-        reset_credit_options(&detailed_reset_credits(
-            /*available_count*/ 1,
-            vec![credit],
-        )),
+        reset_credit_options(
+            &detailed_reset_credits(/*available_count*/ 1, vec![credit],),
+            crate::clock_format::ClockFormat::TwentyFourHour
+        ),
         vec![ResetCreditOption {
             credit_id: Some("future-credit".to_string()),
             name: "Full reset".to_string(),
-            detail: Some("Does not expire.".to_string()),
-            description: "Reset your current usage limits.".to_string(),
+            detail: Some("Does not expire".to_string()),
+            description: "Reset your current usage limits".to_string(),
         }]
     );
 }
@@ -416,6 +416,7 @@ async fn rate_limit_reset_popup_states_snapshot() {
 #[tokio::test]
 async fn rate_limit_reset_picker_wraps_expiry_details_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.clock_format = crate::clock_format::ClockFormat::TwelveHour;
     let request_id = chat.show_rate_limit_reset_loading_popup();
     let expiry = expiry_timestamp(/*day*/ 18, /*hour*/ 9, /*minute*/ 39);
     assert!(chat.finish_rate_limit_reset_credits_refresh(
@@ -477,7 +478,7 @@ async fn rate_limit_reset_confirmation_uses_backend_copy_snapshot() {
             request_id,
             Some("weekly-credit"),
             "Full reset (Weekly + 5 hr)",
-            Some("Expires 09:39 on 18 Jun 2026."),
+            Some("Expires 09:39 on 18 Jun 2026"),
             "Reset your weekly and 5-hour usage limits.",
         )
     );
@@ -553,7 +554,7 @@ async fn reset_picker_allows_only_one_pending_confirmation() {
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     show_rate_limit_reset_confirmation_from_event(&mut chat, &mut rx);
 
-    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Second reset · Does not expire."));
+    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Second reset · Does not expire"));
 }
 
 #[tokio::test]
@@ -578,7 +579,7 @@ async fn rate_limit_reset_picker_starts_with_soonest_expiries_and_keeps_all_rows
 
     let rendered = render_bottom_popup(&chat, /*width*/ 80);
     assert!(
-        rendered.contains("Expires 09:39 on 18 Jun 2026."),
+        rendered.contains("Expires 09:39 on 18 Jun 2026"),
         "{rendered}"
     );
     assert!(!rendered.contains("Full reset ("), "{rendered}");
@@ -600,8 +601,8 @@ async fn rate_limit_reset_picker_starts_with_soonest_expiries_and_keeps_all_rows
         }) if picker_request_id == request_id
             && credit_id.as_deref() == Some("credit-8")
             && reset_title == "Full reset"
-            && reset_detail.as_deref() == Some("Expires 09:39 on 26 Jun 2026.")
-            && reset_description == "Reset your current usage limits."
+            && reset_detail.as_deref() == Some("Expires 09:39 on 26 Jun 2026")
+            && reset_description == "Reset your current usage limits"
     );
 }
 

@@ -178,6 +178,13 @@ pub(crate) fn thread_settings_from_config_snapshot(
     ThreadSettings {
         disabled_plugin_ids: config_snapshot.disabled_plugin_ids.clone(),
         cwd: config_snapshot.cwd().clone(),
+        environments: Some(
+            config_snapshot
+                .environment_selections()
+                .iter()
+                .map(Into::into)
+                .collect(),
+        ),
         approval_policy: config_snapshot.approval_policy.into(),
         approvals_reviewer: config_snapshot.approvals_reviewer.into(),
         sandbox_policy: config_snapshot.sandbox_policy().into(),
@@ -266,6 +273,7 @@ pub(crate) fn summary_to_thread(
         extra: None,
         session_id: thread_id,
         forked_from_id: None,
+        attached_to_thread_id: None,
         parent_thread_id: None,
         preview,
         ephemeral: false,

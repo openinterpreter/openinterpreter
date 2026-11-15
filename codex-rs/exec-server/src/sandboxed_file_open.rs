@@ -3,6 +3,7 @@ use codex_sandboxing::SandboxExecRequest;
 use codex_utils_path_uri::PathUri;
 use tokio::io;
 
+use crate::fs_helper::FsHelperOpenParams;
 use crate::fs_helper::FsHelperOpenResponse;
 use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
@@ -17,20 +18,17 @@ use crate::fs_sandbox::reap_helper_after_response;
 use crate::fs_sandbox::spawn_command;
 #[cfg(unix)]
 use crate::fs_sandbox::wait_for_helper_output;
-use crate::protocol::FsReadFileParams;
+use crate::protocol::FsOpenMode;
 use crate::rpc::internal_error;
 use crate::rpc::invalid_request;
 
 pub(crate) async fn open(
     command: SandboxExecRequest,
     path: PathUri,
+    mode: FsOpenMode,
 ) -> Result<tokio::fs::File, JSONRPCErrorError> {
-    let request = serde_json::to_vec(&FsHelperRequest::Open(FsReadFileParams {
-        path,
-        follow_symlinks: None,
-        sandbox: None,
-    }))
-    .map_err(|error| internal_error(format!("invalid fs sandbox helper request: {error}")))?;
+    let request = serde_json::to_vec(&FsHelperRequest::Open(FsHelperOpenParams { path, mode }))
+        .map_err(|error| internal_error(format!("invalid fs sandbox helper request: {error}")))?;
     open_platform(command, request).await
 }
 
@@ -186,16 +184,16 @@ fn duplicate_file_handle(process_id: u32, file_handle: u64) -> io::Result<std::f
 
     // SAFETY: OpenProcess returns an owned handle or null on failure.
     let process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, process_id) };
-    if process == 0 {
+    if process.is_null() {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: The successful OpenProcess result is owned by this scope.
-    let process = unsafe { OwnedHandle::from_raw_handle(process as _) };
-    let mut duplicated: HANDLE = 0;
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let mut duplicated = std::ptr::null_mut();
     // SAFETY: Both process handles remain valid and duplicated receives an owned file handle.
     if unsafe {
         DuplicateHandle(
-            process.as_raw_handle() as HANDLE,
+            process.as_raw_handle(),
             file_handle as HANDLE,
             GetCurrentProcess(),
             &raw mut duplicated,
@@ -208,5 +206,5 @@ fn duplicate_file_handle(process_id: u32, file_handle: u64) -> io::Result<std::f
         return Err(io::Error::last_os_error());
     }
     // SAFETY: DuplicateHandle transferred ownership of the new file handle.
-    Ok(unsafe { std::fs::File::from_raw_handle(duplicated as _) })
+    Ok(unsafe { std::fs::File::from_raw_handle(duplicated) })
 }

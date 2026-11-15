@@ -15,10 +15,12 @@ workspace = true
 [dependencies]
 base64 = { workspace = true }
 codex-api = { workspace = true }
+codex-attachment-store = { workspace = true }
 codex-core = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-extension-items = { workspace = true }
+codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
@@ -31,8 +33,11 @@ http = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+image = { workspace = true, features = ["png"] }
 pretty_assertions = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

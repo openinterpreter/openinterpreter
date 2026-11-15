@@ -99,6 +99,12 @@ stream_max_retries = 0
                 .await?;
 
             assert_eq!(initialize.protocol_version, ProtocolVersion::V1);
+            // The bridge keeps login options but must not claim to implement ACP logout.
+            let capabilities = serde_json::to_value(&initialize.agent_capabilities)?;
+            assert!(capabilities.pointer("/auth/logout").is_none());
+            let auth_methods = serde_json::to_value(&initialize.auth_methods)?;
+            assert!(auth_methods.to_string().contains("chatgpt"));
+            assert!(auth_methods.to_string().contains("codex-api-key"));
             let agent_info = initialize
                 .agent_info
                 .expect("initialize should include agent info");

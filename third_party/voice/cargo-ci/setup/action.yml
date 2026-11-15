@@ -1,0 +1,62 @@
+name: Set up Cargo voice inputs
+description: Use the target SDK and prepared runtime from this workflow run.
+inputs:
+  target:
+    description: Cargo target triple
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: "3.12"
+    - name: Ensure CMake is available for the Opus build
+      if: runner.os == 'Linux'
+      shell: bash
+      run: command -v cmake || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake
+    - name: Ensure host pkg-config is available
+      if: runner.os == 'macOS'
+      shell: bash
+      run: command -v pkg-config || brew install pkgconf
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: cargo-voice-${{ inputs.target }}
+        path: ${{ runner.temp }}/cargo-voice-inputs
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      if: runner.os == 'Windows'
+      with:
+        # The x64 archive builder must execute x64 pkgconf even for ARM64.
+        name: cargo-voice-pkgconf-${{ runner.arch }}
+        path: ${{ runner.temp }}/cargo-voice-pkgconf
+    - name: Configure target libraries for Cargo
+      env:
+        VOICE_TARGET: ${{ inputs.target }}
+      shell: python
+      run: |
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+        import sys
+        import tarfile
+        import tempfile
+
+        temp = Path(os.environ["RUNNER_TEMP"])
+        target_dir = Path(os.environ["CARGO_TARGET_DIR"])
+        root = Path(tempfile.mkdtemp(prefix="cargo-voice-", dir=target_dir))
+        with tarfile.open(temp / "cargo-voice-inputs/cargo-voice.tar.gz") as archive:
+            archive.extractall(root, filter="data")
+        if os.name == "nt":
+            os.environ["VOICE_PKG_CONFIG"] = str(temp / "cargo-voice-pkgconf/pkgconf.exe")
+        script = Path(os.environ["GITHUB_WORKSPACE"]) / "third_party/voice/cargo_ci.py"
+        subprocess.run([sys.executable, str(script), "configure", "--root", str(root),
+                        "--target", os.environ["VOICE_TARGET"]], check=True)
+        # nextest collects linked libraries itself. Include the runtime manifest
+        # and plugins too so the whole runtime can move with the test binaries.
+        relative = (root / "runtime").relative_to(target_dir).as_posix()
+        config = root / "nextest.toml"
+        config.write_text('[profile.default]\narchive.include = [{ path = ' + json.dumps(relative)
+                          + ', relative-to = "target", on-missing = "error" }]\n')
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+            print(f"CODEX_VOICE_NEXTEST_CONFIG={config}", file=env)
+            print(f"CODEX_VOICE_RUNTIME_RELATIVE={relative}", file=env)

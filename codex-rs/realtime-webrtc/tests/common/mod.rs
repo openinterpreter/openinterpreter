@@ -13,11 +13,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 pub const BUILD_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const WAIT: Duration = Duration::from_secs(/*secs*/ 10);
@@ -27,6 +27,7 @@ const HELPER: &str = if cfg!(windows) {
 } else {
     "codex-voice-host"
 };
+static NEXT_PACKAGE_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn wait_for(mut ready: impl FnMut() -> bool) -> Result<()> {
     let deadline = Instant::now() + WAIT;
@@ -39,7 +40,10 @@ pub fn wait_for(mut ready: impl FnMut() -> bool) -> Result<()> {
 
 #[cfg(unix)]
 pub fn wait_for_helper_reaped(root: &std::path::Path) -> Result<()> {
-    let pid: libc::pid_t = fs::read_to_string(root.join("helper-pid"))?.parse()?;
+    let pid: libc::pid_t = fs::read_to_string(root.join("helper-pid"))
+        .context("voice fixture did not expose its helper PID")?
+        .parse()
+        .context("voice fixture helper PID is invalid")?;
     wait_for(|| {
         // SAFETY: Signal zero checks process existence without delivering a signal.
         let result = unsafe {
@@ -56,9 +60,25 @@ impl Drop for Package {
     }
 }
 
+fn new_package() -> Result<Package> {
+    // Bazel's writable test directory is independent of the host's TMPDIR.
+    let parent = std::env::var_os("TEST_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    loop {
+        let id = NEXT_PACKAGE_ID.fetch_add(1, Ordering::Relaxed);
+        let root = parent.join(format!("voice-actor-{}-{id}", std::process::id()));
+        match fs::create_dir(&root) {
+            Ok(()) => return Ok(Package(root)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).context("voice fixture private package creation"),
+        }
+    }
+}
+
 // The child discovers its installation through current_exe, exactly as the public facade does.
 pub fn package(test: &str) -> Result<Option<PathBuf>> {
-    let source = std::env::current_exe()?;
+    let source = std::env::current_exe().context("voice fixture test executable lookup")?;
     if source.file_name().is_some_and(|name| name == APP) {
         codex_build_info::BuildInfo::initialize(BUILD_COMMIT);
         return Ok(Some(
@@ -70,31 +90,44 @@ pub fn package(test: &str) -> Result<Option<PathBuf>> {
                 .to_owned(),
         ));
     }
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let package =
-        Package(std::env::temp_dir().join(format!("voice-actor-{}-{nonce}", std::process::id())));
+    let package = new_package()?;
     let root = &package.0;
-    fs::create_dir_all(root.join("bin"))?;
-    fs::create_dir_all(root.join("codex-resources/voice/bin"))?;
-    fs::write(root.join("codex-package.json"), "{}")?;
-    fs::copy(&source, root.join("bin").join(APP))?;
-    fs::copy(&source, root.join("codex-resources/voice/bin").join(HELPER))?;
+    fs::create_dir_all(root.join("bin")).context("voice fixture package bin creation")?;
+    fs::create_dir_all(root.join("codex-resources/voice/bin"))
+        .context("voice fixture helper bin creation")?;
+    fs::write(root.join("codex-package.json"), "{}").context("voice fixture manifest creation")?;
+    codex_utils_cargo_bin::copy_executable(&source, &root.join("bin").join(APP))
+        .context("voice fixture packaged test executable copy")?;
+    codex_utils_cargo_bin::copy_executable(
+        &source,
+        &root.join("codex-resources/voice/bin").join(HELPER),
+    )
+    .context("voice fixture helper executable copy")?;
     let mut child = Command::new(root.join("bin").join(APP))
         .args(["--exact", test, "--nocapture"])
         .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .context("voice fixture packaged test process spawn")?;
     let deadline = Instant::now() + WAIT * 3;
-    while child.try_wait()?.is_none() {
+    while child
+        .try_wait()
+        .context("voice fixture packaged test process wait")?
+        .is_none()
+    {
         if Instant::now() >= deadline {
-            child.kill()?;
-            child.wait()?;
+            child
+                .kill()
+                .context("voice fixture timed-out test termination")?;
+            child.wait().context("voice fixture timed-out test reap")?;
             anyhow::bail!("packaged test timed out");
         }
         thread::sleep(Duration::from_millis(/*millis*/ 10));
     }
-    let output = child.wait_with_output()?;
+    let output = child
+        .wait_with_output()
+        .context("voice fixture packaged test output collection")?;
     ensure!(
         output.status.success(),
         "packaged test failed: {}\n{}\nfixture: {}",
@@ -103,6 +136,41 @@ pub fn package(test: &str) -> Result<Option<PathBuf>> {
         fs::read_to_string(root.join("fixture-error")).unwrap_or_default()
     );
     Ok(None)
+}
+
+#[test]
+fn concurrent_package_owners_do_not_share_or_remove_fixtures() -> Result<()> {
+    let workers = 8;
+    let start = std::sync::Barrier::new(workers);
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let start = &start;
+                scope.spawn(move || -> Result<PathBuf> {
+                    start.wait();
+                    let package = new_package()?;
+                    fs::write(package.0.join("owner"), b"intact")?;
+                    thread::sleep(Duration::from_millis(/*millis*/ 10));
+                    ensure!(fs::read(package.0.join("owner"))? == b"intact");
+                    Ok(package.0.clone())
+                })
+            })
+            .collect();
+        let roots = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fixture owner thread"))
+            .collect::<Result<Vec<_>>>()?;
+        let distinct: std::collections::HashSet<_> = roots.iter().collect();
+        ensure!(
+            distinct.len() == workers,
+            "fixture owners must have distinct roots"
+        );
+        ensure!(
+            roots.iter().all(|root| !root.exists()),
+            "fixtures must be cleaned up"
+        );
+        Ok(())
+    })
 }
 
 #[ctor::ctor]
@@ -148,6 +216,17 @@ fn helper() -> Result<()> {
                 stage = Stage::Initialize;
                 Message::Ready {}
             }
+            Message::ListDevices { kind } if stage == Stage::Initialize => Message::DeviceList {
+                devices: vec![codex_realtime_webrtc::AudioDevice {
+                    name: match kind {
+                        codex_realtime_webrtc::AudioDeviceKind::Input => "Interface",
+                        codex_realtime_webrtc::AudioDeviceKind::Output => "Headphones",
+                    }
+                    .into(),
+                    channels: 16,
+                    is_default: true,
+                }],
+            },
             Message::InitializeRuntime {} if stage == Stage::Initialize => {
                 fs::write(root.join("initializing"), [])?;
                 if root.join("hold-initialization").exists() {
@@ -178,7 +257,11 @@ fn helper() -> Result<()> {
                 stage = Stage::Devices;
                 Message::TransportReady {}
             }
-            Message::OpenDevices {} if stage == Stage::Devices => {
+            Message::OpenDevices { selection } if stage == Stage::Devices => {
+                fs::write(
+                    root.join("input-selection"),
+                    serde_json::to_vec(&selection)?,
+                )?;
                 if root.join("fail-devices").exists() {
                     anyhow::bail!("synthetic private device diagnostic");
                 }

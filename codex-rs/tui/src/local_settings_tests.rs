@@ -3,6 +3,7 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use codex_config::LoaderOverrides;
 use codex_config::types::SessionPickerViewMode;
+use codex_terminal_detection::Multiplexer;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -126,6 +127,78 @@ fast_default_opt_out = true
             })
             .cli_overrides(vec![
                 ("tui.disable_paste_burst".into(), true.into()),
+                (
+                    "features.transcript_v2".into(),
+                    config_text.is_empty().into(),
+                ),
+            ])
+            .build()
+            .await?;
+        assert_eq!(config.startup_warnings, Vec::<String>::new());
+        let local = LocalSettings::from(&config);
+        let mut expected: Tui = toml::from_str("")?;
+        expected.disable_paste_burst = Some(true);
+        expected.session_picker_view = Some(SessionPickerViewMode::Dense);
+        if !config_text.is_empty() {
+            expected.animations = false;
+            expected.effects.shimmer = false;
+            expected.rendering = codex_config::types::TuiRendering {
+                mermaid: false,
+                math: false,
+                tables: false,
+                lists: false,
+            };
+            expected.show_tooltips = false;
+            expected.show_server_version_notice = false;
+            expected.auto_recap = false;
+            expected.fullscreen_transcript = true;
+            expected.vim_mode_default = true;
+            expected.terminal_resize_reflow_max_rows = Some(0);
+            expected.session_picker_view = Some(SessionPickerViewMode::Comfortable);
+        }
+        assert_eq!(
+            local.transcript_mode.is_owned(),
+            expected.fullscreen_transcript
+        );
+        assert_eq!(local.tui, expected);
+        assert_eq!(
+            config
+                .features
+                .legacy_feature_usages()
+                .map(|usage| usage.alias.as_str())
+                .collect::<Vec<_>>(),
+            vec!["features.transcript_v2"],
+        );
+        assert_eq!(
+            local.terminal_resize_reflow(),
+            config.terminal_resize_reflow
+        );
+        assert_eq!(
+            (&local.history, &local.notices),
+            (&config.history, &config.notices)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn strict_local_settings_load_preserves_resolved_preferences_and_legacy_warnings()
+-> anyhow::Result<()> {
+    use crate::motion::MotionMode;
+
+    for configured in [true, false] {
+        let home = tempfile::tempdir()?;
+        let config_text = format!("[tui]\nanimations = {configured}\n");
+        std::fs::write(home.path().join("config.toml"), &config_text)?;
+        let config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .strict_config(true)
+            .loader_overrides(LoaderOverrides {
+                ignore_project_config: true,
+                ..LoaderOverrides::without_managed_config_for_tests()
+            })
+            .cli_overrides(vec![
+                ("tui.disable_paste_burst".into(), true.into()),
                 // The deprecated flag must not override or migrate into the TUI preference.
                 (
                     "features.transcript_v2".into(),
@@ -146,6 +219,7 @@ fast_default_opt_out = true
                 mermaid: false,
                 math: false,
                 tables: false,
+                lists: false,
             };
             expected.show_tooltips = false;
             expected.show_server_version_notice = false;
@@ -183,6 +257,10 @@ fast_default_opt_out = true
 #[tokio::test]
 async fn local_writes_preserve_selected_user_file_and_home_destinations() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[tui]\nnotifications = [\"agent-turn-complete\"]\n",
+    )?;
     let selected = AbsolutePathBuf::from_absolute_path(home.path().join("work.config.toml"))?;
     std::fs::write(&selected, "[tui]\ntheme = \"dracula\"\n")?;
     let overrides = LoaderOverrides {
@@ -198,6 +276,7 @@ async fn local_writes_preserve_selected_user_file_and_home_destinations() -> any
         .await?;
     let local = LocalSettings::from(&config);
     assert_eq!(local.user_config_path, selected);
+    assert!(local.custom_notification_filters);
     ConfigEditsBuilder::for_config_path(local.user_config_path.as_path())
         .with_edits([crate::legacy_core::config::edit::syntax_theme_edit("nord")])
         .apply()

@@ -15,7 +15,6 @@ workspace = true
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 codex-api = { workspace = true }
-codex-collaboration-mode-templates = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider-info = { workspace = true }

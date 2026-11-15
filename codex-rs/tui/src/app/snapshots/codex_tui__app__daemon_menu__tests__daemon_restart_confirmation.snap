@@ -1,0 +1,28 @@
+---
+source: tui/src/app/daemon_menu_tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 80)"
+---
+  Agent command center  Group: Project  g
+   All 0   Needs you 0   Working 0   Ready 0   Inactive 0
+  ────────────────────────────────────────────────────────────────────────────
+  No tasks yet
+
+
+
+
+      Restart background server?
+      Active or queued work in other chats may be interrupted.
+      Codex will reconnect automatically.
+
+
+    › 1. Cancel
+      2. Restart
+
+      enter select · esc back
+
+
+
+
+
+
+  Service v0.153.0 < Codex CLI v0.154.0 · /daemon

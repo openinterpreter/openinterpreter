@@ -17,6 +17,8 @@ mod provisioning;
 mod registered_runtime;
 #[cfg(windows)]
 mod service;
+#[cfg(any(windows, test))]
+mod uninstall_policy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunMode {

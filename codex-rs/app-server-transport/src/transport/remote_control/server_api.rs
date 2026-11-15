@@ -9,7 +9,6 @@ use super::protocol::RefreshRemoteServerRequest;
 use super::protocol::RemoteControlTarget;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use codex_login::default_client::create_client_without_request_logging;
 use rand::Rng;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -241,8 +240,7 @@ where
     Request: Serialize,
     Response: DeserializeOwned,
 {
-    let client = create_client_without_request_logging();
-    let auth_headers = auth.request_headers()?;
+    let (client, auth_headers) = auth.request_context(url).await?;
     let response = client
         .post(url)
         .timeout(timeout)
@@ -252,6 +250,9 @@ where
         .send()
         .await
         .map_err(|err| {
+            if matches!(err, codex_http_client::HttpError::Policy(_)) {
+                return super::auth::request_error(err);
+            }
             let timed_out = err.is_timeout();
             RemoteControlServerRequestError::io_error(
                 format!("failed to {action} remote control server at `{url}`: {err}"),
@@ -264,6 +265,11 @@ where
     let status = response.status();
     let retry_at = retry_after_with_jitter(&headers, OffsetDateTime::now_utc());
     let body = response.bytes().await.map_err(|err| {
+        if matches!(err, codex_http_client::HttpError::Policy(_))
+            && !(retry_at.is_some() && (status.as_u16() == 429 || status.is_server_error()))
+        {
+            return super::auth::request_error(err);
+        }
         let timed_out = err.is_timeout();
         RemoteControlServerRequestError::io_error(
             format!("failed to read remote control {response_kind} response from `{url}`: {err}"),

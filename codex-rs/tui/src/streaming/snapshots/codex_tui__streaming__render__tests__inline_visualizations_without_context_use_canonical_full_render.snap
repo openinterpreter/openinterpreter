@@ -12,7 +12,7 @@ expression: render.lines
         hyperlinks: [],
     },
     HyperlinkLine {
-        line: Line::from(Span::from("Visualization unavailable on this device.").italic()),
+        line: Line::from(Span::from("Visualization unavailable on this device.").fg(Color::Reset).italic()),
         hyperlinks: [],
     },
 ]

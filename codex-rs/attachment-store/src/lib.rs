@@ -1,5 +1,6 @@
-//! Storage-neutral attachment persistence interfaces.
+//! Storage-neutral attachment persistence and availability checks.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -31,13 +32,33 @@ pub trait AttachmentStore: Send + Sync {
 
     /// Resolves metadata and, when requested, a fresh URL for a stored attachment.
     fn resolve<'a>(&'a self, request: ResolveRequest<'a>) -> ResolveFuture<'a>;
+
+    /// Only a definitive not-found response proves that a stored reference is unavailable.
+    /// Transient backend errors must not silently remove a user's attachment.
+    fn is_resolvable<'a>(
+        &'a self,
+        file_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            !matches!(
+                self.resolve(ResolveRequest { file_id, download_url_ttl: None }).await,
+                Err(error) if error.kind() == AttachmentStoreErrorKind::NotFound
+            )
+        })
+    }
 }
 
 /// Attachment data supplied to [`AttachmentStore::upload`].
 #[derive(Clone, Eq, PartialEq)]
 pub struct UploadRequest {
+    /// Owning conversation for scoped storage and later resolution.
+    pub thread_id: String,
+    /// Whether the attachment should follow the short-lived turn lifecycle.
+    pub ephemeral: bool,
     /// Optional name associated with the attachment.
     pub file_name: Option<String>,
+    /// Core-generated policy metadata; tool output cannot supply these tags.
+    pub tags: HashMap<String, String>,
     /// Attachment bytes to persist.
     pub data: Vec<u8>,
 }
@@ -111,6 +132,15 @@ impl fmt::Debug for AttachmentMetadata {
 pub enum FormatSpecificMetadata {
     /// Metadata for an image attachment.
     Image(ImageMetadata),
+    /// Metadata for an audio attachment.
+    Audio(AudioMetadata),
+}
+
+/// Duration used to budget a referenced audio clip before provider submission.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AudioMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Metadata specific to an image attachment.

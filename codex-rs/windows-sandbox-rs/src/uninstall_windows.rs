@@ -5,6 +5,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::ensure;
+use windows::Win32::System::Com::COINIT_MULTITHREADED;
+use windows::Win32::System::Com::CoInitializeEx;
+use windows::Win32::System::Com::CoUninitialize;
 
 use crate::setup::OFFLINE_USERNAME;
 use crate::setup::ONLINE_USERNAME;

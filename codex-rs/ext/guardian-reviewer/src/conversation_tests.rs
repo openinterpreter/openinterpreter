@@ -16,18 +16,47 @@ fn fork_keeps_committed_history_and_cursor_while_next_review_is_uncommitted() {
         transcript_entry_count: 4,
         ..first
     };
+    // A failed review can retain new input without completing or replacing the
+    // last successful checkpoint used by concurrent forks.
+    state.admit_transcript(second);
+    let fork = ConversationState::from(state.snapshot().unwrap().clone());
+    assert_eq!(
+        (
+            state.cursor(),
+            state.completed_review_count(),
+            fork.snapshot().unwrap().history(),
+            fork.cursor(),
+            fork.completed_review_count(),
+        ),
+        (Some(second), 1, &vec!["first review"], Some(first), 1),
+    );
     state.complete_review(second);
 
-    let (fork, history) = ConversationState::fork(state.snapshot().unwrap().clone());
+    let fork = ConversationState::from(state.snapshot().unwrap().clone());
     assert_eq!(
-        (history, fork.cursor(), fork.completed_review_count()),
-        (vec!["first review"], Some(first), 1),
+        (
+            fork.snapshot().unwrap().history(),
+            fork.cursor(),
+            fork.completed_review_count(),
+        ),
+        (&vec!["first review"], Some(first), 1),
     );
 
     state.commit_snapshot(vec!["first review", "second review"]);
-    let (fork, history) = ConversationState::fork(state.snapshot().unwrap().clone());
+    let mut fork = ConversationState::from(state.snapshot().unwrap().clone());
+    let history = fork.take_history();
     assert_eq!(
         (history, fork.cursor(), fork.completed_review_count()),
-        (vec!["first review", "second review"], Some(second), 2),
+        (Some(vec!["first review", "second review"]), Some(second), 2),
     );
+    assert!(fork.snapshot().is_none());
+    assert_eq!(
+        (
+            state.take_history(),
+            state.cursor(),
+            state.completed_review_count(),
+        ),
+        (Some(vec!["first review", "second review"]), Some(second), 2),
+    );
+    assert!(state.snapshot().is_none());
 }

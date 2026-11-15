@@ -1,33 +1,64 @@
+//! Reads durable history into bounded batches ending at complete records, each with a checkpoint.
+
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
+use std::path::PathBuf;
 
 use chrono::DateTime;
 use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
 use codex_rollout::RolloutItem;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeekExt;
 use tracing::warn;
 
 use super::LocalThreadStore;
+use super::rollout_lineage::AncestorReads;
 use super::thread_history::ProjectedRolloutLine;
 use super::thread_history::RolloutProjectionStep;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+#[path = "thread_history_materialization_pipeline.rs"]
+mod pipeline;
+
 const SQLITE_PROJECTION_METRIC: &str = "codex.thread_history.sqlite_projection";
 const SQLITE_PROJECTION_ANOMALY_METRIC: &str = "codex.thread_history.sqlite_projection.anomaly";
+const BATCH_SOURCE_BYTES: u64 = 1024 * 1024;
+const BATCH_STEPS: usize = 256;
+
+struct ProjectionRollout {
+    path: PathBuf,
+    reads: AncestorReads,
+}
 
 pub(super) async fn materialize_to_sqlite(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_with_reads(store, thread_id, rollout_path, &AncestorReads::default())
+        .await
+}
+
+/// Project this rollout and identify an unreadable ancestor before committing a batch.
+pub(super) async fn materialize_to_sqlite_with_reads(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    reads: &AncestorReads,
+) -> ThreadStoreResult<()> {
     if store.state_db.is_none() {
         return Ok(());
     }
-    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout_path).await;
+    let rollout = ProjectionRollout {
+        path: rollout_path.to_owned(),
+        reads: reads.clone(),
+    };
+    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout).await;
     record_projection_outcome(&result);
     result
 }
@@ -35,22 +66,38 @@ pub(super) async fn materialize_to_sqlite(
 async fn materialize_to_sqlite_with_state_db(
     store: &LocalThreadStore,
     thread_id: ThreadId,
-    rollout_path: &Path,
+    rollout: ProjectionRollout,
 ) -> ThreadStoreResult<()> {
     let projection_state = super::thread_history::projection_state(store, thread_id).await?;
     let start_offset = projection_state
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
+    if rollout
+        .reads
+        .cutoff(&rollout.path)
+        .is_some_and(|end| start_offset >= end.end_byte_offset)
+    {
+        return Ok(());
+    }
     if projection_state.is_none()
-        && codex_rollout::existing_rollout_path(rollout_path)
+        && !rollout.reads.tracks(&rollout.path)
+        && codex_rollout::existing_rollout_path(&rollout.path)
             .await
             .is_none()
     {
         return Ok(());
     }
-    let session_meta = codex_rollout::read_session_meta_line(rollout_path)
+    let session_meta = codex_rollout::read_session_meta_line(&rollout.path)
         .await
-        .map_err(thread_store_io_error)?
+        .map_err(|err| {
+            rollout.reads.record_failure(&rollout.path);
+            ThreadStoreError::Internal {
+                message: format!(
+                    "failed to read rollout metadata {}: {err}",
+                    rollout.path.display()
+                ),
+            }
+        })?
         .meta;
     let initial_ordinal = session_meta
         .history_base
@@ -59,78 +106,88 @@ async fn materialize_to_sqlite_with_state_db(
     let expected_ordinal = projection_state
         .as_ref()
         .map_or(initial_ordinal, |state| state.next_ordinal);
-    let (projections, next_offset) = read_projection_steps(
-        rollout_path,
-        start_offset,
-        expected_ordinal,
-        thread_id,
-        subagent_history_start_ordinal,
-    )
-    .await?;
-    // Empty valid records can still consume bytes through blank complete lines.
-    if projections.is_empty() && start_offset == next_offset {
-        return Ok(());
-    }
-    super::thread_history::apply_projection(
+    pipeline::read_and_apply(
         store,
         thread_id,
+        rollout,
         start_offset,
-        next_offset,
+        expected_ordinal,
         initial_ordinal,
-        projections,
+        subagent_history_start_ordinal,
     )
     .await
 }
 
-async fn read_projection_steps(
-    rollout_path: &Path,
+/// Read and project the complete durable prefix in one blocking task.
+fn read_projection_batches(
+    rollout: &ProjectionRollout,
     start_offset: u64,
     expected_ordinal: u64,
     thread_id: ThreadId,
     subagent_history_start_ordinal: Option<u64>,
-) -> ThreadStoreResult<(Vec<RolloutProjectionStep>, u64)> {
-    let path = rollout_path.to_path_buf();
-    let file =
-        tokio::task::spawn_blocking(move || codex_rollout::open_rollout_seekable_reader(&path))
-            .await
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!("failed to join rollout projection read: {err}"),
-            })?;
-    let mut file = match file {
-        Ok(file) => tokio::fs::File::from_std(file),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound && start_offset == 0 => {
-            return Ok((Vec::new(), 0));
+    is_cancelled: impl Fn() -> bool,
+    mut emit: impl FnMut(Vec<RolloutProjectionStep>, u64) -> ThreadStoreResult<()>,
+) -> ThreadStoreResult<()> {
+    let rollout_path = &rollout.path;
+    let mut file = match rollout.reads.open(rollout_path, &is_cancelled) {
+        Ok(file) => file,
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                && start_offset == 0
+                && !rollout.reads.tracks(rollout_path) =>
+        {
+            return Ok(());
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
-    let file_end_offset = file.metadata().await.map_err(thread_store_io_error)?.len();
-    let byte_count =
-        file_end_offset
-            .checked_sub(start_offset)
-            .ok_or_else(|| ThreadStoreError::Internal {
-                message: "durable rollout shrank before projection".to_string(),
-            })?;
-    let byte_count = usize::try_from(byte_count).map_err(|_| ThreadStoreError::Internal {
-        message: "durable rollout append exceeds addressable memory".to_string(),
+    let file_end_offset = match rollout.reads.cutoff(rollout_path) {
+        Some(end) => end.end_byte_offset,
+        None => file.seek(SeekFrom::End(0)).map_err(thread_store_io_error)?,
+    };
+    let byte_count = file_end_offset.checked_sub(start_offset).ok_or_else(|| {
+        rollout.reads.record_failure(rollout_path);
+        ThreadStoreError::Internal {
+            message: format!(
+                "durable rollout shrank before projection: {}",
+                rollout_path.display()
+            ),
+        }
     })?;
-    let mut bytes = vec![0; byte_count];
     file.seek(SeekFrom::Start(start_offset))
-        .await
         .map_err(thread_store_io_error)?;
-    file.read_exact(bytes.as_mut_slice())
-        .await
-        .map_err(thread_store_io_error)?;
+    // Freeze this pass at the captured end, without retaining the entire durable suffix.
+    let mut reader = BufReader::new(file.take(byte_count));
+    let mut line_bytes = Vec::new();
     // Only project the newline-terminated prefix; leave a trailing partial record for the next
     // pass.
-    let complete_byte_count = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
-    let mut projections = Vec::new();
     let mut next_ordinal = expected_ordinal;
     let mut next_offset = start_offset;
     let mut line_start_offset = start_offset;
-    for line_bytes in bytes[..complete_byte_count].split_inclusive(|byte| *byte == b'\n') {
+    let mut batch_start_offset = start_offset;
+    let mut batch = Vec::new();
+    loop {
+        if is_cancelled() {
+            return Err(thread_store_io_error(std::io::Error::other(
+                "rollout read cancelled",
+            )));
+        }
+        // Flush only between complete records: an ordinal gap and its following line must
+        // share a checkpoint. Byte-only progress from skipped records also bounds batches.
+        if next_offset - batch_start_offset >= BATCH_SOURCE_BYTES || batch.len() >= BATCH_STEPS {
+            emit(std::mem::take(&mut batch), next_offset)?;
+            batch_start_offset = next_offset;
+        }
+        line_bytes.clear();
+        if reader
+            .read_until(b'\n', &mut line_bytes)
+            .map_err(thread_store_io_error)?
+            == 0
+        {
+            break;
+        }
+        if !line_bytes.ends_with(b"\n") {
+            break;
+        }
         let line_end_offset = line_start_offset
             .checked_add(u64::try_from(line_bytes.len()).map_err(|_| {
                 ThreadStoreError::Internal {
@@ -145,7 +202,7 @@ async fn read_projection_steps(
             line_start_offset = line_end_offset;
             continue;
         }
-        let value = match serde_json::from_slice::<serde_json::Value>(line_bytes) {
+        let value = match serde_json::from_slice::<serde_json::Value>(&line_bytes) {
             Ok(value) => value,
             Err(err) => {
                 warn!(
@@ -228,7 +285,7 @@ async fn read_projection_steps(
         let fallback_created_at_ms = if changes
             .changed_items
             .iter()
-            .any(|item| item.started_at_ms.is_none())
+            .any(|change| change.item.started_at_ms.is_none())
             || (!is_inherited_subagent_history
                 && matches!(&line.item, RolloutItem::RealtimeItem(_)))
         {
@@ -252,7 +309,7 @@ async fn read_projection_steps(
                             .ok_or_else(|| ThreadStoreError::Internal {
                                 message: "rollout ordinal exceeds SQLite integer range".to_string(),
                             })?;
-                    projections.push(RolloutProjectionStep::SkippedOrdinalRange {
+                    batch.push(RolloutProjectionStep::SkippedOrdinalRange {
                         start_ordinal: next_ordinal,
                         end_ordinal_exclusive,
                     });
@@ -278,7 +335,7 @@ async fn read_projection_steps(
                 "skipping missing rollout ordinal range during projection"
             );
             record_projection_anomaly(ProjectionAnomaly::ForwardOrdinalGap);
-            projections.push(RolloutProjectionStep::SkippedOrdinalRange {
+            batch.push(RolloutProjectionStep::SkippedOrdinalRange {
                 start_ordinal: next_ordinal,
                 end_ordinal_exclusive: ordinal,
             });
@@ -289,7 +346,7 @@ async fn read_projection_steps(
                 .ok_or_else(|| ThreadStoreError::Internal {
                     message: "rollout ordinal exceeds SQLite integer range".to_string(),
                 })?;
-        projections.push(RolloutProjectionStep::Line(Box::new(
+        batch.push(RolloutProjectionStep::Line(Box::new(
             ProjectedRolloutLine {
                 ordinal,
                 start_byte_offset: line_start_offset,
@@ -306,7 +363,16 @@ async fn read_projection_steps(
         next_offset = line_end_offset;
         line_start_offset = line_end_offset;
     }
-    Ok((projections, next_offset))
+    if reader.get_ref().limit() != 0 {
+        return Err(thread_store_io_error(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "durable rollout shrank during projection",
+        )));
+    }
+    if next_offset != batch_start_offset {
+        emit(batch, next_offset)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

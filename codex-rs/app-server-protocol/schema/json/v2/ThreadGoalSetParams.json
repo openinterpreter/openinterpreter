@@ -1,6 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ThreadGoalMutationOrigin": {
+      "enum": [
+        "user",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "ThreadGoalStatus": {
       "enum": [
         "active",
@@ -50,6 +57,17 @@
         "string",
         "null"
       ]
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadGoalMutationOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Missing provenance does not supply user authorization."
     },
     "status": {
       "anyOf": [

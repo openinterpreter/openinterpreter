@@ -1,0 +1,874 @@
+//! Gateway OAuth RPCs expose login progress, cancellation, and initialization policy.
+
+use anyhow::Context;
+use anyhow::Result;
+use app_test_support::TestAppServer;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::GatewayOAuthCancelResponse;
+use codex_app_server_protocol::GatewayOAuthChangedNotification;
+use codex_app_server_protocol::GatewayOAuthLoginResponse;
+use codex_app_server_protocol::GatewayOAuthReadResponse;
+use codex_app_server_protocol::GatewayOAuthStatus;
+use codex_app_server_protocol::InitializeCapabilities;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::UserInput;
+use core_test_support::oauth::mount_device_code_grant;
+use pretty_assertions::assert_eq;
+use std::time::Duration;
+use tempfile::TempDir;
+use tokio::time::timeout;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::body_string_contains;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+fn gateway_config(oauth: &MockServer) -> String {
+    format!(
+        r#"
+model_provider = "gateway"
+[features]
+secret_auth_storage = true
+[model_providers.gateway]
+name = "Test gateway"
+base_url = "{url}/v1"
+wire_api = "responses"
+[model_providers.gateway.gateway_oauth]
+authorization_url = "{url}/authorize"
+token_url = "{url}/token"
+client_id = "app-server-explicit-test"
+delivery = {{ kind = "header", name = "X-Gateway-Authorization" }}
+"#,
+        url = oauth.uri()
+    )
+}
+
+async fn gateway_server(home: &std::path::Path) -> Result<TestAppServer> {
+    let mut server = TestAppServer::builder()
+        .with_codex_home(home)
+        .with_env_overrides(&[("OPENAI_API_KEY", None), ("CODEX_API_KEY", None)])
+        .build()
+        .await?;
+    server
+        .initialize_with_capabilities(
+            ClientInfo {
+                name: "gateway-test".to_string(),
+                title: None,
+                version: "1".to_string(),
+            },
+            Some(InitializeCapabilities {
+                explicit_gateway_oauth: true,
+                experimental_api: true,
+                ..Default::default()
+            }),
+        )
+        .await?;
+    Ok(server)
+}
+
+async fn read_gateway(server: &mut TestAppServer) -> Result<GatewayOAuthReadResponse> {
+    server
+        .request(|id| ClientRequest::GatewayOAuthRead {
+            request_id: id,
+            params: None,
+        })
+        .await
+}
+
+async fn cancel_gateway(server: &mut TestAppServer) -> Result<GatewayOAuthCancelResponse> {
+    server
+        .request(|id| ClientRequest::GatewayOAuthCancel {
+            request_id: id,
+            params: None,
+        })
+        .await
+}
+
+async fn gateway_login_prompt(server: &mut TestAppServer) -> Result<url::Url> {
+    timeout(TIMEOUT, async {
+        loop {
+            let changed: GatewayOAuthChangedNotification = server
+                .read_notification("account/gatewayOAuth/changed")
+                .await?;
+            if let Some(url) = changed.auth_url {
+                return Ok(url::Url::parse(&url)?);
+            }
+        }
+    })
+    .await?
+}
+
+const TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
+#[tokio::test]
+async fn model_list_requests_restart_after_gateway_provider_changes() -> Result<()> {
+    let oauth = MockServer::start().await;
+    let original = gateway_config(&oauth);
+    for replacement in [
+        String::new(), // Switch to the default provider without gateway OAuth.
+        original.replace("/authorize", "/replacement-authorize"),
+    ] {
+        let home = TempDir::new()?;
+        let config_path = home.path().join("config.toml");
+        std::fs::write(&config_path, &original)?;
+        let mut server = gateway_server(home.path()).await?;
+        std::fs::write(&config_path, replacement)?;
+        let models = server
+            .send_raw_request("model/list", Some(serde_json::json!({})))
+            .await?;
+        let error = timeout(
+            TIMEOUT,
+            server.read_stream_until_error_message(RequestId::Integer(models)),
+        )
+        .await??;
+        assert_eq!(error.error, JSONRPCErrorError {
+            code: -32600,
+            message: "Model provider settings changed. Restart Codex to apply them, then retry fetching the model list".to_string(),
+            data: None,
+        });
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn working_gateway_exporter_allows_model_list_without_an_oauth_session() -> Result<()> {
+    let oauth = MockServer::start().await;
+    let home = TempDir::new()?;
+    let token_file = home.path().join("exported-token");
+    std::fs::write(&token_file, "")?;
+    let file_arg = serde_json::to_string(&token_file)?;
+    let command = if cfg!(windows) {
+        format!("command = 'cmd.exe', args = ['/D', '/C', 'type', {file_arg}]")
+    } else {
+        format!("command = 'cat', args = [{file_arg}]")
+    };
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"
+model_provider = "gateway"
+[model_providers.gateway]
+name = "Test gateway"
+base_url = "{url}/v1"
+[model_providers.gateway.gateway_oauth]
+credential_export = {{ {command} }}
+"#,
+            url = oauth.uri()
+        ),
+    )?;
+    let mut server = gateway_server(home.path()).await?;
+    let response = read_gateway(&mut server).await?;
+    assert!(!response.required);
+    assert_eq!(response.status, None);
+    // A local list still requires credentials, even when no remote catalog is fetched.
+    let id = server
+        .send_raw_request("model/list", Some(serde_json::json!({})))
+        .await?;
+    let error = server
+        .read_stream_until_error_message(RequestId::Integer(id))
+        .await?;
+    assert!(
+        error
+            .error
+            .message
+            .contains("Gateway credential export must print one access token")
+    );
+    std::fs::write(&token_file, "exported")?;
+    for _ in 0..2 {
+        let _: codex_app_server_protocol::ModelListResponse = server
+            .request(|request_id| ClientRequest::ModelList {
+                request_id,
+                params: codex_app_server_protocol::ModelListParams::default(),
+            })
+            .await?;
+        // The next preflight can use the token cached by the first.
+        std::fs::write(&token_file, "")?;
+    }
+    assert!(
+        oauth
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !matches!(request.url.path(), "/authorize" | "/token"))
+    );
+    Ok(())
+}
+
+/// Account changes reload the catalog before validating a retained OAuth gateway.
+#[tokio::test]
+async fn model_list_leaves_oauth_gateway_after_account_change() -> Result<()> {
+    let oauth = MockServer::start().await;
+    let home = TempDir::new()?;
+    std::fs::write(home.path().join("config.toml"), gateway_config(&oauth))?;
+    let mut server = gateway_server(home.path()).await?;
+    std::fs::write(home.path().join("config.toml"), "")?;
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        "model_provider = 'openai'",
+    )?;
+    let id = server
+        .send_login_account_api_key_request("sk-catalog-test")
+        .await?;
+    let _: codex_app_server_protocol::LoginAccountResponse = server.read_response(id).await?;
+    server
+        .read_stream_until_notification_message("account/updated")
+        .await?;
+    let models: codex_app_server_protocol::ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: codex_app_server_protocol::ModelListParams::default(),
+        })
+        .await?;
+    assert!(!models.data.is_empty());
+    assert!(
+        oauth
+            .received_requests()
+            .await
+            .expect("gateway requests")
+            .is_empty()
+    );
+    Ok(())
+}
+
+async fn login_to_gateway(server: &mut TestAppServer, oauth: &MockServer) -> Result<()> {
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("grant_type=authorization_code"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(serde_json::json!({
+            "access_token": "gateway-access", "refresh_token": "gateway-refresh", "expires_in": 3600,
+        })))
+        .expect(/*r*/ 1)
+        .mount(oauth)
+        .await;
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let url = gateway_login_prompt(server).await?;
+    let query = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut callback = url::Url::parse(query.get("redirect_uri").context("callback URI")?)?;
+    callback
+        .query_pairs_mut()
+        .append_pair("code", "accepted")
+        .append_pair("state", query.get("state").context("OAuth state")?);
+    codex_login::default_client::create_client_without_request_logging()
+        .get(callback.as_str())
+        .send()
+        .await?
+        .error_for_status()?;
+    let _: GatewayOAuthLoginResponse = server.read_response(login).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_oauth_without_api_key_discovers_explicit_catalog_by_default() -> Result<()> {
+    let home = TempDir::new()?;
+    let gateway = MockServer::start().await;
+    let url = gateway.uri();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"
+model_provider = "gateway"
+[model_providers.gateway]
+name = "Test gateway"
+base_url = "{url}/v1"
+model_catalog_url = "{url}/catalog"
+[model_providers.gateway.gateway_oauth]
+authorization_url = "{url}/authorize"
+token_url = "{url}/token"
+client_id = "catalog-test"
+credentials_store = "file"
+"#
+        ),
+    )?;
+    let model = codex_protocol::openai_models::ModelInfo {
+        visibility: codex_protocol::openai_models::ModelVisibility::List,
+        ..codex_models_manager::model_info::model_info_from_slug("gateway-coder")
+    };
+    Mock::given(method("GET"))
+        .and(path("/catalog"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer gateway-access",
+        ))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(
+            codex_protocol::openai_models::ModelsResponse {
+                models: vec![model],
+            },
+        ))
+        .expect(1..)
+        .mount(&gateway)
+        .await;
+    let mut server = gateway_server(home.path()).await?;
+    login_to_gateway(&mut server, &gateway).await?;
+    let response: codex_app_server_protocol::ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: Default::default(),
+        })
+        .await?;
+    let ids: Vec<_> = response.data.into_iter().map(|model| model.id).collect();
+    assert_eq!(ids, ["gateway-coder"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_credentials_reuse_gateway_login_after_restart() -> Result<()> {
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    // Exercise the managed provider definition used by headless installations.
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        format!("{}\ncredentials_store = 'file'\n", gateway_config(&oauth)),
+    )?;
+    let mut server = gateway_server(home.path()).await?;
+    login_to_gateway(&mut server, &oauth).await?;
+    server.shutdown_gracefully().await?;
+
+    let path = home.path().join("secrets/gateway_oauth.json");
+    assert!(path.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+    }
+    let mut restarted = gateway_server(home.path()).await?;
+    assert_eq!(
+        read_gateway(&mut restarted).await?.status,
+        Some(GatewayOAuthStatus::Succeeded)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn device_login_sends_the_code_and_can_refresh_without_another_sign_in() -> Result<()> {
+    let oauth = MockServer::start().await;
+    let _device_grant = mount_device_code_grant(
+        &oauth,
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "first-access", "refresh_token": "first-refresh",
+            "token_type": "Bearer", "expires_in": 1,
+        })),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("refresh_token=first-refresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "refreshed-access", "token_type": "Bearer", "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&oauth)
+        .await;
+    let home = TempDir::new()?;
+    let config = gateway_config(&oauth).replace("model_provider = \"gateway\"\n", "");
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        format!(
+            "{config}\ndevice_authorization_url = '{}/devicecode'\ncredentials_store = 'file'\n",
+            oauth.uri()
+        ),
+    )?;
+    let mut server = gateway_server(home.path()).await?;
+    assert!(!read_gateway(&mut server).await?.required);
+
+    let params = serde_json::json!({"modelProvider": "gateway", "deviceAuth": true});
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", Some(params.clone()))
+        .await?;
+    let response: GatewayOAuthLoginResponse = server.read_response(login).await?;
+    let prompt = response.prompt.context("missing gateway device prompt")?;
+    assert_eq!(prompt.verification_url, "https://login.example/device");
+    assert_eq!(prompt.user_code, "ABCD-EFGH");
+    timeout(
+        TIMEOUT,
+        server.read_stream_until_matching_notification("device login completed", |notification| {
+            notification.method == "account/gatewayOAuth/changed"
+                && notification.params.as_ref().is_some_and(|params| {
+                    params["loginId"].as_str() == Some(prompt.login_id.as_str())
+                        && params["status"] == "succeeded"
+                })
+        }),
+    )
+    .await??;
+
+    // The first token is already due for refresh. The issuer expects exactly one device grant.
+    let retry = server
+        .send_raw_request("account/gatewayOAuth/login", Some(params))
+        .await?;
+    let reused: GatewayOAuthLoginResponse = server.read_response(retry).await?;
+    assert!(reused.prompt.is_none());
+    let read = server
+        .send_raw_request(
+            "account/gatewayOAuth/read",
+            Some(serde_json::json!({"modelProvider": "gateway"})),
+        )
+        .await?;
+    let state: GatewayOAuthReadResponse = server.read_response(read).await?;
+    assert!(state.supports_device_auth);
+    assert_eq!(state.status, Some(GatewayOAuthStatus::Succeeded));
+    Ok(())
+}
+
+#[tokio::test]
+async fn token_exchange_failure_completes_login_and_updates_readiness() -> Result<()> {
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    let secret = "issuer-query-credential";
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("grant_type=authorization_code"))
+        .and(body_string_contains("code=accepted"))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 400)
+                .insert_header("x-request-id", secret)
+                .set_body_json(serde_json::json!({
+                    "error": "invalid_grant", "error_description": secret,
+                })),
+        )
+        .expect(/*r*/ 1)
+        .mount(&oauth)
+        .await;
+    std::fs::write(
+        home.path().join("config.toml"),
+        gateway_config(&oauth).replace(
+            "/authorize\"",
+            &format!("/authorize?issuer_secret={secret}\""),
+        ),
+    )?;
+    let mut server = gateway_server(home.path()).await?;
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let authorization_url = gateway_login_prompt(&mut server).await?;
+    let query = authorization_url
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut callback = url::Url::parse(query.get("redirect_uri").context("callback URI")?)?;
+    callback
+        .query_pairs_mut()
+        .append_pair("code", "accepted")
+        .append_pair("state", query.get("state").context("OAuth state")?);
+    codex_login::default_client::create_client_without_request_logging()
+        .get(callback.as_str())
+        .send()
+        .await?
+        .error_for_status()?;
+    let error = timeout(
+        TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(login)),
+    )
+    .await??;
+    let message = "Gateway sign-in failed; check the gateway configuration and credential store.";
+    assert_eq!(error.error.message, message);
+    let changed = timeout(
+        TIMEOUT,
+        server.read_stream_until_matching_notification("gateway login failure", |notification| {
+            notification.method == "account/gatewayOAuth/changed"
+                && notification
+                    .params
+                    .as_ref()
+                    .is_some_and(|params| params["status"] == "failed")
+        }),
+    )
+    .await??;
+    assert_eq!(
+        serde_json::from_value::<GatewayOAuthChangedNotification>(
+            changed.params.context("gateway status")?
+        )?,
+        GatewayOAuthChangedNotification {
+            login_id: None,
+            provider_id: "gateway".into(),
+            status: GatewayOAuthStatus::Failed,
+            auth_url: None,
+            error: Some(message.into()),
+        }
+    );
+    let state: GatewayOAuthReadResponse = read_gateway(&mut server).await?;
+    assert_eq!(
+        state,
+        GatewayOAuthReadResponse {
+            provider_id: "gateway".to_string(),
+            provider_name: "Test gateway".to_string(),
+            required: true,
+            supports_device_auth: false,
+            status: Some(GatewayOAuthStatus::Failed),
+            error: Some(error.error.message),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_and_cancel_without_gateway_oauth() -> Result<()> {
+    let home = TempDir::new()?;
+    let mut server = gateway_server(home.path()).await?;
+    let state: GatewayOAuthReadResponse = read_gateway(&mut server).await?;
+    assert_eq!(
+        (state.required, state.status, state.error),
+        (false, None, None)
+    );
+    let response: GatewayOAuthCancelResponse = cancel_gateway(&mut server).await?;
+    assert_eq!(response, GatewayOAuthCancelResponse {});
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let error = timeout(
+        TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(login)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.message,
+        "The selected provider does not use gateway OAuth"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_account_is_required_before_gateway_login() -> Result<()> {
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    let config = gateway_config(&oauth).replace(
+        "wire_api = \"responses\"",
+        "wire_api = \"responses\"\nrequires_openai_auth = true",
+    );
+    std::fs::write(home.path().join("config.toml"), config)?;
+    let mut server = gateway_server(home.path()).await?;
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let error = timeout(
+        TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(login)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.message,
+        "Sign in to your primary account before signing in to the gateway"
+    );
+    assert!(oauth.received_requests().await.unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_is_passive_and_canceled_login_can_be_retried_immediately() -> Result<()> {
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    let config = gateway_config(&oauth);
+    std::fs::write(home.path().join("config.toml"), &config)?;
+    let mut server = gateway_server(home.path()).await?;
+    let state: GatewayOAuthReadResponse = read_gateway(&mut server).await?;
+    assert_eq!(
+        state,
+        GatewayOAuthReadResponse {
+            provider_id: "gateway".to_string(),
+            provider_name: "Test gateway".to_string(),
+            required: true,
+            supports_device_auth: false,
+            status: Some(GatewayOAuthStatus::NotReady),
+            error: None
+        }
+    );
+    assert!(oauth.received_requests().await.unwrap().is_empty());
+    let expected = GatewayOAuthChangedNotification {
+        login_id: None,
+        provider_id: "gateway".to_string(),
+        status: GatewayOAuthStatus::NotReady,
+        auth_url: None,
+        error: None,
+    };
+    // Consume the initial readiness change before checking repeated request failures.
+    let changed: GatewayOAuthChangedNotification = timeout(
+        TIMEOUT,
+        server.read_notification("account/gatewayOAuth/changed"),
+    )
+    .await??;
+    assert_eq!(changed, expected);
+    for _ in 0..2 {
+        let models = server
+            .send_raw_request("model/list", Some(serde_json::json!({})))
+            .await?;
+        let error = timeout(
+            TIMEOUT,
+            server.read_stream_until_error_message(RequestId::Integer(models)),
+        )
+        .await??;
+        assert!(error.error.message.contains("Gateway sign-in required"));
+        let changed: GatewayOAuthChangedNotification = timeout(
+            TIMEOUT,
+            server.read_notification("account/gatewayOAuth/changed"),
+        )
+        .await??;
+        assert_eq!(changed, expected);
+    }
+    let login = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let url = gateway_login_prompt(&mut server).await?;
+    assert!(
+        url.as_str()
+            .starts_with(&format!("{}/authorize?", oauth.uri()))
+    );
+    let state: GatewayOAuthReadResponse = read_gateway(&mut server).await?;
+    assert_eq!(state.status, Some(GatewayOAuthStatus::Started));
+    let duplicate = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    let error = timeout(
+        TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(duplicate)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.message,
+        "Gateway sign-in is already in progress"
+    );
+    let _: GatewayOAuthCancelResponse = cancel_gateway(&mut server).await?;
+    // Retry on the cancel acknowledgment, without waiting for the old login response.
+    let retry = server
+        .send_raw_request("account/gatewayOAuth/login", /*params*/ None)
+        .await?;
+    gateway_login_prompt(&mut server).await?;
+    let _: GatewayOAuthCancelResponse = cancel_gateway(&mut server).await?;
+    for request_id in [login, retry] {
+        let error = timeout(
+            TIMEOUT,
+            server.read_stream_until_error_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert_eq!(error.error.message, "Gateway sign-in was canceled");
+    }
+    assert!(oauth.received_requests().await.unwrap().is_empty());
+
+    let state: GatewayOAuthReadResponse = read_gateway(&mut server).await?;
+    assert_eq!(
+        (state.status, state.error),
+        (
+            Some(GatewayOAuthStatus::Failed),
+            Some("Gateway sign-in was canceled".to_string())
+        )
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_cancels_only_the_owning_connections_login() -> Result<()> {
+    use super::connection_handling_websocket::connect_websocket;
+    use super::connection_handling_websocket::read_error_for_id;
+    use super::connection_handling_websocket::read_notification_for_method;
+    use super::connection_handling_websocket::read_response_for_id;
+    use super::connection_handling_websocket::send_request;
+    use super::connection_handling_websocket::spawn_websocket_server;
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    std::fs::write(home.path().join("config.toml"), gateway_config(&oauth))?;
+    let (mut process, address) = spawn_websocket_server(home.path()).await?;
+    let mut owner = connect_websocket(address).await?;
+    let mut observer = connect_websocket(address).await?;
+    send_request(&mut owner, "initialize", /*id*/ 1, Some(serde_json::json!({"clientInfo": {"name": "gateway-owner", "version": "1"}, "capabilities": {"experimentalApi": true, "explicitGatewayOauth": true}}))).await?;
+    read_response_for_id(&mut owner, /*id*/ 1).await?;
+    send_request(&mut observer, "initialize", /*id*/ 1, Some(serde_json::json!({"clientInfo": {"name": "gateway-observer", "version": "1"}, "capabilities": {"experimentalApi": true}}))).await?;
+    read_response_for_id(&mut observer, /*id*/ 1).await?;
+    // A legacy connection cannot undo another connection's explicit opt-in.
+    send_request(
+        &mut observer,
+        "model/list",
+        /*id*/ 0,
+        Some(serde_json::json!({})),
+    )
+    .await?;
+    let error = read_error_for_id(&mut observer, /*id*/ 0).await?;
+    assert!(error.error.message.contains("Gateway sign-in required"));
+    send_request(
+        &mut owner,
+        "account/gatewayOAuth/login",
+        /*id*/ 2,
+        /*params*/ None,
+    )
+    .await?;
+    // Startup can publish readiness before the login request starts authorization.
+    timeout(TIMEOUT, async {
+        loop {
+            let changed =
+                read_notification_for_method(&mut observer, "account/gatewayOAuth/changed").await?;
+            if changed
+                .params
+                .as_ref()
+                .and_then(|params| params["status"].as_str())
+                == Some("started")
+            {
+                return anyhow::Ok(());
+            }
+        }
+    })
+    .await??;
+    send_request(
+        &mut observer,
+        "account/gatewayOAuth/cancel",
+        /*id*/ 2,
+        /*params*/ None,
+    )
+    .await?;
+    let error = read_error_for_id(&mut observer, /*id*/ 2).await?;
+    assert_eq!(
+        error.error.message,
+        "Gateway sign-in belongs to another connection"
+    );
+    owner.close(/*msg*/ None).await?;
+    let canceled =
+        read_notification_for_method(&mut observer, "account/gatewayOAuth/changed").await?;
+    assert_eq!(canceled.params.unwrap()["status"], "failed");
+    send_request(
+        &mut observer,
+        "account/gatewayOAuth/login",
+        /*id*/ 3,
+        /*params*/ None,
+    )
+    .await?;
+    let started =
+        read_notification_for_method(&mut observer, "account/gatewayOAuth/changed").await?;
+    assert_eq!(started.params.unwrap()["status"], "started");
+    send_request(
+        &mut observer,
+        "account/gatewayOAuth/cancel",
+        /*id*/ 4,
+        /*params*/ None,
+    )
+    .await?;
+    // Stop the test process after observing that a new connection can own a new login.
+    process.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn initialization_selects_legacy_or_explicit_gateway_login() -> Result<()> {
+    for explicit in [false, true] {
+        let home = TempDir::new()?;
+        let oauth = MockServer::start().await;
+        // Force automatic authorization to fail before launching a real browser.
+        let callback = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = callback.local_addr()?.port();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("{}\nredirect_port = {port}\n", gateway_config(&oauth)),
+        )?;
+        let mut server = TestAppServer::builder()
+            .with_codex_home(home.path())
+            .build()
+            .await?;
+        server
+            .initialize_with_capabilities(
+                ClientInfo {
+                    name: "gateway-compat-test".into(),
+                    title: None,
+                    version: "1".into(),
+                },
+                Some(InitializeCapabilities {
+                    explicit_gateway_oauth: explicit,
+                    experimental_api: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("{}\nredirect_port = {port}\n", gateway_config(&oauth))
+                .replace("app-server-explicit-test", "gateway-after-initialize"),
+        )?;
+        let thread = server
+            .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+            .await?;
+        let thread: ThreadStartResponse = server.read_response(thread).await?;
+        let turn = server
+            .send_turn_start_request(TurnStartParams {
+                thread_id: thread.thread.id,
+                input: vec![UserInput::Text {
+                    text: "hello".into(),
+                    text_elements: vec![],
+                }],
+                ..Default::default()
+            })
+            .await?;
+        let _: TurnStartResponse = server.read_response(turn).await?;
+        let completed: TurnCompletedNotification =
+            timeout(TIMEOUT, server.read_notification("turn/completed")).await??;
+        assert_eq!(completed.turn.status, TurnStatus::Failed);
+        assert_eq!(
+            completed.turn.error.context("gateway failure")?.message,
+            if explicit {
+                "Gateway sign-in required. Choose Sign in or Reconnect, then retry your request"
+            } else {
+                "Gateway OAuth authentication failed; check the gateway configuration and credential store."
+            }
+        );
+        assert!(oauth.received_requests().await.unwrap().is_empty());
+    }
+    Ok(())
+}
+
+/// Non-default grants are readable and notify every configured alias without starting login.
+#[tokio::test]
+async fn selected_gateway_read_notifies_matching_providers() -> Result<()> {
+    let home = TempDir::new()?;
+    let oauth = MockServer::start().await;
+    let config = gateway_config(&oauth).replace(
+        "model_provider = \"gateway\"",
+        "model_provider = \"openai\"",
+    );
+    let alias = config[config.find("[model_providers.gateway]").unwrap()..]
+        .replace("model_providers.gateway", "model_providers.alias");
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("{config}\n{alias}"),
+    )?;
+    let mut server = gateway_server(home.path()).await?;
+    assert!(!read_gateway(&mut server).await?.required);
+    let id = server
+        .send_raw_request(
+            "account/gatewayOAuth/read",
+            Some(serde_json::json!({"modelProvider": "gateway"})),
+        )
+        .await?;
+    let state: GatewayOAuthReadResponse = server.read_response(id).await?;
+    assert_eq!(
+        state,
+        GatewayOAuthReadResponse {
+            provider_id: "gateway".into(),
+            provider_name: "Test gateway".into(),
+            required: true,
+            supports_device_auth: false,
+            status: Some(GatewayOAuthStatus::NotReady),
+            error: None,
+        }
+    );
+    let mut providers = Vec::new();
+    for _ in 0..2 {
+        let change: GatewayOAuthChangedNotification = timeout(
+            TIMEOUT,
+            server.read_notification("account/gatewayOAuth/changed"),
+        )
+        .await??;
+        assert_eq!(change.status, GatewayOAuthStatus::NotReady);
+        assert_eq!(change.auth_url, None);
+        providers.push(change.provider_id);
+    }
+    providers.sort();
+    assert_eq!(providers, ["alias", "gateway"]);
+    assert!(oauth.received_requests().await.unwrap().is_empty());
+    Ok(())
+}

@@ -16,11 +16,11 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::time::timeout;
 
+use super::event_stream_tests::Fixture;
+use super::event_stream_tests::StaticAuth;
+use super::event_stream_tests::WAIT;
 use crate::McpEventStreamManager;
 use crate::McpEventStreamUpdate;
-use crate::event_stream_tests::Fixture;
-use crate::event_stream_tests::StaticAuth;
-use crate::event_stream_tests::WAIT;
 
 async fn start_subscription(
     manager: &McpEventStreamManager,
@@ -62,6 +62,8 @@ async fn connect_loaded_task(
         .on_thread_ready(ThreadReadyInput {
             config: &(),
             session_source: &SessionSource::Exec,
+            history_initialization: codex_extension_api::HistoryInitialization::New,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
             session_store: &session_store,
             thread_store: &thread_store,
         })

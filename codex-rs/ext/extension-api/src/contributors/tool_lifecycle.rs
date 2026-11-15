@@ -77,7 +77,7 @@ impl McpToolContext {
         configured_server: Option<&McpServerConfig>,
     ) -> Self {
         let tool = call.tool_info().clone();
-        let registration = call.config().mcp_server_catalog.server(call.server_name());
+        let registration = call.config().mcp_server_catalog.server(call.server_key());
         let source = if tool.connector_id.is_some() && call.is_host_owned_apps() {
             McpToolSource::Connector
         } else if call.is_selected_plugin_server() {
@@ -116,6 +116,9 @@ impl McpToolContext {
 
 /// Input supplied when the host starts executing one tool call.
 pub struct ToolStartInput<'a> {
+    /// Final serving assessment for the unchanged action, including its code cell's value.
+    /// When present, replaces asynchronous scoring; it does not grant execution permission.
+    pub serving_assessment: Option<bool>,
     /// Store scoped to the host session runtime.
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.
@@ -135,6 +138,8 @@ pub struct ToolStartInput<'a> {
     pub tool_name: &'a ToolName,
     /// Read-only metadata and provenance from the exact MCP call that will execute.
     pub mcp_tool: Option<&'a McpToolContext>,
+    /// Resolves evidence from the issuing step only when awaited; `None` prevents cached approval.
+    pub permissions: crate::ExtensionFuture<'a, Option<codex_guardian_context::PermissionContext>>,
     /// Finalized tool arguments, including any pre-tool-use hook rewrites.
     ///
     /// Payloads can contain sensitive plaintext and must not be logged.
@@ -210,4 +215,58 @@ pub struct ToolFinishInput<'a> {
     pub source: ToolCallSource,
     /// Host-observed result of the tool call.
     pub outcome: ToolCallOutcome,
+}
+
+/// The execution interval represented by a tool timing observation.
+#[derive(Clone, Copy, Debug)]
+pub enum ToolTimingBoundary {
+    /// Elapsed time from admission through the parallel-execution gate until the
+    /// outer dispatch completes or is dropped. Includes routing, hooks, policy
+    /// checks, and result processing; excludes runtime readiness and gate waiting.
+    /// Zero if dispatch never passed the gate.
+    Handler,
+    /// Duration reported by the code-mode host for its exec or wait operation.
+    /// Measures the remote operation rather than the enclosing local dispatch.
+    HostOperation,
+}
+
+/// Lifecycle of work that continues after a code-mode `exec` yields.
+#[derive(Clone, Copy, Debug)]
+pub enum CodeModeCellTiming {
+    ExecYielded,
+    WaitFinished {
+        /// Time the finished result was buffered before this wait retrieved it.
+        result_buffered_for: std::time::Duration,
+    },
+    /// The runtime reported that the cell is missing or closed; its completion time is unknown.
+    CellUnavailable,
+}
+
+/// A measured tool interval. Handler observations also cover cancellation;
+/// host-operation observations are available only when the host reports a duration.
+/// Observers must not block.
+pub struct ToolTimingInput<'a> {
+    /// Thread that owns the tool call.
+    pub thread_id: &'a str,
+    /// Current turn submission id.
+    pub turn_id: &'a str,
+    /// Model-visible tool call id used to correlate dispatch and timing observations.
+    pub call_id: &'a str,
+    /// Execution interval measured by this observation.
+    pub boundary: ToolTimingBoundary,
+    /// Elapsed time within the specified boundary.
+    pub duration: std::time::Duration,
+}
+
+/// A direct call entering dispatch, before readiness, hooks, or policy checks.
+/// Observers must return promptly and cannot affect tool execution.
+pub struct ToolDispatchInput<'a> {
+    /// Thread that owns the tool call.
+    pub thread_id: &'a str,
+    /// Current turn submission id.
+    pub turn_id: &'a str,
+    /// Model-visible tool call id used to correlate dispatch and timing observations.
+    pub call_id: &'a str,
+    /// Tool name supplied to dispatch, before pre-tool hooks run.
+    pub tool_name: &'a ToolName,
 }

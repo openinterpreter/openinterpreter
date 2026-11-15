@@ -1,5 +1,7 @@
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::ResponseItem;
+#[cfg(test)]
+use codex_protocol_test_support::ContentItemTestExt;
 
 use crate::context::ContextualUserFragment;
 use crate::context::UserShellCommand;
@@ -24,7 +26,9 @@ pub fn format_user_shell_command_record(
     exec_output: &ExecToolCallOutput,
     turn_context: &TurnContext,
 ) -> String {
-    user_shell_command_fragment(command, exec_output, turn_context).render()
+    user_shell_command_fragment(command, exec_output, turn_context)
+        .render()
+        .expect_text()
 }
 
 pub fn user_shell_command_record_item(

@@ -1,0 +1,20 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Save preset to slot
+  Review the current changes
+
+
+  1. coding  /model gpt-5.5 --reasoning=high --speed=fast
+› 2. empty
+  3. empty
+  4. empty
+  5. empty
+  6. empty
+  7. empty
+  8. empty
+  9. empty
+  0. empty
+
+  enter select · esc back

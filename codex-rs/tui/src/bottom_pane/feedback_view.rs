@@ -6,6 +6,8 @@ use codex_feedback::FeedbackDiagnostics;
 use codex_feedback::WINDOWS_SANDBOX_LOG_ATTACHMENT_FILENAME;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
 
 use crate::app_event::AppEvent;
 use crate::app_event::FeedbackCategory;
@@ -158,31 +160,31 @@ pub(crate) fn feedback_selection_params(
             make_feedback_item(
                 app_event_tx.clone(),
                 "bug",
-                "Crash, error message, hang, or broken UI/behavior.",
+                "Crash, error message, hang, or broken UI/behavior",
                 FeedbackCategory::Bug,
             ),
             make_feedback_item(
                 app_event_tx.clone(),
                 "bad result",
-                "Output was off-target, incorrect, incomplete, or unhelpful.",
+                "Output was off-target, incorrect, incomplete, or unhelpful",
                 FeedbackCategory::BadResult,
             ),
             make_feedback_item(
                 app_event_tx.clone(),
                 "good result",
-                "Helpful, correct, high‑quality, or delightful result worth celebrating.",
+                "Helpful, correct, high‑quality, or delightful result worth celebrating",
                 FeedbackCategory::GoodResult,
             ),
             make_feedback_item(
                 app_event_tx.clone(),
                 "safety check",
-                "Benign usage blocked due to safety checks or refusals.",
+                "Benign usage blocked due to safety checks or refusals",
                 FeedbackCategory::SafetyCheck,
             ),
             make_feedback_item(
                 app_event_tx,
                 "other",
-                "Slowness, feature suggestion, UX feedback, or anything else.",
+                "Slowness, feature suggestion, UX feedback, or anything else",
                 FeedbackCategory::Other,
             ),
         ],
@@ -223,16 +225,16 @@ fn make_feedback_item(
     }
 }
 
-/// Build the upload consent popup params for a given feedback category.
-pub(crate) fn feedback_upload_consent_params(
+/// Choose optional attachments before saving or sending the report.
+pub(crate) fn feedback_consent_params(
     app_event_tx: AppEventSender,
     category: FeedbackCategory,
     rollout_path: Option<std::path::PathBuf>,
     auto_review_rollout_filename: Option<String>,
     include_windows_sandbox_log: bool,
+    can_save: bool,
     feedback_diagnostics: &FeedbackDiagnostics,
 ) -> super::SelectionViewParams {
-    use super::popup_consts::standard_popup_hint_line;
     let yes_action: super::SelectionAction = Box::new({
         let tx = app_event_tx.clone();
         move |sender: &AppEventSender| {
@@ -255,12 +257,20 @@ pub(crate) fn feedback_upload_consent_params(
         }
     });
 
-    // Build header listing files that would be sent if user consents.
+    let disclosure = if can_save {
+        "Saving a ZIP does not submit feedback to OpenAI.\nFiles may contain prompts, commands, and tool output:"
+    } else {
+        "Files may contain prompts, commands, and tool output:"
+    };
     let mut header_lines: Vec<Box<dyn crate::render::renderable::Renderable>> = vec![
-        Line::from("Upload logs?".bold()).into(),
+        Line::from("Include logs and session history?".bold()).into(),
         Line::from("").into(),
-        Line::from("The following files will be sent:".dim()).into(),
+        Paragraph::new(disclosure)
+            .dim()
+            .wrap(Wrap { trim: false })
+            .into(),
         Line::from(vec!["  • ".into(), "codex-logs.log".into()]).into(),
+        Line::from(vec!["  • ".into(), "client-logs.txt (if available)".into()]).into(),
         Line::from(vec![
             "  • ".into(),
             DOCTOR_REPORT_ATTACHMENT_FILENAME.into(),
@@ -330,6 +340,7 @@ pub(crate) fn feedback_upload_consent_params(
             },
             super::SelectionItem {
                 name: "No".to_string(),
+                description: Some("Keep only your note and report metadata".to_string()),
                 actions: vec![no_action],
                 dismiss_on_select: true,
                 ..Default::default()
@@ -405,12 +416,13 @@ mod tests {
     fn feedback_upload_consent_lists_doctor_report() {
         let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let params = feedback_upload_consent_params(
+        let params = feedback_consent_params(
             tx,
             FeedbackCategory::Bug,
             Some(std::path::PathBuf::from("rollout.jsonl")),
             Some("auto-review-rollout.jsonl".to_string()),
             /*include_windows_sandbox_log*/ false,
+            /*can_save*/ true,
             &FeedbackDiagnostics::default(),
         );
 
@@ -423,12 +435,13 @@ mod tests {
     fn feedback_upload_consent_lists_windows_sandbox_log_when_included() {
         let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let params = feedback_upload_consent_params(
+        let params = feedback_consent_params(
             tx,
             FeedbackCategory::Bug,
             Some(std::path::PathBuf::from("rollout.jsonl")),
             Some("auto-review-rollout.jsonl".to_string()),
             /*include_windows_sandbox_log*/ true,
+            /*can_save*/ true,
             &FeedbackDiagnostics::default(),
         );
 

@@ -1,27 +1,35 @@
 //! Executes one prepared classifier request with the existing retry and streaming rules.
-//! The first output returns immediately; a detached drain preserves reuse and token accounting.
+//! Retained requests publish the same early result but keep ownership through completion.
+//! Sampling outcomes describe score delivery, independently of retained response draining.
+//! Requests and retries stop when the account owner that started the classification changes.
+//! Dropped responses interrupt and drain before their transport can return to the pool.
 
 use super::CLASSIFICATION_TOKEN_USAGE_METRIC;
 use super::ConnectionPool;
 use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::MAX_OUTPUT_BYTES;
+use super::SampledScore;
 use super::connection_pool::RequestMode;
+use super::response::PendingResponse;
+use super::telemetry::SamplingTelemetry;
+use super::telemetry::record_retry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
 use codex_api::ResponsesApiRequest;
 use codex_api::TransportError;
+use codex_core::cyber_access_program;
 use codex_extension_api::ExtensionMetrics;
+use codex_login::AuthOwner;
 use codex_login::UnauthorizedRecovery;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::turn_input::CyberAccessProgram;
 use http::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
 
 const MAX_SAMPLING_RETRIES: usize = 2;
@@ -30,6 +38,8 @@ const RESPONSES_LITE_METADATA_KEY: &str =
 const TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
 
 pub(super) struct SamplingExecution {
+    pub(super) auth_owner: Option<AuthOwner>,
+    pub(super) cyber_access_program: Option<CyberAccessProgram>,
     pub(super) config: Arc<LunaSamplerConfig>,
     pub(super) connections: Arc<ConnectionPool>,
     pub(super) request: ResponsesApiRequest,
@@ -37,6 +47,58 @@ pub(super) struct SamplingExecution {
     pub(super) parent_response_id: Option<String>,
     pub(super) parent_turn_id: String,
     pub(super) root_turn_id: Option<String>,
+}
+
+pub(super) struct RetainedCompletion {
+    pub(super) ready: Option<oneshot::Sender<Result<SampledScore, LunaSamplerError>>>,
+    pub(super) output: Option<Vec<ResponseItem>>,
+    pub(super) remaining_tokens: usize,
+    pub(super) early_score: Option<String>,
+}
+
+impl RetainedCompletion {
+    fn record(&mut self, item: ResponseItem) {
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
+        let tokens = codex_guardian_context::estimate_input_tokens(&item);
+        let valid_item = match &item {
+            ResponseItem::Message { role, content, .. } => {
+                role == "assistant"
+                    && content
+                        .iter()
+                        .all(|part| matches!(part, ContentItem::OutputText { .. }))
+            }
+            ResponseItem::Reasoning {
+                encrypted_content: Some(content),
+                ..
+            } => !content.is_empty(),
+            _ => false,
+        };
+        if tokens > self.remaining_tokens || tokens > 10_000 || !valid_item {
+            // Retention failure does not invalidate an already published score.
+            self.output = None;
+        } else {
+            self.remaining_tokens -= tokens;
+            output.push(item);
+        }
+    }
+
+    /// Publishes any remaining result and returns only history matching the completed score.
+    pub(super) fn finish(
+        mut self,
+        result: Result<String, LunaSamplerError>,
+        telemetry: &mut SamplingTelemetry,
+    ) -> Option<Vec<ResponseItem>> {
+        let reusable = result.as_ref().is_ok_and(|score| {
+            matches!(score.as_str(), "high" | "low")
+                && self.early_score.as_ref().is_none_or(|early| early == score)
+        });
+        if let Some(ready) = self.ready.take() {
+            telemetry.deliver(ready, result);
+        }
+        self.output.filter(|output| reusable && !output.is_empty())
+    }
 }
 
 impl SamplingExecution {
@@ -52,7 +114,11 @@ impl SamplingExecution {
                 ApiError::Retryable { .. }
                 | ApiError::RateLimitExceeded { .. }
                 | ApiError::Stream(_)
-                | ApiError::ServerOverloaded,
+                | ApiError::WebsocketMessageTooLarge
+                | ApiError::ContentFilter
+                | ApiError::ServerOverloaded { .. }
+                | ApiError::PolicyCapacityUnavailable { .. }
+                | ApiError::FlexUnavailable,
             )
             | LunaSamplerError::Api(ApiError::Transport(
                 TransportError::RetryLimit
@@ -70,6 +136,7 @@ impl SamplingExecution {
                         return false;
                     }
                     self.connections.clear();
+                    record_retry(self.config.metrics.as_deref(), "http_401", "auth_recovery");
                     return true;
                 } else {
                     status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
@@ -79,17 +146,27 @@ impl SamplingExecution {
             | LunaSamplerError::MissingOutput
             | LunaSamplerError::OutputTooLarge
             | LunaSamplerError::Superseded
-            | LunaSamplerError::IncompatibleCompaction
             | LunaSamplerError::InputTooLarge
+            | LunaSamplerError::QueueFull
             | LunaSamplerError::Api(
                 ApiError::Transport(
-                    TransportError::Build(_) | TransportError::ResponseTooLarge { .. },
+                    TransportError::Build(_)
+                    | TransportError::ResponseTooLarge { .. }
+                    | TransportError::Policy(_),
                 )
                 | ApiError::ContextWindowExceeded
+                | ApiError::ResponseIncomplete(_)
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
+                | ApiError::SessionBudgetExceeded
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
+                | ApiError::InvalidAudioInput { .. }
+                | ApiError::ModelNotFound { .. }
+                | ApiError::InvalidPrompt { .. }
+                | ApiError::InferenceHookDenied { .. }
+                | ApiError::AccessProgramNotEnabled { .. }
+                | ApiError::ContentPolicyViolation { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
                 | ApiError::BioPolicy { .. },
@@ -97,26 +174,60 @@ impl SamplingExecution {
         };
         if retryable && *retries < MAX_SAMPLING_RETRIES {
             *retries += 1;
+            record_retry(
+                self.config.metrics.as_deref(),
+                super::super::metrics::sampler_failure_reason(error),
+                "transport",
+            );
             return true;
         }
         false
     }
 
     pub(super) async fn run(
-        mut self,
-        mut superseded: oneshot::Receiver<()>,
-        scored: Arc<AtomicBool>,
+        &mut self,
+        completion: &mut RetainedCompletion,
+        telemetry: &mut SamplingTelemetry,
     ) -> Result<String, LunaSamplerError> {
+        let owner = self.auth_owner.clone();
+        let account_changed_error = || {
+            LunaSamplerError::Provider(
+                std::io::Error::other("account changed during Luna classification").into(),
+            )
+        };
+        let ensure_account_owner = || {
+            if owner.as_ref().is_some_and(|owner| !owner.is_current()) {
+                return Err(account_changed_error());
+            }
+            Ok(())
+        };
+        let owner_changed = async {
+            let Some(owner) = owner.as_ref() else {
+                return std::future::pending::<()>().await;
+            };
+            let mut changes = owner.changes();
+            while owner.is_current() {
+                if changes.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::pin!(owner_changed);
         let mut retries = 0;
         let mut auth_recovery = self
             .config
             .provider
             .auth_manager()
             .map(|manager| manager.unauthorized_recovery());
+        let retention_budget = completion.remaining_tokens;
         'retry: loop {
+            ensure_account_owner()?;
+            telemetry.attempts = telemetry.attempts.saturating_add(1);
+            completion.output = Some(Vec::new());
+            completion.remaining_tokens = retention_budget;
             let lease = match tokio::select! {
                 biased;
-                _ = &mut superseded => return Err(LunaSamplerError::Superseded),
+                _ = &mut owner_changed => return Err(account_changed_error()),
                 lease = self.connections.lease() => lease,
             } {
                 Ok(lease) => lease,
@@ -130,6 +241,30 @@ impl SamplingExecution {
                     return Err(error);
                 }
             };
+            if owner
+                .as_ref()
+                .is_some_and(|owner| lease.auth_owner.as_ref() != Some(owner))
+            {
+                return Err(account_changed_error());
+            }
+            // Omitted programs need no auth lookup, which can refresh credentials.
+            self.request.access_programs = match self.cyber_access_program {
+                None => None,
+                Some(program) => {
+                    let auth = tokio::select! {
+                        biased;
+                        _ = &mut owner_changed => return Err(account_changed_error()),
+                                auth = self.config.provider.auth() => auth,
+                    };
+                    cyber_access_program::for_auth(
+                        auth.as_ref(),
+                        Some(program),
+                        self.config.api_key_cyber_access_programs,
+                    )
+                    .map_err(LunaSamplerError::Provider)?
+                }
+            };
+            ensure_account_owner()?;
             self.request.service_tier = if lease.request_kind == RequestMode::GuardianClassifier {
                 None
             } else {
@@ -166,9 +301,9 @@ impl SamplingExecution {
                 client_metadata.insert("parent_response_id".to_owned(), parent_response_id.clone());
             }
             self.request.client_metadata = Some(client_metadata);
-            let mut stream = match tokio::select! {
+            let stream = match tokio::select! {
                 biased;
-                _ = &mut superseded => return Err(LunaSamplerError::Superseded),
+                _ = &mut owner_changed => return Err(account_changed_error()),
                 stream = lease.stream_request(&self.request) => stream,
             } {
                 Ok(stream) => stream,
@@ -184,22 +319,21 @@ impl SamplingExecution {
                 }
             };
 
+            let mut response = PendingResponse::new(stream, lease, self.config.metrics.clone());
             let mut output = String::new();
             while let Some(event) = tokio::select! {
                 biased;
-                _ = &mut superseded => {
-                    return if scored.load(Ordering::Relaxed) && !output.is_empty() {
-                        Ok(output)
-                    } else {
-                        Err(LunaSamplerError::Superseded)
-                    };
-                }
-                event = stream.rx_event.recv() => event,
+                _ = &mut owner_changed => return Err(account_changed_error()),
+                event = response.next() => event,
             } {
+                ensure_account_owner()?;
                 let event = match event {
                     Ok(event) => event,
                     Err(error) => {
                         let error = LunaSamplerError::Api(error);
+                        if completion.ready.is_none() {
+                            return Err(error);
+                        }
                         if self
                             .retry_after_failure(&error, &mut auth_recovery, &mut retries)
                             .await
@@ -211,6 +345,9 @@ impl SamplingExecution {
                 };
                 match event {
                     ResponseEvent::OutputTextDelta(delta) => {
+                        if completion.ready.is_none() {
+                            continue;
+                        }
                         if delta.is_empty() {
                             continue;
                         }
@@ -220,43 +357,25 @@ impl SamplingExecution {
                         // The first output token is the complete classification.
                         // Later output cannot revise that decision; drain it only
                         // to preserve connection reuse and token accounting.
-                        scored.store(true, Ordering::Relaxed);
-                        let mut remaining_events = stream.rx_event;
-                        let metrics = self.config.metrics.clone();
-                        tokio::spawn(async move {
-                            while let Some(event) = tokio::select! {
-                                biased;
-                                _ = &mut superseded => None,
-                                event = remaining_events.recv() => event,
-                            } {
-                                match event {
-                                    Ok(ResponseEvent::Completed { token_usage, .. }) => {
-                                        record_token_usage(
-                                            metrics.as_deref(),
-                                            token_usage.as_ref(),
-                                        );
-                                        lease.reuse();
-                                        break;
-                                    }
-                                    Err(_) => break,
-                                    _ => {}
-                                }
-                            }
-                        });
-                        return Ok(delta);
+                        completion.early_score = Some(delta.clone());
+                        if let Some(ready) = completion.ready.take() {
+                            telemetry.deliver(ready, Ok(delta));
+                        }
                     }
-                    ResponseEvent::OutputItemDone(ResponseItem::Message {
-                        role, content, ..
-                    }) if role == "assistant" => {
-                        for item in content {
-                            if let ContentItem::OutputText { text } = item {
-                                output.push_str(&text);
+                    ResponseEvent::OutputItemDone(item) => {
+                        completion.record(item.clone());
+                        if let ResponseItem::Message { role, content, .. } = item
+                            && role == "assistant"
+                        {
+                            for item in content {
+                                if let ContentItem::OutputText { text, .. } = item {
+                                    output.push_str(&text);
+                                }
                             }
                         }
                     }
                     ResponseEvent::Completed { token_usage, .. } => {
-                        record_token_usage(self.config.metrics.as_deref(), token_usage.as_ref());
-                        lease.reuse();
+                        response.reuse(token_usage.as_ref()).await;
                         if !output.is_empty() {
                             return Ok(output);
                         }
@@ -267,16 +386,16 @@ impl SamplingExecution {
                 if output.len() > MAX_OUTPUT_BYTES {
                     return Err(LunaSamplerError::OutputTooLarge);
                 }
-                if !output.is_empty() {
-                    scored.store(true, Ordering::Relaxed);
-                }
             }
             return Err(LunaSamplerError::MissingOutput);
         }
     }
 }
 
-fn record_token_usage(metrics: Option<&dyn ExtensionMetrics>, token_usage: Option<&TokenUsage>) {
+pub(super) fn record_token_usage(
+    metrics: Option<&dyn ExtensionMetrics>,
+    token_usage: Option<&TokenUsage>,
+) {
     let (Some(metrics), Some(token_usage)) = (metrics, token_usage) else {
         return;
     };

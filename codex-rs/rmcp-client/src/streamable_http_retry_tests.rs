@@ -29,8 +29,11 @@ fn retryable_initialize_error_includes_discovery_and_initialized_notification_co
 }
 
 #[test]
-fn retryable_streamable_http_error_includes_remote_body_stream_failure() {
+fn streamable_http_retry_classifies_transport_and_auth_errors() {
     let errors = [
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
+            ExecServerError::RequestNotSent("enterprise policy is updating".to_string()),
+        )),
         StreamableHttpError::Client(StreamableHttpClientAdapterError::HttpRequest(
             ExecServerError::HttpRequest("error sending request for url".to_string()),
         )),
@@ -52,12 +55,34 @@ fn retryable_streamable_http_error_includes_remote_body_stream_failure() {
             ),
         )),
         StreamableHttpError::UnexpectedServerResponse("HTTP 502: upstream failure".into()),
+        StreamableHttpError::UnexpectedServerResponse("HTTP 503: service unavailable".into()),
+        StreamableHttpError::UnexpectedServerResponse("HTTP 403: forbidden".into()),
         StreamableHttpError::UnexpectedServerResponse("HTTP 400: bad request".into()),
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::Auth(
+            codex_api::AuthError::Transient("credential refresh unavailable".to_string()),
+        )),
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::Auth(
+            codex_api::AuthError::Build("invalid authentication".to_string()),
+        )),
+        StreamableHttpError::Client(StreamableHttpClientAdapterError::Auth(
+            codex_api::AuthError::Policy(codex_http_client::NetworkPolicyDenied::Revoked),
+        )),
     ];
 
     assert_eq!(
-        errors.map(|error| RmcpClient::is_retryable_streamable_http_error(&error)),
-        [true, true, true, false, true, false],
+        errors.map(|error| {
+            let transport = DynamicTransportError::from_parts(
+                "streamable_http",
+                TypeId::of::<()>(),
+                Box::new(error),
+            );
+            let error =
+                ClientOperationError::from(rmcp::service::ServiceError::TransportSend(transport));
+            crate::is_retryable_transport_error(&anyhow::Error::new(error).context("listing tools"))
+        }),
+        [
+            false, true, true, true, false, true, true, false, false, true, false, false
+        ],
     );
 }
 

@@ -121,9 +121,8 @@ pub(super) fn prepare_codex_home(
             }
         })?;
         if index != 0 {
-            // The handle is owned here and remains live until the guard is installed.
-            let directory_handle = unsafe { BorrowedHandle::borrow_raw(handle.0 as _) };
-            let guard = create_directory_guard(directory_handle)?;
+            let guard =
+                create_directory_guard(unsafe { BorrowedHandle::borrow_raw(handle.0 as _) })?;
             // Reject conversion before guard creation; after creation the retained
             // file prevents this directory from becoming empty and being converted.
             drop(pin_directory(

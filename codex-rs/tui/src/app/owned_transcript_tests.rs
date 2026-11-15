@@ -22,9 +22,10 @@ use crossterm::event::MouseEventKind::Up;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 
-fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
+pub(crate) fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
         spoken: false,
+        async_replies: None,
         message: message.to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -32,8 +33,12 @@ fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     })
 }
 
-fn attach_thread(app: &mut App, thread_id: ThreadId) {
+pub(crate) fn attach_thread(app: &mut App, thread_id: ThreadId) {
     app.chat_widget.handle_thread_session(ThreadSessionState {
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
+        primary_environment_cwd: None,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -51,14 +56,13 @@ fn attach_thread(app: &mut App, thread_id: ThreadId) {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
     });
 }
 
-fn buffer_text(buffer: &Buffer) -> String {
+pub(crate) fn buffer_text(buffer: &Buffer) -> String {
     buffer
         .content()
         .chunks(usize::from(buffer.area.width))
@@ -102,9 +106,10 @@ async fn list_spacing_completion_preserves_the_scrolled_reader() -> Result<()> {
     assert!(buffer_text(&before).contains("- c"));
     app.handle_consolidate_agent_message(
         &mut tui,
-        "- First item wraps onto a second row\n- b\n- c".into(),
-        app.config.cwd.to_path_buf(),
-        /*inline_visualization_context*/ None,
+        crate::history_cell::AgentMarkdownCell::new(
+            "- First item wraps onto a second row\n- b\n- c".into(),
+            app.config.cwd.as_path(),
+        ),
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;
@@ -457,6 +462,7 @@ async fn owned_details_escape_interrupts_work_without_starting_backtrack() -> Re
             thread_id: thread_id.to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "active-turn".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::InProgress,
@@ -821,7 +827,7 @@ async fn find_owns_editor_chords_without_changing_the_composer_draft() -> Result
         )
         .await?;
         assert!(!match &app.overlay {
-            Some(Overlay::Transcript(overlay)) => overlay.is_search_active(),
+            Some(Overlay::Transcript(overlay)) => overlay.is_search_editing(),
             _ => app.transcript_view.is_search_active(),
         });
         assert_eq!(
@@ -950,7 +956,7 @@ async fn offline_backtrack_keeps_the_preview_and_draft_without_reverting() -> Re
         assert!(if owned {
             app.transcript_view.is_search_active()
         } else {
-            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_active())
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_editing())
         });
         for (key, preview_active, draft) in [
             (KeyCode::Esc, true, "offline draft"),
@@ -1183,7 +1189,7 @@ async fn find_refreshes_live_details_before_searching_the_first_query() -> Resul
     Ok(())
 }
 
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
+pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
     TuiEvent::Mouse(MouseEvent {
         kind,
         column,

@@ -12,6 +12,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_protocol::ThreadId;
 use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 use codex_rollout::RolloutReferenceIndex;
 use codex_rollout::SESSIONS_SUBDIR;
@@ -31,6 +32,46 @@ struct ThreadRollouts {
     thread_id: codex_protocol::ThreadId,
     rollout_ids: HashSet<codex_protocol::ThreadId>,
     paths: Vec<PathBuf>,
+}
+
+impl LocalThreadStore {
+    /// Reject deletion while any candidate has attached threads. Call before stopping live work;
+    /// deletion repeats this check under existing writer ownership to cover concurrent creation.
+    pub async fn ensure_no_attached_threads(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<()> {
+        ensure_diagnostic_logs_available(self)?;
+        let reference_index = scan_reference_index(self).await?;
+        check_attached_children(&reference_index, thread_ids)
+    }
+}
+
+fn ensure_diagnostic_logs_available(store: &LocalThreadStore) -> ThreadStoreResult<()> {
+    if let Some(error) = store
+        .state_db
+        .as_ref()
+        .and_then(|db| db.diagnostic_logs_error())
+    {
+        return Err(ThreadStoreError::Internal {
+            message: format!("cannot delete thread while diagnostic logs are unavailable: {error}"),
+        });
+    }
+    Ok(())
+}
+
+fn check_attached_children(
+    reference_index: &RolloutReferenceIndex,
+    thread_ids: &[ThreadId],
+) -> ThreadStoreResult<()> {
+    let Some(child) = reference_index.attached_child(thread_ids) else {
+        return Ok(());
+    };
+    Err(ThreadStoreError::InvalidRequest {
+        message: format!(
+            "cannot delete thread while attached thread {child} exists; delete the attached thread first"
+        ),
+    })
 }
 
 impl ThreadRollouts {
@@ -67,13 +108,15 @@ pub(super) async fn delete_thread(
     store: &LocalThreadStore,
     params: DeleteThreadParams,
 ) -> ThreadStoreResult<()> {
+    ensure_diagnostic_logs_available(store)?;
     let thread_id = params.thread_id;
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
     let reference_index = scan_reference_index(store).await?;
     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
+    check_attached_children(&reference_index, &[thread_id])?;
     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
-    let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
     if let Some(cleanup) = &store.thread_data_cleanup {
         cleanup(vec![thread_id]).await?;
     }
@@ -101,6 +144,7 @@ pub(super) async fn delete_threads(
         return Ok(());
     }
 
+    ensure_diagnostic_logs_available(store)?;
     let mut lock_thread_ids = thread_ids.clone();
     lock_thread_ids.sort_unstable_by_key(ToString::to_string);
     lock_thread_ids.dedup();
@@ -113,11 +157,13 @@ pub(super) async fn delete_threads(
         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
     }
 
+    let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
     let reference_index = scan_reference_index(store).await?;
     let thread_rollouts = thread_ids
         .iter()
         .map(|thread_id| ThreadRollouts::from_index(&reference_index, *thread_id))
         .collect::<Vec<_>>();
+    check_attached_children(&reference_index, &lock_thread_ids)?;
     ensure_no_external_references(&reference_index, thread_rollouts.as_slice())?;
 
     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
@@ -136,7 +182,7 @@ pub(super) async fn delete_threads(
     Ok(())
 }
 
-async fn delete_state_rows(
+pub(super) async fn delete_state_rows(
     store: &LocalThreadStore,
     thread_ids: &[codex_protocol::ThreadId],
 ) -> ThreadStoreResult<u64> {
@@ -272,7 +318,10 @@ async fn delete_thread_after_reference_check(
     Ok(())
 }
 
-fn delete_rollout_file(store: &LocalThreadStore, rollout_path: &Path) -> ThreadStoreResult<bool> {
+pub(super) fn delete_rollout_file(
+    store: &LocalThreadStore,
+    rollout_path: &Path,
+) -> ThreadStoreResult<bool> {
     let plain_path = codex_rollout::plain_rollout_path(rollout_path);
     let compressed_path = plain_path.with_extension("jsonl.zst");
     let deleted_plain = delete_rollout_path(store, plain_path.as_path())?;
@@ -794,6 +843,7 @@ SELECT
 
         store
             .resume_thread(ResumeThreadParams {
+                history_revision: None,
                 thread_id,
                 rollout_path: Some(rollout_path),
                 history: None,

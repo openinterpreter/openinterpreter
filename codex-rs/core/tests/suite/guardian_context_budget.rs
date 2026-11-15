@@ -268,7 +268,9 @@ async fn review_respects_complete_context_budget(
                 .expect("test permits time reminders");
             config.current_time_reminder = Some(CurrentTimeReminderConfig::default());
             config.rollout_budget = Some(RolloutBudgetConfig {
-                limit_tokens: 1_000_000,
+                enforce_limit: true,
+                limit_budget: 1_000_000.0,
+                reminder_at_context_start: true,
                 reminder_at_remaining_tokens: Vec::new(),
                 sampling_token_weight: 1.0,
                 prefill_token_weight: 1.0,

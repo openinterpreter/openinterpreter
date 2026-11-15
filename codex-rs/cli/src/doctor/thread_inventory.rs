@@ -574,8 +574,8 @@ async fn thread_id_from_rollout(path: &Path) -> RolloutThreadId {
     // Legacy rollouts can omit session metadata, so use the validated filename fallback after
     // the bounded prefix without retaining the first item or loading the full history.
     let logical_path = codex_rollout::plain_rollout_path(path);
-    codex_rollout::builder_from_items(&[], &logical_path)
-        .map(|builder| RolloutThreadId::Id(builder.id.to_string()))
+    codex_rollout::thread_id_from_rollout_path(&logical_path)
+        .map(|id| RolloutThreadId::Id(id.to_string()))
         .unwrap_or(RolloutThreadId::MalformedName)
 }
 
@@ -1334,20 +1334,22 @@ mod tests {
             let rollout_line = RolloutLine {
                 timestamp: timestamp.to_string(),
                 ordinal: None,
-                item: RolloutItem::SessionMeta(codex_protocol::protocol::SessionMetaLine {
-                    meta: codex_protocol::protocol::SessionMeta {
-                        session_id: parsed_thread_id.into(),
-                        id: parsed_thread_id,
-                        timestamp: timestamp.to_string(),
-                        cwd: self.codex_home.path().to_path_buf(),
-                        originator: "test".to_string(),
-                        cli_version: "test".to_string(),
-                        source: SessionSource::Cli,
-                        model_provider: Some("test-provider".to_string()),
-                        ..Default::default()
+                item: RolloutItem::SessionMeta(Box::new(
+                    codex_protocol::protocol::SessionMetaLine {
+                        meta: codex_protocol::protocol::SessionMeta {
+                            session_id: parsed_thread_id.into(),
+                            id: parsed_thread_id,
+                            timestamp: timestamp.to_string(),
+                            cwd: self.codex_home.path().to_path_buf(),
+                            originator: "test".to_string(),
+                            cli_version: "test".to_string(),
+                            source: SessionSource::Cli,
+                            model_provider: Some("test-provider".to_string()),
+                            ..Default::default()
+                        },
+                        git: None,
                     },
-                    git: None,
-                }),
+                )),
             };
             let contents = serde_json::to_string(&rollout_line).expect("rollout line");
             std::fs::write(&path, format!("{contents}\n")).expect("rollout file");

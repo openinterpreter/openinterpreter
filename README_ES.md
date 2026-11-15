@@ -1,4 +1,4 @@
-<!-- README translation source: README.md sha256=8f6c33487eca77769798677d32bce15335d0439f129c9a0413e12e0d9e70ab7a -->
+<!-- README translation source: README.md sha256=fa5713d19d51d4aa165d2893203caf01d83992a53046f4713b04aaacfd86a059 -->
 
 <h1 align="center">Open Interpreter</h1>
 
@@ -14,8 +14,7 @@
   <a href="LICENSE"><img alt="Licencia" src="https://img.shields.io/badge/License-Apache--2.0-white?style=flat-square" /></a>
 </p>
 
-> [!NOTE]
-> **Hoy: Kimi K3 ya está aquí.** Hemos reimplementado en Rust el harness
+> [!NOTE] > **Hoy: Kimi K3 ya está aquí.** Hemos reimplementado en Rust el harness
 > [Kimi Code](https://www.kimi.com/coding/en) recomendado por el proveedor,
 > para ofrecer el máximo rendimiento de K3 con una interfaz similar a Codex.
 > [**Documentación de Kimi →**](https://www.openinterpreter.com/docs/terminal/kimi-k3?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=kimi_k3_note)

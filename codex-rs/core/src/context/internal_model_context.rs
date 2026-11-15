@@ -1,7 +1,9 @@
 //! Hidden user-context fragment for extension-owned model steering.
 
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use std::error::Error;
 use std::fmt;
 
@@ -112,10 +114,10 @@ impl ContextualUserFragment for InternalModelContextFragment {
         is_valid_source(source) && body_and_close.ends_with(CONTEXT_END_MARKER)
     }
 
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let source = self.source.as_str();
         let body = &self.body;
-        format!(" source=\"{source}\">\n{body}\n")
+        input_text(format!(" source=\"{source}\">\n{body}\n"))
     }
 }
 
