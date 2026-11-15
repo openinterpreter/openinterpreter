@@ -1,14 +1,11 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::net::TcpListener;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use tempfile::TempDir;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
 #[cfg(target_os = "macos")]
 const LOOPBACK: &str = "127.0.0.1";
@@ -198,6 +195,9 @@ allow_local_binding = false
         String::from_utf8_lossy(&output.stdout),
         stderr,
     );
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    // The listener completes only after accepting and responding to a request.
+    server
+        .join()
+        .map_err(|_| anyhow::anyhow!("loopback server thread panicked"))??;
     Ok(())
 }
