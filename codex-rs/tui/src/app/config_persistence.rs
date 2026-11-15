@@ -113,7 +113,6 @@ impl App {
         )
     }
 
-    #[cfg(test)]
     pub(super) async fn rebuild_config_for_permission_profile(
         &self,
         profile_id: &str,
@@ -429,6 +428,14 @@ impl App {
             approvals_reviewer: Some(config.approvals_reviewer),
             display_label: active.id,
         })
+    }
+
+    /// Report the currently selected profile, including a pending selection for this thread.
+    pub(super) fn selected_server_profile(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<PermissionProfileSelection> {
+        self.confirmed_server_profile(thread_id)
     }
 
     /// Adopt authoritative widget settings before deriving overrides for subsequent turns.

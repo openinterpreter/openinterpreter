@@ -1599,6 +1599,7 @@ pub(crate) enum AppEvent {
     SelectSessionModel {
         model: String,
         effort: Option<ReasoningEffort>,
+        service_tier: Option<String>,
     },
 
     /// Result of loading compatible harnesses.
@@ -1952,7 +1953,7 @@ pub(crate) enum AppEvent {
     },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
-        request_id: Uuid,
+        request_id: u64,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     },
     /// Apply a user-confirmed status-line item ordering/selection.

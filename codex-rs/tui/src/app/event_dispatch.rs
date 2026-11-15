@@ -935,12 +935,12 @@ impl App {
                 tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
                     while let Some(event) = app_server.next_event().await {
                         let is_reverted = matches!(
-                            &event,
+                            &event.event,
                             AppServerEvent::ServerNotification(notification)
                                 if matches!(notification.as_ref(), ServerNotification::ThreadReverted(notification)
                                     if notification.thread_id == thread_id.to_string())
                         );
-                        self.handle_app_server_event(app_server, event).await;
+                        self.handle_app_server_event(app_server, event.event).await;
                         if is_reverted {
                             return Ok(());
                         }
@@ -1410,7 +1410,9 @@ impl App {
                         let message = format!("Voice conversation failed: {err:#}");
                         if is_realtime_stop {
                             if self.chat_widget.thread_id() == realtime_stop_thread_id {
-                                self.chat_widget.record_realtime_failure();
+                                self.chat_widget.record_realtime_failure(
+                                    crate::chatwidget::RealtimeFailureCause::AppServerRequest,
+                                );
                                 self.chat_widget.reset_realtime_conversation();
                                 self.chat_widget.add_error_message(message);
                             }
@@ -2904,10 +2906,8 @@ impl App {
             }
             AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
                 if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud {
-                    self.select_session_model(
-                        app_server, model, effort, /*service_tier*/ None,
-                    )
-                    .await;
+                    self.select_session_model(app_server, model, effort, None)
+                        .await;
                 } else {
                     self.chat_widget
                         .open_plan_reasoning_scope_prompt(model, effort);
@@ -2967,6 +2967,7 @@ impl App {
                     report_passcode,
                     turn_id,
                     include_logs,
+                    destination,
                 );
             }
             AppEvent::FeedbackSubmitted {
@@ -3256,9 +3257,14 @@ impl App {
                     }
                 }
             }
-            AppEvent::SelectSessionModel { model, effort } => {
+            AppEvent::SelectSessionModel {
+                model,
+                effort,
+                service_tier,
+            } => {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
-                self.select_session_model(app_server, model, effort).await;
+                self.select_session_model(app_server, model, effort, service_tier)
+                    .await;
             }
             AppEvent::CyberModelAutoReviewNotice => {
                 self.chat_widget.add_warning_message(
@@ -3311,6 +3317,32 @@ impl App {
                 self.persist_realtime_voice(app_server, voice).await;
             }
             AppEvent::PersistServiceTierSelection { service_tier } => {
+                if app_server.thread_params_mode()
+                    == crate::app_server_session::ThreadParamsMode::Cloud
+                {
+                    let Some(thread_id) = self.current_displayed_thread_id() else {
+                        self.chat_widget.add_error_message(
+                            "Select a conversation before changing its Cloud service tier".into(),
+                        );
+                        return Ok(AppRunControl::Continue);
+                    };
+                    let requested = service_tier.clone().unwrap_or_else(|| {
+                        codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()
+                    });
+                    if app_server.stage_cloud_service_tier(thread_id, Some(requested)) {
+                        self.refresh_status_line();
+                        self.chat_widget.add_info_message(
+                            "Service tier selected for the next Cloud turn".into(),
+                            None,
+                        );
+                    } else {
+                        self.chat_widget.add_error_message(
+                            "Cloud model list changed; refresh before selecting a service tier"
+                                .into(),
+                        );
+                    }
+                    return Ok(AppRunControl::Continue);
+                }
                 self.refresh_status_line();
                 self.config.service_tier = service_tier.clone();
                 self.sync_active_thread_service_tier_to_cached_session()
@@ -3421,9 +3453,7 @@ impl App {
                 self.runtime_approvals_reviewer_override = Some(policy);
                 self.config.approvals_reviewer = policy;
                 self.chat_widget.set_approvals_reviewer(policy);
-                if let Some(profile) = self.runtime_permission_profile_override.as_mut() {
-                    profile.approvals_reviewer = policy;
-                }
+                // The reviewer is separately tracked by runtime_approvals_reviewer_override.
                 self.sync_active_thread_permission_settings_to_cached_session()
                     .await;
                 if let Err(err) = crate::config_update::write_config_batch(
@@ -3627,7 +3657,7 @@ impl App {
                     }
                     Err(error) => {
                         if let Ok(mut state) = self.agents_overview.view_state.lock() {
-                            state.input = name;
+                            state.set_rename_input(&name, &self.keymap);
                             state.rename_target = Some(thread_id);
                         }
                         self.repaint_agents_overview();
@@ -4703,7 +4733,8 @@ impl App {
         }
 
         if !matches!(self.app_server_target, AppServerTarget::Embedded) {
-            self.shutdown_side_threads(app_server).await;
+            self.shutdown_side_threads(app_server, Some(thread_id))
+                .await;
             if !self.side_threads.is_empty() {
                 return Ok(AppRunControl::Continue);
             }
@@ -4763,7 +4794,8 @@ impl App {
         }
 
         if !matches!(self.app_server_target, AppServerTarget::Embedded) {
-            self.shutdown_side_threads(app_server).await;
+            self.shutdown_side_threads(app_server, Some(thread_id))
+                .await;
             if !self.side_threads.is_empty() {
                 return Ok(AppRunControl::Continue);
             }

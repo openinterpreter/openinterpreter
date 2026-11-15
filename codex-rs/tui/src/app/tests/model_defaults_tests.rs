@@ -42,6 +42,7 @@ async fn session_model_selection_preserves_defaults_and_updates_active_thread() 
                 AppEvent::SelectSessionModel {
                     model: "gpt-5.6-terra".into(),
                     effort: Some(effort.clone()),
+                    service_tier: None,
                 },
             ))
             .await?;

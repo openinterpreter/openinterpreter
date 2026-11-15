@@ -232,11 +232,7 @@ impl ThreadEventStore {
     pub(super) fn is_realtime_delegated_turn(&self, turn_id: &str) -> bool {
         self.delegated_turns.iter().any(|id| id == turn_id)
             || self.turns.iter().any(|turn| {
-                turn.id == turn_id
-                    && turn
-                        .items
-                        .iter()
-                        .any(|entry| is_voice_handoff_item(&entry.payload))
+                turn.id == turn_id && turn.items.iter().any(|entry| is_voice_handoff_item(entry))
             })
     }
 

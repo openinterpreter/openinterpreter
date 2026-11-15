@@ -158,7 +158,11 @@ impl App {
                 (current_cwd, resume_cwd)
             };
         let mut resume_config = match self
-            .rebuild_config_for_resume_or_fallback(&config_current_cwd, config_resume_cwd)
+            .rebuild_config_for_resume_or_fallback(
+                &config_current_cwd,
+                config_resume_cwd,
+                (&self.config, &self.local_settings),
+            )
             .await
         {
             Ok(cfg) => cfg,
@@ -169,7 +173,10 @@ impl App {
                 return Err(AppRunControl::Continue);
             }
         };
-        if self.reject_remote_resume_permission_override(&resume_config.0) {
+        if self.reject_remote_resume_permission_override(
+            &resume_config.0,
+            &self.app_server_target.clone(),
+        ) {
             return Err(AppRunControl::Continue);
         }
         let resumed_thread =

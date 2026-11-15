@@ -383,9 +383,20 @@ impl App {
 
     pub(super) fn reset_transcript_state_after_clear(&mut self) {
         self.transcript_cells.clear();
+        self.reset_terminal_display_state();
+    }
+
+    /// Clear screen-scoped state without discarding the underlying transcript cells.
+    fn reset_terminal_display_state(&mut self) {
+        self.overlay = None;
+        self.turn_tips.dismiss();
+        self.chat_widget.warning_display_state.dismissed.clear();
+        self.chat_widget.warning_display_state.transcript = Arc::default();
+        self.chat_widget.warning_display_state.synced_cells = None;
         self.native_history = Default::default();
         self.cancel_pending_key_chord();
         self.transcript_view = Default::default();
+        *self.chat_widget.rendered_selection.borrow_mut() = Default::default();
         self.last_rendered_history_tail = None;
         self.last_thread_usage_status_cell = None;
         self.pending_thread_usage_history_refresh = false;

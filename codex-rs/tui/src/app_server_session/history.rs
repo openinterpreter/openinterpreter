@@ -297,7 +297,7 @@ impl AppServerSession {
         page: ThreadItemsListResponse,
         state: &mut ThreadHistoryPagination,
         turns: &mut Vec<Turn>,
-    ) -> Result<Vec<ThreadItemPayload>> {
+    ) -> Result<Vec<ThreadItem>> {
         state.next_item_cursor = advancing_cursor(
             state.next_item_cursor.as_deref(),
             page.next_cursor,
@@ -335,7 +335,7 @@ impl AppServerSession {
                 && !turn.items.iter().any(|item| item.id() == entry.item.id())
             {
                 let item = ThreadItem::try_from(entry)?;
-                items.push(item.payload.clone());
+                items.push(item.clone());
                 turn.items.insert(/*index*/ 0, item);
                 turn.items_view = TurnItemsView::Summary;
             }
@@ -429,7 +429,7 @@ impl AppServerSession {
                 rendered_rows = rendered_history_rows(
                     thread_id,
                     thread,
-                    items,
+                    items.into_iter().map(|item| item.payload).collect(),
                     config,
                     local_settings,
                     width,

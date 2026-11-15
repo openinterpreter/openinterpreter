@@ -130,6 +130,18 @@ mod conversation_frame_tests {
 }
 
 impl App {
+    pub(super) fn conversation_area(&self, viewport: Rect) -> Rect {
+        self.conversation_frame
+            .inset
+            .map_or(viewport, |area| area.intersection(viewport))
+    }
+
+    pub(super) fn refresh_owned_transcript(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let size = tui.prepare_draw_size()?;
+        let rendered_area = self.render_owned_transcript(tui, size)?;
+        self.draw_pet_images(tui, size, rendered_area)
+    }
+
     /// Copy draft selections before key shortcuts, or after mouse layout has been refreshed.
     pub(super) fn handle_composer_copy_event(
         &mut self,

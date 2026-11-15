@@ -233,6 +233,7 @@ async fn settings_confirmations_reveal_their_history_output() -> Result<()> {
             AppEvent::SelectSessionModel {
                 model: "gpt-5.5".into(),
                 effort: Some(ReasoningEffortConfig::High),
+                service_tier: None,
             },
             "Failed to update thread settings",
         ),

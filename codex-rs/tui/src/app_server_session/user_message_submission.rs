@@ -14,6 +14,10 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Report;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use crate::app_command::AppCommand;
 use crate::app_command::CloudSubmissionIntent;
@@ -83,7 +87,40 @@ pub(crate) struct CloudModelSelection {
     pub(crate) effort: Option<ReasoningEffort>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct CloudTurnSettings {
+    pub(crate) model: Option<CloudModelSelection>,
+    pub(crate) service_tier: Option<String>,
+}
+
+/// Pending selections belong to one Cloud connection, keyed by conversation.
+#[derive(Clone, Default)]
+pub(crate) struct PendingCloudTurnSettings(Arc<Mutex<HashMap<ThreadId, CloudTurnSettings>>>);
+
+impl PendingCloudTurnSettings {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, CloudTurnSettings>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn model(&self, thread_id: ThreadId) -> Option<String> {
+        self.lock()
+            .get(&thread_id)?
+            .model
+            .as_ref()
+            .map(|selection| selection.model.clone())
+    }
+
+    pub(crate) fn service_tier(&self, thread_id: ThreadId) -> Option<String> {
+        self.lock().get(&thread_id)?.service_tier.clone()
+    }
+}
+
 impl AppServerSession {
+    pub(crate) fn pending_cloud_turn_settings(&self) -> Option<PendingCloudTurnSettings> {
+        (self.thread_params_mode() == ThreadParamsMode::Cloud)
+            .then(|| self.cloud_turn_settings.clone())
+    }
+
     fn cloud_model_catalog_is_current(&self) -> bool {
         matches!(&self.request_handle,
             AppServerRequestHandle::Cloud(handle) if handle.model_catalog_is_current()
@@ -99,8 +136,40 @@ impl AppServerSession {
         if !self.cloud_model_catalog_is_current() {
             return false;
         }
-        self.cloud_model_selections
-            .insert(thread_id, CloudModelSelection { model, effort });
+        let mut pending = self.cloud_turn_settings.lock();
+        let settings = pending.entry(thread_id).or_default();
+        if let Some(tier) = &settings.service_tier
+            && tier != codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE
+            && !self.available_models.iter().any(|preset| {
+                preset.model == model
+                    && preset.service_tiers.iter().any(|available| {
+                        available.id == *tier
+                            || matches!(
+                                (available.id.as_str(), tier.as_str()),
+                                ("fast", "priority") | ("priority", "fast")
+                            )
+                    })
+            })
+        {
+            settings.service_tier = None;
+        }
+        settings.model = Some(CloudModelSelection { model, effort });
+        true
+    }
+
+    pub(crate) fn stage_cloud_service_tier(
+        &mut self,
+        thread_id: ThreadId,
+        service_tier: Option<String>,
+    ) -> bool {
+        if !self.cloud_model_catalog_is_current() {
+            return false;
+        }
+        self.cloud_turn_settings
+            .lock()
+            .entry(thread_id)
+            .or_default()
+            .service_tier = service_tier;
         true
     }
 
@@ -180,43 +249,53 @@ impl AppServerSession {
 
         let selection =
             if cloud && *turn_trigger == "user" && intent != CloudSubmissionIntent::UseKnownTurn {
-                self.cloud_model_selections.get(&thread_id).cloned()
+                self.cloud_turn_settings.lock().get(&thread_id).cloned()
             } else {
                 None
             };
         if selection.is_some() && !self.cloud_model_catalog_is_current() {
-            self.cloud_model_selections.remove(&thread_id);
+            self.cloud_turn_settings.lock().remove(&thread_id);
             return Err(UserMessageSubmissionFailure::Preflight(
                 "The Cloud account changed. Reopen the conversation before sending.".into(),
             ));
         }
         let selected_model = selection
             .as_ref()
+            .and_then(|selection| selection.model.as_ref())
             .map_or(model.as_str(), |selection| selection.model.as_str());
         let program = preflight(selected_model).map_err(UserMessageSubmissionFailure::Preflight)?;
         let take_selection = |session: &mut Self| {
             selection.as_ref()?;
             session
-                .cloud_model_selections
+                .cloud_turn_settings
+                .lock()
                 .remove(&thread_id)
                 .filter(|_| session.cloud_model_catalog_is_current())
+                .and_then(|settings| settings.model)
         };
         if cloud
             && intent == CloudSubmissionIntent::StartOrSteer
             && let AppServerRequestHandle::Cloud(handle) = &self.request_handle
         {
-            let (model, effort) = selection.as_ref().map_or((None, None), |selection| {
-                (Some(selection.model.clone()), selection.effort.clone())
-            });
+            let (model, effort) = selection
+                .as_ref()
+                .and_then(|settings| settings.model.as_ref())
+                .map_or((None, None), |model| {
+                    (Some(model.model.clone()), model.effort.clone())
+                });
             let result = handle
                 .submit_user_message(TurnStartParams {
                     thread_id: thread_id.to_string(),
-                    turn_trigger: model.as_ref().map(|_| turn_trigger.to_string()),
+                    turn_trigger: selection.as_ref().map(|_| turn_trigger.to_string()),
                     client_user_message_id: Some(client_user_message_id.clone()),
                     input: items.clone(),
                     output_schema: final_output_json_schema.clone(),
                     model,
                     effort,
+                    service_tier: selection
+                        .as_ref()
+                        .and_then(|settings| settings.service_tier.clone())
+                        .map(Some),
                     ..Default::default()
                 })
                 .await;
@@ -325,4 +404,35 @@ pub(crate) fn active_turn_steer_race(error: &TypedRequestError) -> Option<Active
         .strip_suffix('`')?
         .to_string();
     Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
+}
+
+#[cfg(test)]
+mod cloud_pending_tests {
+    use super::*;
+
+    #[test]
+    fn pending_cloud_settings_are_shared_but_scoped_and_consumed_per_thread() {
+        let first = ThreadId::new();
+        let second = ThreadId::new();
+        let settings = PendingCloudTurnSettings::default();
+        let widget_view = settings.clone();
+        settings.lock().insert(
+            first,
+            CloudTurnSettings {
+                model: Some(CloudModelSelection {
+                    model: "model-a".into(),
+                    effort: None,
+                }),
+                service_tier: Some("priority".into()),
+            },
+        );
+        assert_eq!(widget_view.model(first).as_deref(), Some("model-a"));
+        assert_eq!(widget_view.service_tier(first).as_deref(), Some("priority"));
+        assert_eq!(widget_view.model(second), None);
+        assert_eq!(widget_view.service_tier(second), None);
+
+        settings.lock().remove(&first);
+        assert_eq!(widget_view.model(first), None);
+        assert_eq!(widget_view.service_tier(first), None);
+    }
 }

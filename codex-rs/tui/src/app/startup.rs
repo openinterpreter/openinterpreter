@@ -143,6 +143,10 @@ pub(super) fn startup_model(
 }
 
 impl App {
+    pub(super) fn awaiting_side_replay(&self, tui: &tui::Tui) -> bool {
+        self.pending_thread_switch_resets != 0 && self.side_retention_enabled(tui)
+    }
+
     /// Preserve explicit local permission choices across session and backend transitions.
     pub(super) fn remember_launch_permissions(&mut self) {
         if self.app_server_target.thread_params_mode()
@@ -730,7 +734,13 @@ impl App {
                         }
                     }
                 } else {
-                    let action = SessionStartAction::Resume(model_settings);
+                    let action = SessionStartAction::Resume(
+                        model_settings,
+                        crate::resume_permissions::ResumePermissions::from_overrides(
+                            &config,
+                            &harness_overrides,
+                        ),
+                    );
                     let resumed = complete_session_start(
                         &mut app_server,
                         SessionStartConfig {

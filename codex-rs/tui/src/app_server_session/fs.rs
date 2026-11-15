@@ -29,6 +29,11 @@ impl AppServerSession {
             request_handle: self.request_handle(),
         }
     }
+
+    /// Goal attachments must use the app-server host's authorized filesystem RPC.
+    pub(crate) async fn fs_create_directory_all_path(&self, path: &AppServerPath) -> Result<()> {
+        self.file_system().fs_create_directory_all_path(path).await
+    }
 }
 
 pub(crate) struct AppServerFileSystem {

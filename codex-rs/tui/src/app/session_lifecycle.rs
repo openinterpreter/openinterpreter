@@ -1167,6 +1167,27 @@ impl App {
         Ok(())
     }
 
+    pub(super) async fn start_fresh_session_with_summary_hint(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        session_start_source: Option<ThreadStartSource>,
+        initial_user_message: Option<crate::chatwidget::UserMessage>,
+        new_thread_name: Option<String>,
+    ) {
+        let start = session_start_source.map_or(FreshSessionStart::NewConversation, |source| {
+            FreshSessionStart::PreserveCurrentView(Some(source))
+        });
+        self.start_fresh_session(
+            tui,
+            app_server,
+            start,
+            initial_user_message,
+            new_thread_name,
+        )
+        .await;
+    }
+
     pub(super) async fn start_fresh_session(
         &mut self,
         tui: &mut tui::Tui,

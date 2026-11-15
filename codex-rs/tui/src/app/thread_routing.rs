@@ -581,7 +581,8 @@ impl App {
             | AppCommand::RealtimeConversationStop { thread_id } = &op
                 && self.chat_widget.thread_id() == Some(*thread_id)
             {
-                self.chat_widget.record_realtime_failure();
+                self.chat_widget
+                    .record_realtime_failure(crate::chatwidget::RealtimeFailureCause::LocalRequest);
                 self.chat_widget.reset_realtime_conversation();
             }
             self.chat_widget
@@ -607,7 +608,8 @@ impl App {
             | AppCommand::RealtimeConversationStop { thread_id } = &op
                 && self.chat_widget.thread_id() == Some(*thread_id)
             {
-                self.chat_widget.record_realtime_failure();
+                self.chat_widget
+                    .record_realtime_failure(crate::chatwidget::RealtimeFailureCause::LocalRequest);
                 self.chat_widget.reset_realtime_conversation();
             }
             self.chat_widget.add_error_message(
@@ -1953,7 +1955,8 @@ impl App {
         if recovered_input.is_some() {
             let mode = has_resumed_collaboration_mode
                 .then(|| self.chat_widget.effective_collaboration_mode());
-            self.chat_widget.restore_reconnected_input(recovered_input);
+            self.chat_widget
+                .restore_reconnected_input(recovered_input, &[]);
             if let Some(mode) = mode {
                 self.chat_widget.set_effective_collaboration_mode(mode);
             }
@@ -2227,7 +2230,6 @@ impl App {
                 thread_id,
                 ThreadTitleDestination::Automatic,
                 &user_message,
-                /*expected_name*/ None,
                 /*expected_name*/ None,
             );
         }

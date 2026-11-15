@@ -58,7 +58,10 @@ struct GeneratedRecap {
 }
 
 fn recap_prompt(history: &str) -> String {
-    RecapPrompt::new(history).render()
+    match RecapPrompt::new(history).render() {
+        codex_protocol::models::ContentItem::InputText { text } => text,
+        _ => unreachable!("recap prompt must be text"),
+    }
 }
 
 fn recap_output_schema() -> Value {

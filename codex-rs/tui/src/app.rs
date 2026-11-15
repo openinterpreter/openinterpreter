@@ -517,6 +517,8 @@ pub(crate) enum AppRunControl {
 pub enum ExitReason {
     UserRequested,
     TurnInterrupted,
+    Archived(ThreadId),
+    ThreadRemoved,
     Fatal(String),
 }
 
@@ -662,7 +664,13 @@ pub(crate) struct App {
     realtime_replay_order: VecDeque<ThreadId>,
     background_voice: Option<Box<ChatWidget>>,
     background_voice_error: Option<(ThreadId, String)>,
-    temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+    temporary_structured_requests: HashMap<
+        ThreadId,
+        (
+            crate::temporary_structured_request::TemporaryThreadKind,
+            mpsc::UnboundedSender<ServerNotification>,
+        ),
+    >,
     /// Track title generation across thread switches and deduplicate automatic requests.
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
@@ -1609,7 +1617,7 @@ See the keymap documentation for supported actions and examples."
             &event,
             TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
         ) {
-            self.expire_pending_key_chord(tui);
+            self.expire_pending_key_chord();
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
@@ -1628,7 +1636,7 @@ See the keymap documentation for supported actions and examples."
 
         let mut event = if let TuiEvent::Key(mut key_event) = event {
             let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-            if self.should_recover_vim_insert_escape(key_event)
+            if self.should_recover_vim_insert_escape(tui, key_event)
                 && !(tui.is_owned_screen()
                     && crate::transcript_view::JumpTarget::from_key(key_event).is_some())
             {
@@ -1679,7 +1687,8 @@ See the keymap documentation for supported actions and examples."
                 && self.keymap.app.open_warnings.is_pressed(*key))
         {
             if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
-                self.chat_widget.handle_disconnected_view_key(*key);
+                self.chat_widget
+                    .handle_disconnected_view_key(*key, Some(self.keymap.app.open_warnings));
                 if self
                     .chat_widget
                     .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)

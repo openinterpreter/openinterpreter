@@ -26,6 +26,20 @@ impl Renderable for DaemonMenuHeader {
 }
 
 impl App {
+    pub(super) async fn verify_managed_daemon(&mut self) {
+        // A discovered socket is not proof this process is our managed daemon.
+        if !self.reconnect.offline
+            && let Some(connection) = &mut self.chat_widget.remote_connection
+            && connection.is_local_daemon
+            && !connection.is_managed_daemon
+        {
+            connection.is_managed_daemon =
+                codex_app_server_daemon::run(codex_app_server_daemon::LifecycleCommand::Version)
+                    .await
+                    .is_ok_and(|output| output.backend.is_some());
+        }
+    }
+
     pub(super) fn open_daemon_menu(&mut self) {
         let status = self
             .chat_widget
