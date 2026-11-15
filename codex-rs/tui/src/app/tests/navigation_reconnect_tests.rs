@@ -147,14 +147,27 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         view.handle_paste("Keep this task draft!".into());
         app.agents_overview.visible_thread_ids = view.thread_ids();
         app.chat_widget.show_bottom_pane_view(Box::new(view));
-        app.agents_overview.view_state.lock().unwrap().input = "Keep this task draft".into();
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .input
+            .set_text_clearing_elements("Keep this task draft!");
         app.agents_overview.view_state.lock().unwrap().rename_target =
             Some(if previous_thread.is_some() {
                 vanished
             } else {
                 selected
             });
-        let draft = |app: &App| app.agents_overview.view_state.lock().unwrap().input.clone();
+        let draft = |app: &App| {
+            app.agents_overview
+                .view_state
+                .lock()
+                .unwrap()
+                .input
+                .text()
+                .to_owned()
+        };
         let stale_request = Uuid::new_v4();
         let refresh_owner = crate::backend_id::BackendId::new();
         app.agents_overview.active_refresh = Some((stale_request, refresh_owner));
@@ -269,9 +282,8 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         let disconnected = session.next_event().await.unwrap();
         // A shutdown error can cover the initial command center when its first New fails.
         if previous_thread.is_none() && overview_initialized {
-            app.show_agents_overview_error(
-                Some("Codex's background server is shutting down"),
-                "Waiting for active turns.".into(),
+            app.add_agents_overview_error(
+                "Codex's background server is shutting down. Waiting for active turns.".into(),
             );
         }
         app.agents_overview.pending_usage = Some((ThreadId::new(), Uuid::new_v4()));

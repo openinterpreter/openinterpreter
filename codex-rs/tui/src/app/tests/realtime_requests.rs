@@ -1905,9 +1905,11 @@ async fn overridden_voice_save_keeps_effective_voice() -> Result<()> {
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            codex_app_server_client::EmbeddedNetworkPolicy::default(),
         )
         .await?;
         let server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             codex_app_server_client::AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Embedded,
         );

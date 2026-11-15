@@ -263,6 +263,7 @@ async fn model_migration_prompt_only_shows_for_deprecated_models() {
         "openai", "gpt-5.2", "gpt-5.5", &seen, &presets
     ));
     assert!(should_show_model_migration_prompt(
+        "openai",
         "gpt-5.4",
         "gpt-6-sol",
         &seen,
@@ -475,6 +476,7 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
             .expect("catalog selection should have an upgrade");
         assert_eq!(upgrade.id, replacement);
         assert!(should_show_model_migration_prompt(
+            "openai",
             &current_model,
             &upgrade.id,
             &BTreeMap::new(),
@@ -498,8 +500,10 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
 
         let (tx_raw, mut rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(tx_raw);
+        let mut launch_choices = crate::app_server_session::StartupLaunchChoices::default();
         apply_accepted_model_migration(
             &mut config,
+            &mut launch_choices,
             &app_event_tx,
             current_model,
             upgrade.id,
@@ -508,6 +512,11 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
 
         assert_eq!(config.model.as_deref(), Some(replacement));
         assert_eq!(config.model_reasoning_effort, Some(target_effort.clone()));
+        assert_eq!(launch_choices.model.as_deref(), Some(replacement));
+        assert_eq!(
+            launch_choices.effort,
+            Some(serde_json::json!(target_effort.clone()))
+        );
 
         let acknowledged = rx.try_recv().expect("acknowledged event");
         assert_matches!(
@@ -570,6 +579,7 @@ async fn model_migration_prompt_respects_hide_flag_and_self_target() {
     // A previously acknowledged intermediate upgrade must not hide the new target.
     seen.insert("gpt-5.4-mini".to_string(), "gpt-5.6-luna".to_string());
     assert!(should_show_model_migration_prompt(
+        "openai",
         "gpt-5.4-mini",
         "gpt-6-luna",
         &seen,
@@ -577,12 +587,14 @@ async fn model_migration_prompt_respects_hide_flag_and_self_target() {
     ));
     seen.insert("gpt-5.4-mini".to_string(), "gpt-6-luna".to_string());
     assert!(!should_show_model_migration_prompt(
+        "openai",
         "gpt-5.4-mini",
         "gpt-6-luna",
         &seen,
         &presets
     ));
     assert!(!should_show_model_migration_prompt(
+        "openai",
         "gpt-6-luna",
         "gpt-6-luna",
         &seen,
@@ -596,6 +608,7 @@ async fn model_migration_prompt_skips_when_target_missing_or_hidden() {
     available.retain(|preset| preset.model != "gpt-6-luna");
 
     assert!(!should_show_model_migration_prompt(
+        "openai",
         "gpt-5.4-mini",
         "gpt-6-luna",
         &BTreeMap::new(),
@@ -612,6 +625,7 @@ async fn model_migration_prompt_skips_when_target_missing_or_hidden() {
     target.show_in_picker = false;
 
     assert!(!should_show_model_migration_prompt(
+        "openai",
         "gpt-5.4-mini",
         "gpt-6-luna",
         &BTreeMap::new(),

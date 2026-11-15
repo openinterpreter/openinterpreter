@@ -586,9 +586,11 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
         /*log_db*/ None,
         /*state_db*/ None,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        codex_app_server_client::EmbeddedNetworkPolicy::default(),
     )
     .await?;
     let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         codex_app_server_client::AppServerClient::InProcess(client),
         crate::app_server_session::ThreadParamsMode::Remote,
     );
@@ -605,6 +607,7 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
             /*session_start_source*/ None,
             /*remote_cwd_override*/ None,
             Some(&selection),
+            /*host_project_cwd*/ None,
         )
         .await?;
     app.enqueue_primary_thread_session(started.session, started.turns)
