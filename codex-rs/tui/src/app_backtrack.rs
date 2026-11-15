@@ -1219,6 +1219,7 @@ mod tests {
 
         cells.push(Arc::new(UserHistoryCell {
             spoken: false,
+            async_replies: None,
             message: "hello".to_string(),
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),

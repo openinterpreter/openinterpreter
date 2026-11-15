@@ -27,15 +27,12 @@ impl ChatComposer {
                     .next()
                     .unwrap_or("")
                     .starts_with('/'));
-        if !self.draft.disable_paste_burst
-            && self.draft.paste_burst.is_active()
-            && !in_slash_context
-            && self
-                .draft
-                .paste_burst
-                .append_control_char_if_active('\n', now)
-        {
-            return true;
+        !in_slash_context && self.append_paste_newline(now)
+    }
+
+    fn append_paste_newline(&mut self, now: Instant) -> bool {
+        if self.draft.disable_paste_burst {
+            return false;
         }
         if self.draft.paste_burst.is_active()
             && self
@@ -133,16 +130,21 @@ impl ChatComposer {
         if !matches!(key.code, KeyCode::Enter | KeyCode::Tab)
             && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         {
-            // Null is sent internally to clean up on disconnect or expand a paste; it isn't an edit.
-            let before = if key.code == KeyCode::Null {
-                None
-            } else {
-                self.before_sparkle_editor_key(key)
-            };
-            let (result, _) = self.handle_input_basic(key);
-            self.after_sparkle_key(before, &result);
+            self.edit_restricted_draft(key);
         }
         InputResult::None
+    }
+
+    fn edit_restricted_draft(&mut self, key: KeyEvent) {
+        // Null is sent internally to clean up on disconnect or expand a paste.
+        let before = if key.code == KeyCode::Null {
+            None
+        } else {
+            self.draft.textarea_state.get_mut().follow_cursor();
+            self.before_sparkle_editor_key(key)
+        };
+        let (result, _) = self.handle_input_basic(key);
+        self.after_sparkle_key(before, &result);
     }
 }
 

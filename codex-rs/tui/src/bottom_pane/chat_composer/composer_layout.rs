@@ -7,6 +7,7 @@ use crate::render::renderable::Renderable;
 use crate::tui::FrameRequester;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::layout::Size;
 
 pub(crate) struct FooterLayout {
     cap: u16,
@@ -34,6 +35,10 @@ impl FooterLayout {
 
     pub(crate) fn status_budget(&self, available: u16) -> u16 {
         self.cap.min(available).saturating_sub(self.reserved_hints)
+    }
+
+    pub(crate) fn status_bounds(&self, width: u16, available: u16) -> Size {
+        inset_footer_hint_area(Rect::new(0, 0, width, self.status_budget(available))).as_size()
     }
 
     pub(crate) fn allocate(&self, available: u16, wanted_status: u16) -> FooterRows {

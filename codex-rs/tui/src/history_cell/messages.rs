@@ -19,6 +19,10 @@ pub(crate) struct UserHistoryCell {
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
     pub(crate) spoken: bool,
+    pub(crate) async_replies: Option<(
+        Vec<crate::async_question_reply::AsyncQuestionReply>,
+        PathBuf,
+    )>,
 }
 
 /// Remove CSI sequences and control characters, preserving tabs and newlines.
@@ -152,6 +156,17 @@ fn build_user_message_lines_with_elements(
 }
 
 impl UserHistoryCell {
+    pub(crate) fn with_async_replies(
+        mut self,
+        replies: Vec<crate::async_question_reply::AsyncQuestionReply>,
+        cwd: &Path,
+    ) -> Self {
+        if !replies.is_empty() {
+            self.async_replies = Some((replies, cwd.to_path_buf()));
+        }
+        self
+    }
+
     pub(crate) fn uses_markdown(&self) -> bool {
         // Inline text-element ranges refer to the literal prompt, not rendered Markdown.
         !self.spoken && self.text_elements.is_empty()
@@ -214,7 +229,13 @@ impl HistoryCell for UserHistoryCell {
                 .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
         ));
 
-        let wrapped_message = wrap_user_message(message, text_elements, style, wrap_width);
+        let wrapped_message = self
+            .async_replies
+            .as_ref()
+            .map(|(replies, cwd)| {
+                super::async_replies::render(replies, cwd, usize::from(wrap_width))
+            })
+            .or_else(|| wrap_user_message(message, text_elements, style, wrap_width));
 
         if wrapped_images.is_empty() && wrapped_message.is_none() {
             return Vec::new();
@@ -236,15 +257,19 @@ impl HistoryCell for UserHistoryCell {
         }
 
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_hyperlink_lines(
-                wrapped_message,
-                if self.spoken {
-                    "› ".red().bold()
-                } else {
-                    "› ".bold().dim()
-                },
-                "  ".into(),
-            ));
+            if self.async_replies.is_some() {
+                lines.extend(wrapped_message);
+            } else {
+                lines.extend(prefix_hyperlink_lines(
+                    wrapped_message,
+                    if self.spoken {
+                        "› ".red().bold()
+                    } else {
+                        "› ".bold().dim()
+                    },
+                    "  ".into(),
+                ));
+            }
         }
 
         lines.push(HyperlinkLine::new(Line::from("").style(style)));
@@ -776,6 +801,7 @@ pub(crate) fn new_user_prompt(
         local_image_paths,
         remote_image_urls,
         spoken: false,
+        async_replies: None,
     }
 }
 

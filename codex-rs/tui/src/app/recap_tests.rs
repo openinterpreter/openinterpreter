@@ -60,6 +60,7 @@ fn user_history_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
         message: message.to_string(),
         spoken: false,
+        async_replies: None,
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
         remote_image_urls: Vec::new(),

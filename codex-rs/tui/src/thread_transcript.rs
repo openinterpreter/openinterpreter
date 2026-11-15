@@ -258,19 +258,24 @@ fn item_to_cells(
                     .collect(),
             };
             let message = item.message();
+            let replies = crate::async_question_reply::parse(&message).unwrap_or_default();
             let reply_text = crate::async_question_reply::display_text(&message);
             let text_elements = if reply_text.is_some() {
                 Vec::new()
             } else {
                 item.text_elements()
             };
-            cells.push(Arc::new(UserHistoryCell {
-                spoken: false,
-                message: reply_text.unwrap_or(message),
-                text_elements,
-                local_image_paths: item.local_image_paths(),
-                remote_image_urls: item.image_urls(),
-            }));
+            cells.push(Arc::new(
+                UserHistoryCell {
+                    spoken: false,
+                    async_replies: None,
+                    message: reply_text.unwrap_or(message),
+                    text_elements,
+                    local_image_paths: item.local_image_paths(),
+                    remote_image_urls: item.image_urls(),
+                }
+                .with_async_replies(replies, cwd.as_path()),
+            ));
         }
         ThreadItemPayload::AgentMessage { text, .. } => {
             let parsed = parse_assistant_markdown(&text, cwd.as_path());

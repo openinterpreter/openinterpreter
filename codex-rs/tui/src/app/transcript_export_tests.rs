@@ -23,6 +23,7 @@ fn markdown_transcript_preserves_messages_and_formats_activity() {
     let user = |message: &str, local_image_paths| {
         Arc::new(UserHistoryCell {
             spoken: false,
+            async_replies: None,
             message: message.to_string(),
             text_elements: Vec::new(),
             local_image_paths,

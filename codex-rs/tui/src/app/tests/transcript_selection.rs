@@ -19,6 +19,7 @@ async fn text_selection_temporarily_replaces_the_rendered_backtrack_highlight() 
         local_image_paths: Vec::new(),
         remote_image_urls: Vec::new(),
         spoken: false,
+        async_replies: None,
     })];
     app.open_transcript_overlay(&mut tui);
     while events.try_recv().is_ok() {}

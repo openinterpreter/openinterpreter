@@ -4,7 +4,7 @@
 use codex_app_server_protocol::UserInput;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AsyncQuestionReply {
     pub(crate) question_item_id: String,

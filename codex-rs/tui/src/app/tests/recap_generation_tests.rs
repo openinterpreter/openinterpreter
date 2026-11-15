@@ -42,6 +42,7 @@ async fn prepare_eligible_recap(app: &mut App, thread_id: ThreadId) {
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Finish the recap implementation".to_string(),
             spoken: false,
+            async_replies: None,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
@@ -132,6 +133,7 @@ stream_max_retries = 0
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Keep follow-up work queued.".to_string(),
             spoken: false,
+            async_replies: None,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
@@ -238,6 +240,7 @@ async fn manual_recap_works_when_auto_recap_disabled() -> Result<()> {
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Summarize this conversation".to_string(),
             spoken: false,
+            async_replies: None,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),
@@ -457,6 +460,7 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
         .push(Arc::new(crate::history_cell::UserHistoryCell {
             message: "Finish the recap implementation".to_string(),
             spoken: false,
+            async_replies: None,
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
             remote_image_urls: Vec::new(),

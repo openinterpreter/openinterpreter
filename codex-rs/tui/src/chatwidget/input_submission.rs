@@ -496,6 +496,12 @@ impl ChatWidget {
         let service_tier = self.service_tier_update_for_core();
         let active_permission_profile = self.config.permissions.active_permission_profile();
         let op = AppCommand::user_turn(
+            if source == UserMessageSource::SafetyRecourse {
+                "safety_recourse_follow_up"
+            } else {
+                "user"
+            },
+            cloud_submission,
             client_user_message_id.clone(),
             items,
             self.config.cwd.to_path_buf(),
@@ -507,7 +513,6 @@ impl ChatWidget {
             service_tier,
             /*final_output_json_schema*/ None,
             collaboration_mode,
-            /*personality*/ None,
         );
         let submitted_message = UserMessage {
             text,

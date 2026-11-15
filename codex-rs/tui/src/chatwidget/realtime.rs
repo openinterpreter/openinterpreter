@@ -329,8 +329,12 @@ impl ChatWidget {
         self.update_realtime_footer();
         let app_event_tx = self.app_event_tx.clone();
         std::thread::spawn(move || {
-            let result =
-                RealtimeWebrtcSession::start(abort_registration).map_err(|error| error.to_string());
+            // No device override is configured; keep the prior default-device selection.
+            let result = RealtimeWebrtcSession::start(
+                abort_registration,
+                codex_realtime_webrtc::AudioDeviceSelection::default(),
+            )
+            .map_err(|error| error.to_string());
             app_event_tx.send(AppEvent::RealtimeWebrtcOfferCreated {
                 thread_id,
                 attempt_id,
