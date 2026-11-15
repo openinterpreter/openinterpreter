@@ -116,10 +116,7 @@ async fn blocked_copy_allows_overlay_exit_rejects_backlog_and_wakes_completion()
             .unwrap(),
         ("café\nsecond line".into(), CopyFormat::Markdown)
     );
-    assert_eq!(
-        tui.copy_transcript_selection("newer", CopyFormat::PlainText),
-        Ok(CopyStatus::Busy)
-    );
+    assert_eq!(tui.copy_transcript_selection("newer"), Ok(CopyStatus::Busy));
     assert!(tui.clipboard.poll().is_none());
     let mut overlay = Overlay::new_transcript(
         vec![Arc::new(PlainHistoryCell::new(vec!["selected".into()]))],
@@ -602,7 +599,7 @@ async fn cloud_handoff_keeps_an_owned_clipboard_read_until_completion_or_input()
             "draft pasted"
         };
         {
-            let wait = crate::app::wait_for_cloud_switch(
+            let wait = crate::app::test_support::wait_for_cloud_switch(
                 &mut app,
                 &mut tui,
                 prepared_rx,
