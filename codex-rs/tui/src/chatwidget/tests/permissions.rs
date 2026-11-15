@@ -957,7 +957,10 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
             _ => None,
         })
         .expect("sandbox setup event");
-    assert_eq!(preset.approval, approval);
+    assert_eq!(
+        preset.approval,
+        chat.config.permissions.approval_policy.value()
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -1137,6 +1140,8 @@ async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1150,6 +1155,7 @@ async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
         permission_profile: PermissionProfile::workspace_write(),
         active_permission_profile: None,
         cwd: test_project_path().abs(),
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -1587,6 +1593,8 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1600,6 +1608,7 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
         permission_profile: PermissionProfile::workspace_write(),
         active_permission_profile: None,
         cwd: test_project_path().abs(),
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -1641,6 +1650,8 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1654,6 +1665,7 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
         permission_profile,
         active_permission_profile: None,
         cwd,
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,

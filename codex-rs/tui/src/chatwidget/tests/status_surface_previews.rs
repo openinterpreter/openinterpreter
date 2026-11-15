@@ -54,7 +54,7 @@ fn status_preview_line_option(chat: &mut ChatWidget, items: &[StatusLineItem]) -
     let preview_data = chat.status_surface_preview_data();
     preview_data
         .status_line_for_items(items.iter().copied(), /*use_theme_colors*/ true)
-        .map(|content| line_text(content.into_hyperlink_line().line))
+        .map(|content| line_text(content.line))
 }
 
 fn status_preview_line(chat: &mut ChatWidget, items: &[StatusLineItem]) -> String {

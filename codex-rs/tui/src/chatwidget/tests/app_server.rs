@@ -1137,6 +1137,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
         Ok(AppEvent::SubmitFeedback {
             category: crate::app_event::FeedbackCategory::Bug,
             reason: None,
+            report_passcode: None,
             turn_id: Some(turn_id),
             include_logs: false,
             destination: crate::app_event::FeedbackDestination::OpenAi,
@@ -1429,7 +1430,6 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             "turn-1".to_string(),
             AppServerThreadItemPayload::CommandExecution {
                 model_context: None,
-                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command: command.clone(),
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1455,7 +1455,6 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             "turn-1".to_string(),
             AppServerThreadItemPayload::CommandExecution {
                 model_context: None,
-                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command,
                 cwd: test_path_buf("/tmp").abs().into(),

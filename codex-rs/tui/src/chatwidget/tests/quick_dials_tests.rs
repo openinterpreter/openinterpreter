@@ -166,7 +166,7 @@ async fn saved_quick_dials_save_and_clear_picker_snapshots() {
     )]
     .into();
     chat.bottom_pane.apply_external_edit(DRAFT.into());
-    chat.dispatch_command(SlashCommand::Presets);
+    chat.open_quick_dial_menu();
     let hud = render_bottom_popup(&chat, /*width*/ 80);
     chat.handle_key_event(KeyCode::Enter.into());
     assert_eq!(render_bottom_popup(&chat, /*width*/ 80), hud);

@@ -69,7 +69,7 @@ pub(crate) fn activate_voice_for_thread(chat: &mut ChatWidget, thread_id: Thread
     chat.realtime_conversation.latest_input_was_voice = true;
 }
 
-fn user_item(text: &str) -> ThreadItem {
+fn user_item(text: &str) -> ThreadItemPayload {
     ThreadItemPayload::UserMessage {
         id: format!("user-{text}"),
         client_id: None,
@@ -80,7 +80,7 @@ fn user_item(text: &str) -> ThreadItem {
     }
 }
 
-fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadItem {
+fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadItemPayload {
     ThreadItemPayload::AgentMessage {
         moderation: None,
         id: item_id.to_string(),
@@ -92,7 +92,7 @@ fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadI
     }
 }
 
-fn start_item(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, item: ThreadItem) {
+fn start_item(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, item: ThreadItemPayload) {
     chat.handle_server_notification(
         ServerNotification::ItemStarted(ItemStartedNotification::new(
             thread_id.to_string(),
@@ -104,7 +104,12 @@ fn start_item(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, item: T
     );
 }
 
-fn complete_item(chat: &mut ChatWidget, thread_id: ThreadId, turn_id: &str, item: ThreadItem) {
+fn complete_item(
+    chat: &mut ChatWidget,
+    thread_id: ThreadId,
+    turn_id: &str,
+    item: ThreadItemPayload,
+) {
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification::new(
             thread_id.to_string(),
@@ -121,7 +126,7 @@ fn finish_turn(
     chat: &mut ChatWidget,
     thread_id: ThreadId,
     turn_id: &str,
-    items: Vec<ThreadItem>,
+    items: Vec<ThreadItemPayload>,
     status: TurnStatus,
 ) {
     chat.handle_server_notification(
@@ -130,7 +135,7 @@ fn finish_turn(
             turn: Turn {
                 id: turn_id.to_string(),
                 root_turn_id: None,
-                items,
+                items: items.into_iter().map(ThreadItem::untimed).collect(),
                 items_view: TurnItemsView::Summary,
                 status,
                 error: None,

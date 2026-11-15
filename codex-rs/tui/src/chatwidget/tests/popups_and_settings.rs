@@ -3870,8 +3870,8 @@ async fn model_reasoning_selection_popup_applies_custom_effort() {
     assert_eq!(
         selected_effort_events,
         vec![
-            (None, Some(custom_effort.clone())),
-            (Some("gpt-5.5".to_string()), Some(custom_effort)),
+            ("gpt-5.5".to_string(), Some(custom_effort.clone())),
+            ("gpt-5.5".to_string(), Some(custom_effort)),
         ]
     );
 }

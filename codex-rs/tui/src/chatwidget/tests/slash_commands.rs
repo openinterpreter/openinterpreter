@@ -1618,7 +1618,7 @@ async fn slash_copy_state_tracks_turn_complete_final_reply() {
     complete_turn_with_message(&mut chat, "turn-1", Some("Final reply **markdown**"));
 
     assert_eq!(
-        chat.last_agent_markdown_text(),
+        chat.transcript.last_agent_markdown.as_deref(),
         Some("Final reply **markdown**")
     );
 }
@@ -1682,7 +1682,10 @@ async fn slash_copy_state_tracks_plan_item_completion() {
     );
     handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
 
-    assert_eq!(chat.last_agent_markdown_text(), Some(plan_text.as_str()));
+    assert_eq!(
+        chat.transcript.last_agent_markdown.as_deref(),
+        Some(plan_text.as_str())
+    );
     assert_matches!(
         chat.pending_notification,
         Some(Notification::AgentTurnComplete { ref response }) if response == &plan_text
@@ -1707,7 +1710,7 @@ async fn slash_copy_state_tracks_plan_item_completion() {
     chat.transcript.plan_delta_buffer = "  ```sh\n  echo hi  \n  ```\n".to_string();
     chat.on_plan_item_completed(String::new());
     assert_eq!(
-        chat.last_agent_markdown_text(),
+        chat.transcript.last_agent_markdown.as_deref(),
         Some("```sh\n  echo hi  \n  ```")
     );
     let _ = drain_insert_history(&mut rx);
@@ -2745,7 +2748,7 @@ async fn slash_copy_state_is_preserved_during_running_task() {
     chat.on_task_started();
 
     assert_eq!(
-        chat.last_agent_markdown_text(),
+        chat.transcript.last_agent_markdown.as_deref(),
         Some("Previous completed reply")
     );
 }
@@ -2766,7 +2769,7 @@ async fn slash_copy_uses_agent_message_item_when_turn_complete_omits_final_text(
     let _ = drain_insert_history(&mut rx);
 
     assert_eq!(
-        chat.last_agent_markdown_text(),
+        chat.transcript.last_agent_markdown.as_deref(),
         Some("Legacy item final message")
     );
     assert_matches!(
@@ -3895,14 +3898,14 @@ async fn transcript_copy_feedback_stays_in_the_footer_without_history_or_interru
     let (mut chat, mut events, mut operations) =
         make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut events);
-    chat.show_selection_copy_result(Ok(crate::clipboard_copy::CopyStatus::Confirmed));
+    chat.show_clipboard_flash(&Ok(crate::clipboard_copy::CopyStatus::Confirmed));
     assert_eq!(drain_insert_history(&mut events).len(), 0);
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(
         "transcript_copy_success",
         normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80))
     );
-    chat.show_selection_copy_result(Ok(crate::clipboard_copy::CopyStatus::Unconfirmed));
+    chat.show_clipboard_flash(&Ok(crate::clipboard_copy::CopyStatus::Unconfirmed));
     assert_eq!(drain_insert_history(&mut events).len(), 0);
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(
@@ -3912,7 +3915,7 @@ async fn transcript_copy_feedback_stays_in_the_footer_without_history_or_interru
     chat.open_warnings(&[Arc::new(history_cell::new_warning_event(
         "selected café".into(),
     ))]);
-    chat.show_selection_copy_result(Err("clipboard unavailable".to_string()));
+    chat.show_clipboard_flash(&Err("clipboard unavailable".to_string()));
     assert_eq!(drain_insert_history(&mut events).len(), 0);
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(

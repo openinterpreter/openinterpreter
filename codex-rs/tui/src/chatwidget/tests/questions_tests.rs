@@ -75,13 +75,13 @@ async fn async_question_answers_preserve_ambiguous_skill_selection_and_dismiss_r
         short_description: None,
         interface: None,
         dependencies: None,
-        path: test_path_buf("/tmp/route/SKILL.md").abs(),
+        path: test_path_buf("/tmp/route/SKILL.md").abs().into(),
         scope: crate::test_support::skill_scope_repo(),
         enabled: true,
         plugin_id: None,
     };
     let mut duplicate = skill.clone();
-    duplicate.path = test_path_buf("/tmp/other-route/SKILL.md").abs();
+    duplicate.path = test_path_buf("/tmp/other-route/SKILL.md").abs().into();
     chat.set_skills(Some(vec![skill.clone(), duplicate]));
     chat.add_async_questions("message", &questions());
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
@@ -95,12 +95,14 @@ async fn async_question_answers_preserve_ambiguous_skill_selection_and_dismiss_r
         items,
         vec![
             UserInput::Text {
-                text: AnsweredQuestion::new(&id, "Which way?", "Use $route").render(),
+                text: AnsweredQuestion::new(&id, "Which way?", "Use $route")
+                    .render()
+                    .expect_text(),
                 text_elements: Vec::new(),
             },
             UserInput::Skill {
                 name: skill.name,
-                path: skill.path.to_path_buf()
+                path: std::path::PathBuf::from(skill.path.as_str())
             },
         ]
     );
@@ -364,7 +366,7 @@ async fn reconnect_preserves_buffered_question_answer_source() {
 
     let (mut restored, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     restored.thread_id = Some(ThreadId::new());
-    restored.restore_reconnected_input(state);
+    restored.restore_reconnected_input(state, &[]);
     assert_eq!(
         restored
             .input_queue

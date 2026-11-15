@@ -17,6 +17,8 @@ fn paste_hidden_plan_shell_payload(chat: &mut ChatWidget) -> String {
 fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -30,6 +32,7 @@ fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSession
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1228,6 +1231,8 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -1241,6 +1246,7 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),

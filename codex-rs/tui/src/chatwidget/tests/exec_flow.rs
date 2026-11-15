@@ -64,6 +64,9 @@ async fn replayed_background_terminals_belong_to_the_displayed_thread() {
     let live = codex_app_server_protocol::ThreadBackgroundTerminal {
         item_id: "child-call".into(),
         process_id: "43".into(),
+        turn_id: None,
+        native_process_id: None,
+        terminal_generation: None,
         command: "sleep 200".into(),
         cwd: fork.config.cwd.clone().into(),
         os_pid: None,
@@ -288,7 +291,6 @@ async fn adjacent_exploration_groups_across_reasoning_live_and_replayed() {
             let command = vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
             let mut item = AppServerThreadItemPayload::CommandExecution {
                 model_context: None,
-                sandbox_type: None,
                 id: id.to_string(),
                 command: codex_shell_command::parse_command::shlex_join(&command),
                 cwd: chat.config.cwd.clone().into(),
@@ -383,7 +385,6 @@ async fn replayed_commands_preserve_individual_output_and_failure_status() {
     let replayed_command = |id: &str, output: &str, source: ExecCommandSource| {
         AppServerThreadItemPayload::CommandExecution {
             model_context: None,
-            sandbox_type: None,
             id: id.to_string(),
             command: format!("printf {output}"),
             cwd: cwd.clone().into(),
@@ -586,7 +587,6 @@ async fn exec_end_without_begin_uses_event_command() {
         &mut chat,
         AppServerThreadItemPayload::CommandExecution {
             model_context: None,
-            sandbox_type: None,
             id: "call-orphan".to_string(),
             command: codex_shell_command::parse_command::shlex_join(&command),
             cwd: cwd.into(),

@@ -221,7 +221,6 @@ async fn review_opens_during_mcp_startup() {
     for dismiss_completion in [false, true] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         chat.show_welcome_banner = false;
-        chat.set_mcp_startup_expected_servers(["slow".to_string()]);
         notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
         chat.bottom_pane
             .set_composer_text("/review".to_string(), Vec::new(), Vec::new());
@@ -246,7 +245,6 @@ async fn review_opens_during_mcp_startup() {
 #[tokio::test]
 async fn inline_review_submits_during_mcp_startup() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.set_mcp_startup_expected_servers(["slow".to_string()]);
     notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
     chat.bottom_pane.set_composer_text(
         "/review check regressions".to_string(),
@@ -274,7 +272,6 @@ async fn review_during_mcp_startup_preserves_draft_when_foreground_work_is_pendi
         for draft in ["/review", "/review check regressions"] {
             let (mut chat, mut rx, mut op_rx) =
                 make_chatwidget_manual(/*model_override*/ None).await;
-            chat.set_mcp_startup_expected_servers(["slow".to_string()]);
             notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
             match activity {
                 "turn" => handle_turn_started(&mut chat, "turn-1"),
@@ -348,7 +345,6 @@ async fn pending_mcp_startup_does_not_block_queued_follow_up() {
 async fn pending_mcp_startup_dispatches_queued_slash_commands() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.empty_state_animation.borrow_mut().start_fresh();
-    chat.set_mcp_startup_expected_servers(["slow".to_string()]);
     notify_mcp_status(&mut chat, "slow", McpServerStartupState::Starting);
     chat.thread_id = Some(ThreadId::new());
     chat.bottom_pane
