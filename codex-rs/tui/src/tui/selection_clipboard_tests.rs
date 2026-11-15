@@ -40,6 +40,8 @@ async fn selection_clipboard_survives_overlay_close_and_later_terminal_requests(
         let mut overlay = Overlay::new_transcript(
             vec![Arc::new(PlainHistoryCell::new(vec!["selected".into()]))],
             RuntimeKeymap::defaults().pager,
+            /*copy_on_select*/ false,
+            /*mouse_scroll_speed*/ 1.0,
         );
         assert_eq!(
             tui.copy_transcript_selection_with("selected", |text| {
