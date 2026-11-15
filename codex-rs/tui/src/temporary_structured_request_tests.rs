@@ -103,6 +103,7 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(EnvironmentManager::default_for_tests()),
+            codex_app_server_client::EmbeddedNetworkPolicy::default(),
         )
         .await?;
         let app_server = AppServerClient::InProcess(client);
