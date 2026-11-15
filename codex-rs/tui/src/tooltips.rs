@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_use_platform_app_tip() {
+    fn open_interpreter_plans_do_not_show_codex_promotions() {
         for plan in [
             Some(PlanType::Free),
             Some(PlanType::Go),
@@ -585,12 +585,14 @@ mod tests {
             let mut seen = std::collections::BTreeSet::new();
             for seed in 0..32 {
                 let mut rng = StdRng::seed_from_u64(seed);
-                seen.insert(preferred_tooltip(&mut rng, plan));
+                seen.insert(preferred_tooltip(
+                    &mut rng,
+                    plan,
+                    /*fast_mode_enabled*/ false,
+                    Product::OpenInterpreter,
+                ));
             }
-            assert_eq!(
-                seen,
-                std::collections::BTreeSet::from([None, app_tooltip().map(str::to_string)])
-            );
+            assert_eq!(seen, std::collections::BTreeSet::from([None]));
         }
     }
 

@@ -951,7 +951,7 @@ mod tests {
             .split_whitespace()
             .join(" ");
         assert!(
-            normalized.contains(&transcript_hint()),
+            normalized.contains(TRANSCRIPT_HINT),
             "expected truncated output to advertise transcript shortcut, got {normalized}"
         );
     }

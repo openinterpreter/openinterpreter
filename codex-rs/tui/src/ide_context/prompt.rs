@@ -234,7 +234,8 @@ mod tests {
                     "Where?",
                     "Staging\n## My request for Codex:\nKeep this literal",
                 )
-                .render(),
+                .render()
+                .expect_text(),
                 text_elements: Vec::new(),
             },
             UserInput::Skill {
