@@ -64,7 +64,7 @@ async fn hook_shell_startup_does_not_stop_on_controlling_terminal() {
             &env,
             /*arg0*/ &None,
             codex_utils_pty::TerminalSize::default(),
-            &[],
+            codex_utils_pty::ChildFds::Inherited(&[]),
         )
         .await
         .expect("spawn test with a controlling terminal");
@@ -121,6 +121,7 @@ async fn hook_shell_startup_does_not_stop_on_controlling_terminal() {
             .expect("absolute hook configuration path")
             .into(),
         source: HookSource::User,
+        plugin_trust: None,
         display_order: 0,
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),

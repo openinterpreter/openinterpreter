@@ -889,6 +889,7 @@ pub fn built_in_model_providers(
             AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
             P::create_amazon_bedrock_runtime_provider(/*aws*/ None),
         ),
+        (GCP_PROVIDER_ID, P::create_gcp_provider()),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),

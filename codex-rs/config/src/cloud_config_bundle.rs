@@ -58,17 +58,45 @@ pub struct CloudRequirementsTomlBundle {
 impl CloudRequirementsTomlBundle {
     pub(crate) fn into_layers(self, base_dir: &AbsolutePathBuf) -> Vec<RequirementsLayerEntry> {
         let Self { enterprise_managed } = self;
+        // Fragments arrive highest priority first. A legacy RBAC denial of
+        // fast mode also denies ultrafast mode, unless a higher-priority
+        // administrator fragment explicitly selected the latter. Preserve
+        // invalid TOML unchanged so the regular requirements parser rejects it.
+        let mut higher_priority_ultrafast = false;
         let mut layers = enterprise_managed
             .into_iter()
             .map(|fragment| {
-                RequirementsLayerEntry::from_toml(
-                    RequirementSource::EnterpriseManaged {
-                        id: fragment.id,
-                        name: fragment.name,
-                    },
-                    fragment.contents,
-                )
-                .with_base_dir(base_dir.clone())
+                let source = RequirementSource::EnterpriseManaged {
+                    id: fragment.id.clone(),
+                    name: fragment.name,
+                };
+                let mut parsed = fragment.contents.parse::<toml::Value>().ok();
+                let features = parsed
+                    .as_mut()
+                    .and_then(|value| value.get_mut("features"))
+                    .and_then(toml::Value::as_table_mut);
+                let mut normalized = false;
+                if let Some(features) = features {
+                    let explicit_ultrafast = features.contains_key("ultrafast_mode");
+                    if fragment.id == "rbac-fast-mode"
+                        && !higher_priority_ultrafast
+                        && !explicit_ultrafast
+                        && features.get("fast_mode").and_then(toml::Value::as_bool) == Some(false)
+                    {
+                        features.insert("ultrafast_mode".to_string(), toml::Value::Boolean(false));
+                        normalized = true;
+                    }
+                    higher_priority_ultrafast |= explicit_ultrafast || normalized;
+                }
+                let layer = if normalized {
+                    RequirementsLayerEntry::from_toml_value(
+                        source,
+                        parsed.expect("normalized requirements were parsed"),
+                    )
+                } else {
+                    RequirementsLayerEntry::from_toml(source, fragment.contents)
+                };
+                layer.with_base_dir(base_dir.clone())
             })
             .collect::<Vec<_>>();
         // Bundle fragments arrive highest-priority first, while requirements

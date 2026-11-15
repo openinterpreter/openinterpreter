@@ -7,7 +7,6 @@ use crate::WindowsSandboxFilesystemOverrides;
 #[cfg(target_os = "linux")]
 use crate::bwrap::WSL1_BWRAP_WARNING;
 use crate::landlock::CODEX_LINUX_SANDBOX_ARG0;
-use crate::landlock::create_linux_sandbox_command_args_for_permission_profile;
 use crate::policy_transforms::effective_permission_profile;
 use crate::policy_transforms::should_require_platform_sandbox;
 #[cfg(target_os = "macos")]
@@ -891,20 +890,6 @@ fn ensure_linux_bubblewrap_is_supported(
     }
 
     Ok(())
-}
-
-fn os_string_to_command_component(value: OsString) -> String {
-    value
-        .into_string()
-        .unwrap_or_else(|value| value.to_string_lossy().into_owned())
-}
-
-fn linux_sandbox_arg0_override(exe: &Path) -> String {
-    if exe.file_name().and_then(|name| name.to_str()) == Some(CODEX_LINUX_SANDBOX_ARG0) {
-        os_string_to_command_component(exe.as_os_str().to_owned())
-    } else {
-        CODEX_LINUX_SANDBOX_ARG0.to_string()
-    }
 }
 
 #[cfg(test)]

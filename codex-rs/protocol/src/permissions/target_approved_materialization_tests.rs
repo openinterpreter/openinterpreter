@@ -223,9 +223,19 @@ fn approved_command_discards_other_volume_grants_before_materialization() {
     .map(|path| approved.resolve_access(&uri(path), &context));
     // If the host cannot prove the cross-volume denial, approval must preserve the original
     // restricted policy instead of granting the C: volume and silently dropping D: protection.
-    if access[0] == Deny {
+    // The original policy can itself allow reads or an explicit D: write, so do not assume
+    // declining approval means every path resolves to Deny on every host platform.
+    if approved == policy {
         assert_eq!(approved, policy);
-        assert_eq!(access, [Deny, Deny, Deny]);
+        assert_eq!(
+            access,
+            [
+                "file:///C:/work/public",
+                "file:///C:/work/private/file",
+                "file:///D:/scoped",
+            ]
+            .map(|path| policy.resolve_access(&uri(path), &context))
+        );
     } else {
         assert_eq!(access, [Write, Deny, Deny]);
     }

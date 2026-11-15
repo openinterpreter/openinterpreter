@@ -104,7 +104,7 @@ fn defers_approval_notice_until_after_tool_output() {
                 "tool_call_id": "call-1"
             },
             {
-                "role": "user",
+                "role": "system",
                 "content": "Approved command prefix saved:\n[\"git\", \"status\"]"
             }
         ])
@@ -159,7 +159,7 @@ fn keeps_parallel_tool_outputs_adjacent_before_interleaved_messages() {
                 "tool_call_id": "call-2"
             },
             {
-                "role": "user",
+                "role": "system",
                 "content": "approval updated"
             },
             {
