@@ -15,11 +15,7 @@ async fn image_result_live_and_replay_render_in_the_owning_call() {
     for replay in [false, true] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         if replay {
-            chat.replay_thread_item(
-                codex_app_server_protocol::ThreadItem::untimed(item.clone()),
-                "turn-1".into(),
-                ReplayKind::ThreadSnapshot,
-            );
+            chat.replay_thread_item(item.clone(), "turn-1".into(), ReplayKind::ThreadSnapshot);
         } else {
             let mut started = item.clone();
             if let AppServerThreadItemPayload::McpToolCall { status, result, .. } = &mut started {

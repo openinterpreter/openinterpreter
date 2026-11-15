@@ -1,4 +1,5 @@
 use super::MathMarkdown;
+use super::render::MathMode;
 use super::render::render;
 use crate::markdown_render::render_markdown_text_with_width;
 use pretty_assertions::assert_eq;
@@ -115,7 +116,7 @@ fn unicode_math_pending_display_tracks_original_offset() {
 #[test]
 fn unicode_math_nested_fractions_and_oversized_pending_stay_source() {
     for source in [r"\frac{\frac{a}{b}}{c}", r"\frac{a}{\frac{b}{c}}"] {
-        assert_eq!(render(source, /*display*/ true), None);
+        assert_eq!(render(source, MathMode::Display), None);
     }
     let source = format!("$$\n{}", "x".repeat(/*n*/ 5000));
     assert_eq!(

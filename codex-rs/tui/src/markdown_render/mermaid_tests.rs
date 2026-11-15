@@ -118,7 +118,6 @@ fn mermaid_styles_follow_the_supplied_theme() {
                 /*width*/ Some(40),
                 theme,
             )
-            .unwrap()
         });
         let styled = lines
             .into_iter()

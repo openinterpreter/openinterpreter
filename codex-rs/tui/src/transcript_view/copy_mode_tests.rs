@@ -378,12 +378,7 @@ fn copy_completion_keeps_payload_count_and_follow_intent() {
             /*x*/ 0, /*y*/ 0, /*width*/ 40, /*height*/ 1,
         );
         let mut buffer = ratatui::buffer::Buffer::empty(area);
-        view.render_composer_gap(
-            Some(area),
-            /*hint*/ None,
-            &mut buffer,
-            std::time::Instant::now(),
-        );
+        view.render_composer_gap(Some(area), /*hint*/ None, &mut buffer);
         insta::allow_duplicates! {
             insta::assert_snapshot!(text(&buffer).trim(), @"Copied 8 chars to host clipboard");
         }

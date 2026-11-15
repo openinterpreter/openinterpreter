@@ -519,7 +519,6 @@ fn transcript_overlay_absorbs_older_tail_into_live_without_duplicate_cells() {
     let header: Arc<dyn HistoryCell> = Arc::new(history_cell::SessionHeaderHistoryCell::new(
         "test model".to_owned(),
         /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
         std::path::PathBuf::from("/project"),
         "test",
     ));

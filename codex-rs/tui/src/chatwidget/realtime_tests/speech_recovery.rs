@@ -530,9 +530,9 @@ async fn interrupted_voice_delegation_never_speaks_a_completed_item() {
 async fn replay_projects_the_delegated_request_without_internal_xml() {
     let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
     chat.replay_thread_item(
-        codex_app_server_protocol::ThreadItem::untimed(user_item(
+        user_item(
             "<realtime_delegation><input>show &lt;code&gt; &amp; tests</input></realtime_delegation>",
-        )),
+        ),
         "old-turn".to_string(),
         ReplayKind::ResumeInitialMessages,
     );
