@@ -138,9 +138,12 @@ enabled = {skill_enabled}
         description: "Run setup".to_string(),
         short_description: None,
         interface: None,
-        path: Some(AbsolutePathBuf::try_from(std::fs::canonicalize(
-            plugin_root.join("skills/setup/SKILL.md"),
-        )?)?),
+        path: Some(
+            AbsolutePathBuf::try_from(std::fs::canonicalize(
+                plugin_root.join("skills/setup/SKILL.md"),
+            )?)?
+            .into(),
+        ),
         enabled: skill_enabled,
     };
     assert_eq!(response.plugin.summary.enabled, plugin_enabled);
