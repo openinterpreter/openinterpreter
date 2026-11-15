@@ -1902,7 +1902,10 @@ async fn run_ratatui_app(
             &config,
             &app_server_target,
             trust_cwd,
-            resumed_thread.as_ref(),
+            onboarding::DirectoryTrustOptions {
+                resumed_thread: resumed_thread.as_ref(),
+                cancel: None,
+            },
             Some(&mut startup_draft),
         )
         .await?;

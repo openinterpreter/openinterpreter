@@ -566,7 +566,7 @@ pub(super) async fn run_main_inner(
         startup_draft.flush_pending_events().await?;
         let output = startup_draft
             .tui_mut()
-            .with_restored(|| async {
+            .with_restored(crate::tui::TerminalHandoff::Restore, || async {
                 // Package installation may print progress; keep ordinary Ctrl+C handling.
                 crossterm::terminal::disable_raw_mode()?;
                 let result = codex_app_server_daemon::start_with_features(&daemon_features).await;
