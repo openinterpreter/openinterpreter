@@ -1,5 +1,6 @@
 //! Regression coverage for wide hook selection styling and URL-preserving detail truncation.
 
+use super::render::render_line_rows;
 use super::tests::hook;
 use super::tests::render_buffer;
 use super::tests::render_lines;

@@ -50,7 +50,7 @@ impl HooksBrowserView {
     }
 }
 
-fn render_line_rows(
+pub(super) fn render_line_rows(
     area: Rect,
     buf: &mut Buffer,
     rows: Vec<Line<'static>>,

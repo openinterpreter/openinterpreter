@@ -220,7 +220,8 @@ fn feedback_paste_burst_preserves_multiline_note_until_submit() {
                 /*turn_id*/ None,
                 AppEventSender::new(tx),
                 include_logs,
-                FeedbackAudience::External,
+                Some(FeedbackAudience::External),
+                /*can_save*/ true,
             );
             let now = Instant::now();
             for (index, ch) in note.chars().enumerate() {
@@ -253,6 +254,7 @@ fn feedback_paste_burst_preserves_multiline_note_until_submit() {
                 report_passcode,
                 turn_id,
                 include_logs: submitted_logs,
+                destination,
             } = rx.try_recv().expect("submit feedback event")
             else {
                 panic!("expected feedback submission");
@@ -267,6 +269,7 @@ fn feedback_paste_burst_preserves_multiline_note_until_submit() {
                 )
             );
             assert!(report_passcode.is_none());
+            assert_eq!(destination, FeedbackDestination::OpenAi);
             assert!(view.is_complete());
             assert!(rx.try_recv().is_err());
         }
@@ -284,7 +287,8 @@ fn feedback_bracketed_paste_does_not_reach_chat_composer() {
             /*turn_id*/ None,
             tx,
             include_logs,
-            FeedbackAudience::External,
+            Some(FeedbackAudience::External),
+            /*can_save*/ true,
         )));
         // An explicit paste ends any preceding keystroke burst.
         pane.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
@@ -382,7 +386,8 @@ fn dedicated_passcode_is_masked_separate_and_required_for_opt_in() {
         None,
         AppEventSender::new(tx_raw),
         false,
-        FeedbackAudience::External,
+        Some(FeedbackAudience::External),
+        /*can_save*/ true,
         true,
     );
     view.textarea.insert_str("ordinary report note");
@@ -426,7 +431,8 @@ fn dedicated_passcode_waits_for_multiline_note_paste_to_end() {
         None,
         AppEventSender::new(tx_raw),
         false,
-        FeedbackAudience::External,
+        Some(FeedbackAudience::External),
+        /*can_save*/ true,
         true,
     );
     let start = Instant::now();

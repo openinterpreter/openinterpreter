@@ -265,6 +265,8 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
 #[path = "selection_row_links.rs"]
 mod selection_row_links;
 use selection_row_links::wrap_row_lines;
+#[cfg(test)]
+use selection_row_links::wrap_two_column_row;
 
 fn apply_row_state_style(
     lines: &mut [crate::terminal_hyperlinks::HyperlinkLine],

@@ -101,7 +101,10 @@ fn hidden_banner_preserves_input_before_render_and_after_resize() {
     for (render_hidden, composer_gap) in [
         (false, None),
         (true, None),
-        (true, Some(super::super::ComposerGap::default())),
+        (
+            true,
+            Some(super::super::composer_gap::ComposerGap::default()),
+        ),
     ] {
         if render_hidden {
             let renderable = pane.as_renderable_with_options(ComposerRenderOptions {
