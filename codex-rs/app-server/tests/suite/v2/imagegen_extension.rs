@@ -85,6 +85,7 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model(
     } else {
         (RESULT, "png")
     };
+    let arguments = imagegen_arguments("paint a blue whale", requested_transparent_background);
     let server = responses::start_mock_server().await;
     Mock::given(method("POST"))
         .and(path("/api/codex/images/generations"))
@@ -93,7 +94,7 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model(
                 .insert_header("x-codex-imagegen-request-id", "req-imagegen-123")
                 .set_body_json(json!({
                     "created": 1,
-                    "background": "opaque",
+                    "background": expected_background,
                     "data": [
                         {"b64_json": RESULT, "generation_id": "gen-image-123"},
                         {"b64_json": "ignored", "generation_id": "gen-other"},
@@ -1010,7 +1011,8 @@ async fn standalone_image_generation_is_callable_from_code_mode_only(
 ) -> Result<()> {
     let call_id = "code-mode-image-run-1";
     let server = responses::start_mock_server().await;
-    mount_image_response_with_background(&server, "opaque").await;
+    mount_image_response_with_background(&server, expected_background).await;
+    let arguments = imagegen_arguments("paint a blue whale", requested_transparent_background);
 
     let response_mock = responses::mount_sse_sequence(
         &server,
