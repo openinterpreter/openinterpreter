@@ -341,6 +341,8 @@ impl ChatWidget {
     }
 
     pub(crate) fn stop_realtime_conversation(&mut self) {
+        // Cancel the session-lock observer and media gate when voice is stopped.
+        self.realtime_conversation.session_lock.take();
         self.realtime_conversation.startup_retry = StartupRetry::Used;
         if matches!(
             self.realtime_conversation.phase,
@@ -1687,8 +1689,11 @@ impl ChatWidget {
             self.record_realtime_failure(cause);
         }
         let failed = self.realtime_conversation.failure_recorded;
+        let session_lock =
+            retry_thread_id.and_then(|_| self.realtime_conversation.session_lock.take());
         self.reset_realtime_conversation();
         if let Some(thread_id) = retry_thread_id {
+            self.realtime_conversation.session_lock = session_lock;
             // The old backend is closed. A late peer result belongs to its attempt ID.
             self.realtime_conversation.startup_retry = StartupRetry::Used;
             self.realtime_conversation.microphone_muted = muted;
