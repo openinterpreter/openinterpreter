@@ -4116,31 +4116,9 @@ impl App {
                         );
                     }
                 }
-                self.finish_thread_title_generation(thread_id, destination);
-                if let ThreadTitleDestination::RenameSuggestion { request_id } = destination {
-                    let suggestion = result
-                        .ok()
-                        .and_then(|response| super::thread_title::parse_thread_title(&response));
-                    self.chat_widget.apply_thread_name_suggestion(
-                        thread_id,
-                        request_id,
-                        suggestion.as_deref(),
-                    );
-                }
             }
             AppEvent::HideAgentsOverviewThread { thread_id } => {
                 self.prepare_agents_overview_removal(&HashSet::from([thread_id]));
-                self.agents_overview.hidden_threads.insert(thread_id);
-                self.repaint_agents_overview();
-            }
-            AppEvent::ConfirmAgentsOverviewAction { thread_id, action } => {
-                self.confirm_agents_overview_action(thread_id, action);
-            }
-            AppEvent::RunAgentsOverviewAction { thread_id, action } => {
-                self.run_agents_overview_action(tui, app_server, thread_id, action)
-                    .await?;
-            }
-            AppEvent::HideAgentsOverviewThread { thread_id } => {
                 self.agents_overview.hidden_threads.insert(thread_id);
                 self.repaint_agents_overview();
             }

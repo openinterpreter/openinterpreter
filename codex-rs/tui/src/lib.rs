@@ -2941,7 +2941,7 @@ requires_openai_auth = {requires_openai_auth}
                 &expected_cwd,
             ));
             let mut app_server = start_app_server_for_picker(
-                target_session.backend_id,
+                target_backend_id,
                 &final_config,
                 &AppServerTarget::Embedded,
                 Vec::new(),
