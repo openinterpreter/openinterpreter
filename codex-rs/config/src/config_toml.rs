@@ -56,7 +56,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_path::normalize_for_path_comparison;
 use codex_utils_path_uri::Platform;
 use schemars::JsonSchema;
 use serde::Deserialize;

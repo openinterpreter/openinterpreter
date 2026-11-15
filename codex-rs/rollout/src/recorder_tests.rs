@@ -2085,6 +2085,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             turn_id: Some("turn-1".to_string()),
             root_turn_id: None,
             disabled_plugin_ids: None,
+            direct_only_tool_namespaces: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
             approval_policy: AskForApproval::Never,

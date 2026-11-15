@@ -312,7 +312,6 @@ fn projected_items_report_post_projection_bytes() {
         thread_id: ThreadId::default(),
         turn_id: "turn".to_string(),
         item: TurnItem::CommandExecution(CommandExecutionItem {
-            sandbox_type: None,
             model_context: None,
             id: "exec".to_string(),
             plugin_id: None,
