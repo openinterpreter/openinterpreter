@@ -169,11 +169,12 @@ async fn turn_completion_metrics_follow_model_switch(scenario: UsageScenario) {
     session
         .update_token_usage_info(
             &previous_context,
-            Some(&TokenUsage {
+            TokenUsage {
                 input_tokens: 1_000,
                 total_tokens: 1_000,
                 ..TokenUsage::default()
-            }),
+            }
+            .into(),
         )
         .await
         .expect("earlier session usage should be recorded");
@@ -196,7 +197,7 @@ async fn turn_completion_metrics_follow_model_switch(scenario: UsageScenario) {
         };
         // Local pre-turn compaction records usage with the previous model's context.
         session
-            .update_token_usage_info(&previous_context, Some(&compaction_usage))
+            .update_token_usage_info(&previous_context, compaction_usage.clone().into())
             .await
             .expect("compaction usage should be recorded");
         expected_usage.push((previous_context.model_info().slug.clone(), compaction_usage));
@@ -227,7 +228,7 @@ async fn turn_completion_metrics_follow_model_switch(scenario: UsageScenario) {
                 .record_token_usage_info(
                     &turn_context,
                     &response_context.initial_settings,
-                    Some(&response_usage),
+                    response_usage.clone().into(),
                 )
                 .await
                 .expect("response usage should be recorded");

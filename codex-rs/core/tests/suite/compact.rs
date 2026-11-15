@@ -1033,6 +1033,8 @@ async fn additional_context_survives_compaction(remote: bool) -> Result<()> {
     let test = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
+            config.response_process_mode =
+                codex_config::config_toml::ResponseProcessMode::AfterCompleteResponse;
             config.model_provider = provider;
             set_test_compact_prompt(config);
             config
