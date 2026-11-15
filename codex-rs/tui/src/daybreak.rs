@@ -125,7 +125,11 @@ async fn read_notice(config: &Config, request_handle: &AppServerRequestHandle) -
         );
         let response = client
             .get(url)
-            .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
+            .headers(
+                codex_model_provider::auth_provider_from_auth(&auth)
+                    .to_auth_headers()
+                    .ok()?,
+            )
             .send()
             .await
             .ok()?;

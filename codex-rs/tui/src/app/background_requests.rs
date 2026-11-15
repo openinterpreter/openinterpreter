@@ -1439,7 +1439,8 @@ mod tests {
 
     #[test]
     fn passcode_prompt_requires_authoritative_server_error_and_no_prior_passcode() {
-        let required = Err("feedback upload failed: feedback report passcode required".to_string());
+        let required: Result<(), String> =
+            Err("feedback upload failed: feedback report passcode required".to_string());
         assert!(app_server_requests_feedback_passcode(true, &required));
         assert!(!app_server_requests_feedback_passcode(false, &required));
         assert!(!app_server_requests_feedback_passcode(
@@ -1778,7 +1779,7 @@ mod tests {
         let thread_id = ThreadId::new();
         let rollout_path = PathBuf::from("/tmp/rollout.jsonl");
 
-        let params = build_feedback_params(
+        let params = build_feedback_upload_params(
             Some(thread_id),
             Some(rollout_path.clone()),
             FeedbackCategory::SafetyCheck,
@@ -1806,7 +1807,7 @@ mod tests {
 
     #[test]
     fn build_feedback_params_omits_rollout_path_without_logs() {
-        let params = build_feedback_params(
+        let params = build_feedback_upload_params(
             /*origin_thread_id*/ None,
             Some(PathBuf::from("/tmp/rollout.jsonl")),
             FeedbackCategory::GoodResult,

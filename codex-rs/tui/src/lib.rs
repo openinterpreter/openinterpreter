@@ -2090,6 +2090,8 @@ async fn run_ratatui_app(
         shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
         return Err(err);
     }
+    // Fetch the model catalog concurrently with startup bootstrap and hooks review.
+    app_server.prefetch_model_list();
     let startup_prefetch_started_at = Instant::now();
     let (startup_bootstrap, startup_hooks_entry) = tokio::join!(
         async {
@@ -2553,6 +2555,7 @@ requires_openai_auth = {requires_openai_auth}
             )?;
             let server_config = build_config(&home).await?;
             let mut server = AppServerSession::new(
+                crate::backend_id::BackendId::new(),
                 AppServerClient::InProcess(
                     start_test_embedded_app_server(server_config.clone()).await?,
                 ),
@@ -2840,6 +2843,7 @@ requires_openai_auth = {requires_openai_auth}
             /*log_db*/ None,
             state_db,
             Arc::new(EnvironmentManager::default_for_tests()),
+            codex_app_server_client::EmbeddedNetworkPolicy::default(),
         )
         .await
     }
@@ -2892,6 +2896,7 @@ requires_openai_auth = {requires_openai_auth}
             let state_db =
                 init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await?;
             let target_session = resume_picker::SessionTarget {
+                backend_id: crate::backend_id::BackendId::new(),
                 path: Some(rollout_path),
                 thread_id,
                 cwd: Some(session_cwd.clone()),
@@ -2904,6 +2909,7 @@ requires_openai_auth = {requires_openai_auth}
             let mut tui = tui::test_support::make_test_tui()?;
 
             let fallback_cwd = match resolve_startup_resume_or_fork_cwd(
+                target_session.backend_id,
                 &mut tui,
                 &config,
                 /*app_server*/ None,
@@ -2934,8 +2940,11 @@ requires_openai_auth = {requires_openai_auth}
                 &expected_cwd,
             ));
             let mut app_server = start_app_server_for_picker(
+                target_session.backend_id,
                 &final_config,
                 &AppServerTarget::Embedded,
+                Vec::new(),
+                LoaderOverrides::without_managed_config_for_tests(),
                 state_db,
                 Arc::new(EnvironmentManager::default_for_tests()),
             )
@@ -2985,12 +2994,15 @@ requires_openai_auth = {requires_openai_auth}
             .build()
             .await?;
         let mut tui = tui::test_support::make_test_tui()?;
+        let backend_id = crate::backend_id::BackendId::new();
 
         let error = resolve_startup_resume_or_fork_cwd(
+            backend_id,
             &mut tui,
             &config,
             /*app_server*/ None,
             &resume_picker::SessionSelection::Resume(resume_picker::SessionTarget {
+                backend_id,
                 path: None,
                 thread_id: ThreadId::new(),
                 cwd: None,
@@ -3008,10 +3020,12 @@ requires_openai_auth = {requires_openai_auth}
             "`tui.resume_cwd = \"current\"` requires `--cd` when using a remote workspace"
         );
         let explicit = resolve_startup_resume_or_fork_cwd(
+            backend_id,
             &mut tui,
             &config,
             /*app_server*/ None,
             &resume_picker::SessionSelection::Resume(resume_picker::SessionTarget {
+                backend_id,
                 path: None,
                 thread_id: ThreadId::new(),
                 cwd: None,
@@ -3041,12 +3055,15 @@ requires_openai_auth = {requires_openai_auth}
             .build()
             .await?;
         let mut tui = tui::test_support::make_test_tui()?;
+        let backend_id = crate::backend_id::BackendId::new();
 
         let error = resolve_startup_resume_or_fork_cwd(
+            backend_id,
             &mut tui,
             &config,
             /*app_server*/ None,
             &resume_picker::SessionSelection::Resume(resume_picker::SessionTarget {
+                backend_id,
                 path: None,
                 thread_id: ThreadId::new(),
                 cwd: None,
@@ -3096,6 +3113,7 @@ requires_openai_auth = {requires_openai_auth}
     fn session_target_display_label_falls_back_to_thread_id() {
         let thread_id = ThreadId::new();
         let target = crate::resume_picker::SessionTarget {
+            backend_id: crate::backend_id::BackendId::new(),
             path: None,
             thread_id,
             cwd: None,
@@ -3373,9 +3391,7 @@ requires_openai_auth = {requires_openai_auth}
         let cwd = temp_dir.path().join("project");
 
         let params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ false,
-            /*uses_remote_workspace*/ false,
-            &config,
+            Some(vec![config.model_provider_id.clone()]),
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
@@ -3392,9 +3408,7 @@ requires_openai_auth = {requires_openai_auth}
         assert!(params.use_state_db_only);
 
         let scan_params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ false,
-            /*uses_remote_workspace*/ false,
-            &config,
+            Some(vec![config.model_provider_id.clone()]),
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::ScanAndRepair,
@@ -3416,10 +3430,9 @@ requires_openai_auth = {requires_openai_auth}
             },
         };
 
+        assert!(!target.uses_remote_workspace());
         let params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ false,
-            target.uses_remote_workspace(),
-            &config,
+            Some(vec![config.model_provider_id.clone()]),
             Some(cwd.as_path()),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
@@ -3440,9 +3453,7 @@ requires_openai_auth = {requires_openai_auth}
         let config = build_config(&temp_dir).await?;
 
         let params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ true,
-            /*uses_remote_workspace*/ true,
-            &config,
+            None,
             /*cwd_filter*/ None,
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
@@ -3460,9 +3471,7 @@ requires_openai_auth = {requires_openai_auth}
         let config = build_config(&temp_dir).await?;
 
         let params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ true,
-            /*uses_remote_workspace*/ true,
-            &config,
+            None,
             /*cwd_filter*/ None,
             /*include_non_interactive*/ true,
             LatestSessionLookupMode::StateDbOnly,
@@ -3488,9 +3497,7 @@ requires_openai_auth = {requires_openai_auth}
         let cwd = Path::new("repo/on/server");
 
         let params = latest_session_lookup_params(
-            /*uses_remote_filesystem*/ true,
-            /*uses_remote_workspace*/ true,
-            &config,
+            None,
             Some(cwd),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
@@ -3590,6 +3597,7 @@ requires_openai_auth = {requires_openai_auth}
         )?;
 
         let mut app_server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             codex_app_server_client::AppServerClient::InProcess(
                 start_test_embedded_app_server(config.clone()).await?,
             ),
@@ -3600,7 +3608,7 @@ requires_openai_auth = {requires_openai_auth}
             /*show_all*/ false,
         );
         let disabled_target = lookup_latest_session_target_with_app_server(
-            /*uses_remote_filesystem*/ false,
+            resume_picker::SessionPickerAction::Fork,
             &mut app_server,
             &config,
             filter_cwd,
@@ -3616,7 +3624,7 @@ requires_openai_auth = {requires_openai_auth}
             /*show_all*/ false,
         );
         let scoped_target = lookup_latest_session_target_with_app_server(
-            /*uses_remote_filesystem*/ false,
+            resume_picker::SessionPickerAction::Fork,
             &mut app_server,
             &config,
             filter_cwd,
@@ -3629,7 +3637,7 @@ requires_openai_auth = {requires_openai_auth}
             /*show_all*/ true,
         );
         let show_all_target = lookup_latest_session_target_with_app_server(
-            /*uses_remote_filesystem*/ false,
+            resume_picker::SessionPickerAction::Fork,
             &mut app_server,
             &config,
             show_all_filter_cwd,
@@ -3660,6 +3668,7 @@ requires_openai_auth = {requires_openai_auth}
             .build()
             .await?;
         let mut app_server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             codex_app_server_client::AppServerClient::InProcess(
                 start_test_embedded_app_server(config.clone()).await?,
             ),
@@ -3677,7 +3686,7 @@ requires_openai_auth = {requires_openai_auth}
         )?;
 
         let target = lookup_latest_session_target_with_app_server(
-            /*uses_remote_filesystem*/ false,
+            resume_picker::SessionPickerAction::Resume,
             &mut app_server,
             &config,
             Some(project_cwd.as_path()),
@@ -3881,6 +3890,7 @@ requires_openai_auth = {requires_openai_auth}
         config.terminal_resize_reflow.max_rows =
             crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(2);
         let mut app_server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             AppServerClient::InProcess(start_test_embedded_app_server(config.clone()).await?),
             ThreadParamsMode::Embedded,
         );
@@ -4006,6 +4016,7 @@ requires_openai_auth = {requires_openai_auth}
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(EnvironmentManager::default_for_tests()),
+            codex_app_server_client::EmbeddedNetworkPolicy::default(),
             |_args| async { Err(std::io::Error::other("boom")) },
         )
         .await;
@@ -4079,7 +4090,7 @@ requires_openai_auth = {requires_openai_auth}
 
         assert_eq!(startup_error.database_path(), logs_db_path.as_path());
         assert!(
-            codex_state::sqlite_error_detail_is_corruption(startup_error.detail()),
+            startup_error.detail().contains("not a database"),
             "startup error should preserve the SQLite corruption cause, got: {}",
             startup_error.detail()
         );

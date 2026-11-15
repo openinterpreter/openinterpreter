@@ -99,6 +99,40 @@ impl App {
         });
     }
 
+    pub(super) fn confirm_daemon_restart(&mut self) {
+        if !self
+            .chat_widget
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| connection.is_managed_daemon)
+            || self.daemon_restart.is_some()
+        {
+            return;
+        }
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            header: Box::new(DaemonMenuHeader(vec![
+                Line::from("Restart background server?".bold()),
+                Line::from("Active or queued work in other chats may be interrupted."),
+                Line::from("Codex will reconnect automatically."),
+            ])),
+            items: vec![
+                SelectionItem {
+                    name: "Cancel".to_string(),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Restart".to_string(),
+                    actions: vec![Box::new(|tx| tx.send(AppEvent::RunDaemonRestart))],
+                    require_explicit_confirmation: true,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
+            ..SelectionViewParams::confirmation()
+        });
+    }
+
     pub(super) fn confirm_daemon_update(&mut self, source: DaemonUpdateSource) {
         let Some(executable) = &self.daemon_cli_executable else {
             return;

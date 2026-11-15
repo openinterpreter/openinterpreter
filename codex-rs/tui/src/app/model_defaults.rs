@@ -13,6 +13,35 @@ use codex_protocol::openai_models::ReasoningEffort;
 use color_eyre::eyre::Result;
 
 impl App {
+    pub(super) async fn apply_default_model_selection(
+        &mut self,
+        app_server: &mut AppServerSession,
+        model: String,
+        effort: Option<ReasoningEffort>,
+    ) {
+        if self
+            .active_thread_model_setting_update_params(model.clone())
+            .is_some_and(|params| params.permissions.is_some())
+            && self.reject_pending_permission_change()
+        {
+            return;
+        }
+        let model_changed = self.chat_widget.current_model() != model
+            || self.chat_widget.current_collaboration_mode().model() != model;
+        if model_changed {
+            self.chat_widget.set_model(&model);
+            self.sync_active_thread_model_setting(app_server, model.clone(), None)
+                .await;
+            self.sync_active_thread_service_tier_to_cached_session()
+                .await;
+        }
+        self.on_update_reasoning_effort(effort.clone());
+        self.sync_active_thread_reasoning_setting(app_server, effort.clone())
+            .await;
+        self.persist_default_model_selection(app_server.request_handle(), model, effort)
+            .await;
+    }
+
     pub(super) async fn select_session_model(
         &mut self,
         app_server: &mut AppServerSession,

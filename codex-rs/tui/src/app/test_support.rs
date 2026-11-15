@@ -5,6 +5,7 @@
 //! app-owned behavior.
 //! Return the large fixture on the heap so async scenarios do not embed it in their stack frames.
 
+pub(crate) use super::cloud_switch_wait::{ClipboardHandoff, wait_for_cloud_switch};
 use super::owned_transcript::tests::buffer_text;
 use super::*;
 use crate::chatwidget::tests::make_chatwidget_manual_with_sender;

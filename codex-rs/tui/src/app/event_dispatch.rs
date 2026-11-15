@@ -192,6 +192,22 @@ impl App {
         };
         match event {
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
+            AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
+            AppEvent::RunDaemonRestart => {
+                if self
+                    .chat_widget
+                    .remote_connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.is_managed_daemon)
+                    && self.daemon_restart.is_none()
+                {
+                    self.daemon_restart = Some(tokio::spawn(codex_app_server_daemon::run(
+                        codex_app_server_daemon::LifecycleCommand::Restart {
+                            feature_overrides: Default::default(),
+                        },
+                    )));
+                }
+            }
             AppEvent::ConfirmDaemonUpdate(source) => self.confirm_daemon_update(source),
             AppEvent::RunDaemonUpdate(source) => {
                 self.pending_update_action = Some(UpdateAction::Daemon(source));
@@ -498,6 +514,27 @@ impl App {
                 }
             }
             AppEvent::OpenWarnings => self.chat_widget.open_warnings(&self.transcript_cells),
+            AppEvent::UpdateWarnings {
+                transcript,
+                dismissed,
+                kept,
+            } => {
+                if !Arc::ptr_eq(
+                    &transcript,
+                    &self.chat_widget.warning_display_state.transcript,
+                ) {
+                    return Ok(AppRunControl::Continue);
+                }
+                let state = &mut self.chat_widget.warning_display_state.dismissed;
+                state.extend(dismissed.into_iter().map(|entry| (entry.id, entry.details)));
+                for entry in kept {
+                    if state.get(&entry.id) == Some(&entry.details) {
+                        state.remove(&entry.id);
+                    }
+                }
+                self.chat_widget.warning_display_state.synced_cells = None;
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::CopyWarning(text) => {
                 let result = tui.clipboard.copy(
                     text.into(),
@@ -587,6 +624,9 @@ impl App {
             }
             AppEvent::OpenResumePicker => {
                 self.pending_open_resume_picker = true;
+            }
+            AppEvent::ImplementPlanInFreshSession { plan } => {
+                Box::pin(self.implement_plan_in_fresh_session(tui, app_server, plan)).await?;
             }
             AppEvent::OpenExternalAgentConfigMigration => {
                 let cwd = if self.chat_widget.thread_id().is_some()
@@ -1039,8 +1079,112 @@ impl App {
             AppEvent::BeginThreadSwitchHistoryReplayBuffer => {
                 self.begin_thread_switch_history_replay_buffer();
             }
+            AppEvent::ParkSideCompanion {
+                pair,
+                thread_id,
+                stream,
+                display,
+            } => {
+                if self.side_threads.contains_key(&pair) {
+                    self.transcript_view
+                        .sync_history_tail(&self.transcript_cells);
+                    if let Some(stream) = stream {
+                        let cells = &mut self.transcript_cells;
+                        let (start, replacement): (_, Arc<dyn HistoryCell>) = match stream {
+                            CapturedSideStream::Answer(cell) => (
+                                trailing_run_start::<history_cell::AgentMessageCell>(cells),
+                                cell,
+                            ),
+                            CapturedSideStream::Plan(cell) => (
+                                trailing_run_start::<history_cell::ProposedPlanStreamCell>(cells),
+                                cell,
+                            ),
+                        };
+                        let range = start..cells.len();
+                        self.transcript_view
+                            .replace_group(cells, range.clone(), &replacement);
+                        cells.splice(range, [replacement]);
+                    }
+                    self.side_companions.insert(
+                        thread_id,
+                        SideCompanion {
+                            display,
+                            cells: std::mem::take(&mut self.transcript_cells),
+                            view: std::mem::take(&mut self.transcript_view),
+                        },
+                    );
+                }
+            }
             AppEvent::ResetTranscriptForThreadSwitch => {
                 self.reset_for_thread_switch(tui)?;
+                self.pending_thread_switch_resets -= 1;
+            }
+            AppEvent::SideReplayFinished(id) => {
+                self.pending_thread_switch_resets -= 1;
+                let finished_current_replay = self.pending_thread_switch_resets == 0
+                    && self.current_displayed_thread_id() == Some(id);
+                self.startup_protected_input_boundary |=
+                    finished_current_replay && self.chat_widget.has_active_modal();
+                if finished_current_replay && let Some(companion) = self.side_companions.remove(&id)
+                {
+                    let replay_may_have_output = match self.thread_event_channels.get(&id) {
+                        Some(channel) => channel.store.lock().await.replay_may_have_output,
+                        None => true,
+                    };
+                    self.transcript_view = companion.view;
+                    self.transcript_view.restore_after_replay(
+                        &companion.cells,
+                        &self.transcript_cells,
+                        replay_may_have_output,
+                        self.chat_widget.active_cell_transcript_key(),
+                    );
+                    self.scrollback_has_older_history = app_server.has_older_history(id);
+                    if self.transcript_view.history == TranscriptHistoryState::LoadingOlder
+                        && app_server.pending_older_history_cursor(id).is_none()
+                    {
+                        self.transcript_view.history = if self.scrollback_has_older_history {
+                            TranscriptHistoryState::Partial
+                        } else {
+                            TranscriptHistoryState::Complete
+                        };
+                    }
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::SidePanePressAfterReplay {
+                thread_id,
+                area,
+                mut press,
+                draft_cursor,
+                ..
+            } => {
+                if self.pending_thread_switch_resets == 0
+                    && self.current_displayed_thread_id() == Some(thread_id)
+                    && self.conversation_focus_available(tui)
+                {
+                    let size = tui.prepare_draw_size()?;
+                    if side_pane::layout(self, tui, size.into())
+                        .is_some_and(|panes| panes.focused == area)
+                    {
+                        if let Some(cursor) = draft_cursor {
+                            self.chat_widget.set_composer_cursor(cursor);
+                            self.refresh_owned_transcript(tui)?;
+                            let position = tui.terminal.last_known_cursor_pos;
+                            press.column = position.x;
+                            press.row = position.y;
+                        }
+                        self.handle_owned_transcript_event(
+                            tui,
+                            app_server,
+                            &TuiEvent::Mouse(press),
+                        )?;
+                    }
+                }
+            }
+            AppEvent::ResetTranscriptForThreadSwitchPreservingScreen => {
+                self.reset_transcript_state_after_clear();
+                tui.clear_pending_history_lines();
+                tui.defer_thread_switch_clear();
                 self.pending_thread_switch_resets -= 1;
             }
             AppEvent::CommitRealtimeTranscriptHistory => {
@@ -2046,6 +2190,29 @@ impl App {
                     self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Periodic);
                 }
             }
+            AppEvent::RestoreBackgroundTerminals(thread_id) => {
+                if self.chat_widget.thread_id() == Some(thread_id) {
+                    let request_id = self.chat_widget.begin_background_terminal_restore();
+                    let mut server = app_server.request_view();
+                    let tx = self.app_event_tx.clone();
+                    tokio::spawn(async move {
+                        let terminals = server
+                            .list_background_terminals(thread_id)
+                            .await
+                            .unwrap_or_default();
+                        tx.send(AppEvent::BackgroundTerminalsLoaded {
+                            request_id,
+                            terminals,
+                        });
+                    });
+                }
+            }
+            AppEvent::BackgroundTerminalsLoaded {
+                request_id,
+                terminals,
+            } => self
+                .chat_widget
+                .restore_background_terminals(request_id, terminals),
             AppEvent::RefreshThreadUsage {
                 thread_id,
                 request_id,
@@ -2421,6 +2588,26 @@ impl App {
                         .on_sparkle_model_selected_from_picker(&model);
                 }
                 return Ok(control);
+            }
+            AppEvent::VoiceControl { thread_id, control } => {
+                if self.chat_widget.thread_id() == Some(thread_id)
+                    || self.voice_owner_thread_id().is_some()
+                {
+                    self.control_voice(control);
+                }
+            }
+            AppEvent::BackgroundVoiceError { thread_id, message } => {
+                if self.chat_widget.thread_id() == Some(thread_id) {
+                    self.chat_widget.add_error_message(message);
+                } else {
+                    self.background_voice_error = Some((thread_id, message));
+                }
+            }
+            AppEvent::RealtimeConversationStateChanged => self.repaint_agents_overview(),
+            AppEvent::RealtimeSessionLockStopped { thread_id } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id) {
+                    owner.stop_if_session_locked();
+                }
             }
             AppEvent::RealtimeWebrtcOfferCreated {
                 thread_id,
@@ -3266,6 +3453,15 @@ impl App {
                 self.select_session_model(app_server, model, effort, service_tier)
                     .await;
             }
+            AppEvent::ApplyModelSelection { model, effort } => {
+                if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
+                    self.select_session_model(app_server, model, effort, None)
+                        .await;
+                } else {
+                    self.apply_default_model_selection(app_server, model, effort)
+                        .await;
+                }
+            }
             AppEvent::CyberModelAutoReviewNotice => {
                 self.chat_widget.add_warning_message(
                     "Cyber models default to \"Approve for me\" for safety reasons.".to_string(),
@@ -3301,8 +3497,24 @@ impl App {
                 }
                 self.chat_widget.on_plugin_mentions_loaded(plugins);
             }
-            AppEvent::OpenRealtimeSettings => {
-                self.open_realtime_settings(app_server).await;
+            AppEvent::OpenRealtimeSettings => self.chat_widget.open_realtime_sound_settings(),
+            AppEvent::OpenRealtimeSoundDevices => self.chat_widget.open_realtime_sound_devices(),
+            AppEvent::OpenRealtimeVoices => self.open_realtime_settings(app_server).await,
+            AppEvent::OpenRealtimeDevicePicker { kind } => self.list_realtime_devices(kind),
+            AppEvent::OpenRealtimeInputChannels { device } => {
+                self.chat_widget.open_realtime_input_channels(device)
+            }
+            AppEvent::RealtimeDevicesListed {
+                origin,
+                kind,
+                result,
+            } => {
+                if origin == self.active_thread_id {
+                    match result {
+                        Ok(devices) => self.chat_widget.open_realtime_device_picker(kind, devices),
+                        Err(error) => self.chat_widget.add_error_message(error),
+                    }
+                }
             }
             AppEvent::PersistRealtimeVoiceSelection { voice } => {
                 self.persist_realtime_voice(app_server, voice).await;
@@ -3313,8 +3525,52 @@ impl App {
             AppEvent::PersistRealtimeInputChannel { channel } => {
                 self.persist_realtime_input_channel(channel).await;
             }
-            AppEvent::PersistRealtimeVoiceSelection { voice } => {
-                self.persist_realtime_voice(app_server, voice).await;
+            AppEvent::ToggleCloudServiceTier { thread_id, tier } => {
+                if self.active_thread_id == Some(thread_id)
+                    && self.chat_widget.thread_id() == Some(thread_id)
+                    && app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
+                {
+                    if !self
+                        .chat_widget
+                        .current_model_service_tier_commands()
+                        .iter()
+                        .any(|command| command.id == tier)
+                    {
+                        self.chat_widget.add_error_message(
+                            "The selected Cloud model does not support that speed.".into(),
+                        );
+                        return Ok(AppRunControl::Continue);
+                    }
+                    let next = if self.chat_widget.config_ref().service_tier.as_deref()
+                        == Some(tier.as_str())
+                    {
+                        codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_owned()
+                    } else {
+                        tier
+                    };
+                    if app_server.stage_cloud_service_tier(thread_id, Some(next.clone())) {
+                        let label = if next
+                            == codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE
+                        {
+                            "standard"
+                        } else if next == "priority" {
+                            "fast"
+                        } else {
+                            next.as_str()
+                        };
+                        self.chat_widget.add_info_message(
+                            format!(
+                                "Selected {label} speed for the next new turn in this conversation"
+                            ),
+                            None,
+                        );
+                    } else {
+                        self.chat_widget.add_error_message(
+                            "The Cloud account changed. Reopen the conversation before choosing a speed."
+                                .into(),
+                        );
+                    }
+                }
             }
             AppEvent::PersistServiceTierSelection { service_tier } => {
                 if app_server.thread_params_mode()
@@ -3584,6 +3840,46 @@ impl App {
                 }
             }
             AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
+            #[cfg(any(unix, windows))]
+            AppEvent::StartAgentsDaemon => {
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let result = codex_app_server_daemon::run(
+                        codex_app_server_daemon::LifecycleCommand::Start {
+                            feature_overrides: Default::default(),
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                    tx.send(AppEvent::AgentsDaemonStarted { result });
+                });
+            }
+            #[cfg(any(unix, windows))]
+            AppEvent::AgentsDaemonStarted { result } => match result {
+                Ok(()) => self.chat_widget.add_info_message(
+                    "Background server started. Open `codex agents` in another terminal."
+                        .to_string(),
+                    None,
+                ),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not start background server: {error}")),
+            },
+            AppEvent::ShowMoreAgentsOverview => self.show_more_agents_overview(app_server),
+            AppEvent::RefreshViewedThread {
+                backend_id,
+                thread_id,
+                revision,
+            } => {
+                if app_server.backend_id() == backend_id {
+                    app_server
+                        .frozen_receipt
+                        .take_if(|(id, rev)| *id == thread_id && *rev == revision);
+                    self.agents_overview.refresh_thread_ids.insert(thread_id);
+                    self.refresh_changed_agents_overview_threads(app_server);
+                }
+            }
             AppEvent::SearchAgentsOverview(id, limit) => {
                 self.search_agents_overview(app_server, id, limit);
             }
