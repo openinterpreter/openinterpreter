@@ -289,7 +289,7 @@ async fn run_command_under_sandbox(
     {
         let file_system = base_profile
             .file_system_sandbox_policy()
-            .with_additional_readable_roots(cwd, &sandbox_state_readable_root);
+            .with_additional_readable_roots(&cwd, &sandbox_state_readable_root);
         let network = if sandbox_state_disable_network {
             NetworkSandboxPolicy::Restricted
         } else {
@@ -405,7 +405,7 @@ async fn run_command_under_sandbox(
     let program = command
         .next()
         .context("sandbox command must not be empty")?;
-    let cwd = PathUri::from_abs_path(cwd);
+    let cwd = PathUri::from_abs_path(&cwd);
     let sandbox_policy_cwd = PathUri::from_abs_path(&sandbox_policy_cwd);
     let sandbox_exe = match backend {
         SandboxBackend::LinuxSeccomp => config.codex_linux_sandbox_exe.clone(),
