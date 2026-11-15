@@ -667,6 +667,7 @@ pub(super) async fn run_main_inner(
     }
     let selection_reason = match (&app_server_target, daemon_exclusion) {
         (AppServerTarget::Remote { .. }, _) => "explicit_remote",
+        (AppServerTarget::Cloud, _) => "cloud",
         _ if cli.agents_overview => "agents",
         (_, Some("--no-daemon")) => "explicit_no_daemon",
         (_, Some(_)) => "incompatible_option",
@@ -699,6 +700,7 @@ pub(super) async fn run_main_inner(
         let app_server_mode = match (connected, target) {
             (false, _) => "unconfirmed",
             (true, AppServerTarget::Embedded) => "in_process",
+            (true, AppServerTarget::Cloud) => "cloud",
             (true, AppServerTarget::LocalDaemon { .. }) => "local_daemon",
             (true, AppServerTarget::Remote { .. }) => "remote",
         };
@@ -707,6 +709,7 @@ pub(super) async fn run_main_inner(
         let terminal_name = match terminal_info.name {
             TerminalName::AppleTerminal => "apple_terminal",
             TerminalName::Ghostty => "ghostty",
+            TerminalName::Rex => "rex",
             TerminalName::Iterm2 => "iterm2",
             TerminalName::WarpTerminal => "warp",
             TerminalName::VsCode => "vscode",

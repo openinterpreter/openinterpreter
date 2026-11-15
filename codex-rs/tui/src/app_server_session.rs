@@ -2751,6 +2751,8 @@ fn thread_start_params_with_reviewer(
             ThreadParamsMode::Remote => {
                 config_request_overrides_from_config(config, thread_params_mode)
             }
+            // Hosted sessions own their settings; never forward client overrides.
+            ThreadParamsMode::Cloud => None,
         },
         ephemeral: Some(config.ephemeral),
         history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),

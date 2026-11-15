@@ -1687,8 +1687,10 @@ See the keymap documentation for supported actions and examples."
                 && self.keymap.app.open_warnings.is_pressed(*key))
         {
             if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
-                self.chat_widget
-                    .handle_disconnected_view_key(*key, Some(self.keymap.app.open_warnings));
+                self.chat_widget.handle_disconnected_view_key(
+                    *key,
+                    self.keymap.app.open_warnings.first().copied(),
+                );
                 if self
                     .chat_widget
                     .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
