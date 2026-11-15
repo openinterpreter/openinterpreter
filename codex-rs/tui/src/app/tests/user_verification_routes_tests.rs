@@ -172,7 +172,7 @@ async fn discarding_side_cancels_verification_and_ignores_late_proof() -> Result
     let attempt = app
         .pending_app_server_requests
         .user_verification
-        .begin("deployments", request.id())
+        .begin(&side_thread_id.to_string(), "deployments", request.id())
         .expect("pending side-thread verification");
 
     app.discard_side_thread_in_background(&mut app_server, side_thread_id)
@@ -276,18 +276,27 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
             } => approved.push((thread_id, server_name, request_id)),
             AppEvent::InsertHistoryCell(cell) => app.insert_history_cell(&mut tui, cell),
             AppEvent::ConsolidateAgentMessage {
+                phase,
+                interrupted_item,
                 source,
+                copy_source,
                 cwd,
                 inline_visualization_context,
                 scrollback_reflow,
                 deferred_history_cell,
             } => {
                 completed_messages.push(source.clone());
+                let mut cell = history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                    source,
+                    &cwd,
+                    inline_visualization_context,
+                )
+                .with_copy_source(copy_source);
+                cell.interrupted_item = interrupted_item;
+                cell.phase = phase;
                 app.handle_consolidate_agent_message(
                     &mut tui,
-                    source,
-                    cwd,
-                    inline_visualization_context,
+                    cell,
                     scrollback_reflow,
                     deferred_history_cell,
                 )?;

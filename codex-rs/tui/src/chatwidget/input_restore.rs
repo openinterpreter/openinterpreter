@@ -26,6 +26,20 @@ impl ChatWidget {
         self.bottom_pane.set_composer_cursor(cursor);
     }
 
+    pub(crate) fn consume_view_transition_key_event(&mut self, key_event: KeyEvent) -> bool {
+        self.bottom_pane
+            .consume_view_transition_key_event(key_event)
+    }
+
+    /// Cloud handoff restores the draft as startup does, but keeps the editor's Vim state.
+    pub(crate) fn restore_cloud_switch_draft(&mut self, draft: ComposerDraftSnapshot) {
+        let vim_normal_mode = draft.vim_normal_mode;
+        self.restore_startup_draft(draft);
+        if vim_normal_mode {
+            self.bottom_pane.set_vim_enabled(true);
+        }
+    }
+
     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
         self.bottom_pane.take_kill_buffer_snapshot()
     }

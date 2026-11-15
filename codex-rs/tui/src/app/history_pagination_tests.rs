@@ -238,17 +238,17 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
     }
     review_turn.items.insert(
         /*index*/ 0,
-        ThreadItemPayload::EnteredReviewMode {
+        codex_app_server_protocol::ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
             id: "enter".to_string(),
             review: "review".to_string(),
-        },
+        }),
     );
     review_turn.items.insert(
         /*index*/ 2,
-        ThreadItemPayload::ExitedReviewMode {
+        codex_app_server_protocol::ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
             id: "exit".to_string(),
             review: "review".to_string(),
-        },
+        }),
     );
     let turns = [review_turn];
     app.remove_hidden_review_cells(
