@@ -5,9 +5,13 @@ use axum::Json;
 use axum::routing::get;
 use codex_app_server_protocol::PluginInstalledResponse;
 use codex_app_server_protocol::PluginReconcileResponse;
+use codex_app_server_protocol::SkillMetadata;
+use codex_app_server_protocol::SkillsListParams;
+use codex_app_server_protocol::SkillsListResponse;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use pretty_assertions::assert_eq;
+use rmcp::model::ServerInfo;
 use tokio::sync::RwLock;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

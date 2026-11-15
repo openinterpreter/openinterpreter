@@ -169,3 +169,4 @@ tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 wiremock = { workspace = true }
+zip = { workspace = true }
