@@ -2562,20 +2562,55 @@ fn websocket_error_detail(err: &ApiError) -> String {
         ApiError::ResponseIncomplete(_) => {
             "handshake error: incomplete response: [redacted]".to_string()
         }
+        // Provider-supplied messages and immediate-close reasons may contain
+        // credentials or request data. Retain the error category, not its text.
+        ApiError::Retryable { .. } => "handshake error: retryable error: [redacted]".to_string(),
+        ApiError::RateLimitExceeded { .. } => {
+            "handshake error: rate limit exceeded: [redacted]".to_string()
+        }
+        ApiError::RateLimit(_) => "handshake error: rate limit: [redacted]".to_string(),
+        ApiError::InvalidRequest { .. } => {
+            "handshake error: invalid request: [redacted]".to_string()
+        }
+        ApiError::InvalidAudioInput { .. } => {
+            "handshake error: invalid audio input: [redacted]".to_string()
+        }
+        ApiError::ModelNotFound { .. } => {
+            "handshake error: model not found: [redacted]".to_string()
+        }
+        ApiError::InvalidPrompt { .. } => "handshake error: invalid prompt: [redacted]".to_string(),
+        ApiError::CyberPolicy { .. } => "handshake error: cyber policy: [redacted]".to_string(),
+        ApiError::BioPolicy { .. } => "handshake error: bio policy: [redacted]".to_string(),
+        ApiError::MisalignmentPolicyViolation { .. } => {
+            "handshake error: misalignment policy violation: [redacted]".to_string()
+        }
+        ApiError::ContentPolicyViolation { .. } => {
+            "handshake error: content policy violation".to_string()
+        }
+        ApiError::AccessProgramNotEnabled { .. } => {
+            "handshake error: access program not enabled".to_string()
+        }
+        ApiError::InferenceHookDenied { .. } => {
+            "handshake error: inference hook denied".to_string()
+        }
         // These variants format fixed text; retry metadata is typed and never printed.
         ApiError::ContentFilter
         | ApiError::WebsocketMessageTooLarge
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
-        | ApiError::Retryable { .. }
-        | ApiError::RateLimitExceeded { .. }
-        | ApiError::RateLimit(_)
-        | ApiError::InvalidRequest { .. }
-        | ApiError::CyberPolicy { .. }
-        | ApiError::BioPolicy { .. }
-        | ApiError::MisalignmentPolicyViolation { .. }
-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
+        | ApiError::SessionBudgetExceeded
+        | ApiError::FlexUnavailable
+        | ApiError::PolicyCapacityUnavailable { .. }
+        | ApiError::ServerOverloaded { .. } => format!("handshake error: {err}"),
+    }
+}
+
+fn close_reason_detail(reason: &str) -> &'static str {
+    if reason.is_empty() {
+        "absent"
+    } else {
+        "present (redacted)"
     }
 }
 
@@ -3353,6 +3388,11 @@ mod tests {
 
         assert!(!rendered.contains("private-close-reason"));
         assert!(!rendered.contains("private-stream-error"));
+        assert_eq!(close_reason_detail(""), "absent");
+        assert_eq!(
+            close_reason_detail("private-close-reason"),
+            "present (redacted)"
+        );
         insta::assert_snapshot!("websocket_probe_human_output", rendered);
     }
 
