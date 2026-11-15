@@ -14,6 +14,45 @@ use crate::test_support::boxed_future;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 
+pub(crate) fn enable_side_retention(app: &mut App) -> color_eyre::Result<()> {
+    app.config
+        .features
+        .enable(codex_features::Feature::TuiWorkspace)?;
+    app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Owned;
+    Ok(())
+}
+
+pub(crate) fn side_frame(
+    app: &mut App,
+    tui: &mut tui::Tui,
+    size: ratatui::layout::Size,
+) -> color_eyre::Result<String> {
+    app.render_owned_transcript(tui, size)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    Ok(buffer
+        .content()
+        .chunks(usize::from(size.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+impl App {
+    pub(crate) fn can_read_terminal_after_thread_switch(
+        &self,
+        _tui: &tui::Tui,
+        events: &tokio::sync::mpsc::UnboundedReceiver<crate::app_event::AppEvent>,
+    ) -> bool {
+        self.pending_thread_switch_resets == 0 && events.is_empty()
+    }
+}
+
 pub(super) fn select_catalog_tip(app: &mut App, width: u16, expected: &str) {
     for seed in 0..1024 {
         app.composer_tips = super::composer_hints::ComposerTips::new(seed);
