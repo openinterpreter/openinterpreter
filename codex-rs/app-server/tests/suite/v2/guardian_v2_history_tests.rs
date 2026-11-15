@@ -80,30 +80,24 @@ enum ReviewCheckpoint {
     EmptyReviewerHash,
 }
 
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::IncompatibleReviewer; "incompatible sync reviewer fails closed")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync compatibility fails closed")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync compatibility fails closed")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::IncompatibleReviewer; "legacy sync compatibility is unchanged")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "disabled Luna reuse requires sync")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy disabled Luna reuse still samples")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedInstruction, ReviewCheckpoint::Valid; "instruction budget preserves fresh low score")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "compatible checkpoint")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "incompatible checkpoint")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown Luna compatibility")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some(""), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty Luna compatibility")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, None, Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown producer preserves retained evidence")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some(""), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty producer preserves retained evidence")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "source call evicted")]
-#[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "incomplete answers reject fresh low score")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy answers remain runtime only")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy incompatible checkpoint still samples")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy unknown Luna compatibility still samples")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy source call evicted")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "legacy answer truncation")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "different sync reviewer hash is accepted")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync reviewer hash is accepted")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyReviewerHash; "empty sync reviewer hash is accepted")]
+#[test_case(CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "disabled Luna reuse requires sync")]
+#[test_case(CheckpointReuse::Independent, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "independent review does not reuse checkpoint")]
+#[test_case(CheckpointReuse::Independent, Some("matching"), None, 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "independent review bounds evicted tool evidence")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedInstruction, ReviewCheckpoint::Valid; "instruction budget preserves fresh low score")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "compatible checkpoint")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "incompatible checkpoint")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown Luna compatibility")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some(""), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty Luna compatibility")]
+#[test_case(CheckpointReuse::Enabled, None, Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "unknown producer preserves retained evidence")]
+#[test_case(CheckpointReuse::Enabled, Some(""), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty producer preserves retained evidence")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "source call evicted")]
+#[test_case(CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "incomplete answers reject fresh low score")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardians_retain_evidence_after_compaction_and_resume(
-    context_path: ContextPath,
     checkpoint_reuse: CheckpointReuse,
     parent_hash: Option<&str>,
     luna_hash: Option<&str>,
@@ -405,6 +399,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             .await??;
             let assessment: ItemGuardianApprovalReviewCompletedNotification =
                 serde_json::from_value(notification.params.expect("review completion"))?;
+            let reason = "parent compaction checkpoint is unusable for Guardian review";
             assert_eq!(
                 assessment.review,
                 GuardianApprovalReview {
@@ -598,61 +593,31 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                         "{compact_output}"
                     );
                     assert!(parent_items.contains(&checkpoint));
-                    if matches!(context_path, ContextPath::ThreadOwned) {
-                        assert!(
-                            content.contains(RESTRICTION),
-                            "retained instruction must survive"
-                        );
-                        assert!(
-                            !transcript.contains(&expected_output),
-                            "raw tool result must not survive the parent checkpoint"
-                        );
-                        assert!(transcript.contains(RESTRICTION));
-                        assert!(!transcript.contains(SUMMARY));
-                    } else {
-                        assert!(
-                            transcript.contains(RESTRICTION),
-                            "retained user restriction missing: {transcript}"
-                        );
-                        if tool_traffic == 0 {
-                            assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} call:")));
-                            assert!(transcript.contains(&format!("tool {TEST_TOOL_NAME} result:")));
-                            assert!(transcript.contains(&expected_output));
-                        } else {
-                            assert!(!transcript.contains("tool request_user_input call:"));
-                        }
-                    }
+                    assert!(
+                        content.contains(RESTRICTION),
+                        "retained instruction must survive"
+                    );
+                    assert!(
+                        !transcript.contains(&expected_output),
+                        "raw tool result must not survive the parent checkpoint"
+                    );
+                    assert!(transcript.contains(RESTRICTION));
+                    assert!(!transcript.contains(SUMMARY));
                 }
             }
             for (consumer, text) in [("async", &content), ("sync", &sync_text)] {
-                if matches!(context_path, ContextPath::ThreadOwned) || index == 0 {
-                    let answers = text
-                        .split_once(">>> TRUSTED USER ANSWERS START")
-                        .unwrap_or_else(|| {
-                            panic!("missing {consumer} answers at step {index}: {text}")
-                        })
-                        .1;
-                    match evidence_size {
-                        EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
-                            assert!(answers.contains("assistant: Can I keep using the browser?"));
-                            assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
-                        }
-                        EvidenceSize::OversizedAnswer => match context_path {
-                            ContextPath::ThreadOwned => {
-                                assert!(
-                                    answers.contains("some verified user answers are unavailable")
-                                );
-                            }
-                            ContextPath::Legacy => {
-                                assert!(answers.contains("<truncated omitted_approx_tokens="));
-                                assert!(
-                                    !answers.contains("some verified user answers are unavailable")
-                                );
-                            }
-                        },
+                let answers = text
+                    .split_once(">>> TRUSTED USER ANSWERS START")
+                    .unwrap_or_else(|| panic!("missing {consumer} answers at step {index}: {text}"))
+                    .1;
+                match evidence_size {
+                    EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
+                        assert!(answers.contains("assistant: Can I keep using the browser?"));
+                        assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
                     }
-                } else {
-                    assert!(!text.contains(">>> TRUSTED USER ANSWERS START"));
+                    EvidenceSize::OversizedAnswer => {
+                        assert!(answers.contains("some verified user answers are unavailable"));
+                    }
                 }
             }
         }

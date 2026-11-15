@@ -8,30 +8,22 @@ use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 #[derive(Clone, Copy)]
-enum AccountCheck {
-    Default,
-    Enabled,
-}
-
-#[derive(Clone, Copy)]
 enum ResumeOutcome {
     Allowed,
     Denied,
 }
 
-#[test_case("codex-tui", AccountCheck::Enabled, Some(("other-user", "account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Denied; "different user")]
-#[test_case("codex_exec", AccountCheck::Enabled, Some(("user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Denied; "different workspace exec")]
-#[test_case("codex-tui", AccountCheck::Enabled, Some(("user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Paginated, ResumeOutcome::Denied; "paginated different workspace")]
-#[test_case("codex-tui", AccountCheck::Enabled, Some(("user", "account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "same owner")]
-#[test_case("codex-tui", AccountCheck::Enabled, Some(("user", "account")), Some(("user", "account")), ThreadHistoryMode::Paginated, ResumeOutcome::Allowed; "paginated same owner")]
-#[test_case("codex-tui", AccountCheck::Enabled, None, Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "untagged")]
-#[test_case("codex-tui", AccountCheck::Default, Some(("other-user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "disabled by default")]
-#[test_case("third-party-client", AccountCheck::Enabled, Some(("other-user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "third party")]
-#[test_case("codex-tui", AccountCheck::Enabled, Some(("user", "account")), None, ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "api key")]
+#[test_case("codex-tui", Some(("other-user", "account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Denied; "different user")]
+#[test_case("codex_exec", Some(("user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Denied; "different workspace exec")]
+#[test_case("codex-tui", Some(("user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Paginated, ResumeOutcome::Denied; "paginated different workspace")]
+#[test_case("codex-tui", Some(("user", "account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "same owner")]
+#[test_case("codex-tui", Some(("user", "account")), Some(("user", "account")), ThreadHistoryMode::Paginated, ResumeOutcome::Allowed; "paginated same owner")]
+#[test_case("codex-tui", None, Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "untagged")]
+#[test_case("third-party-client", Some(("other-user", "other-account")), Some(("user", "account")), ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "third party")]
+#[test_case("codex-tui", Some(("user", "account")), None, ThreadHistoryMode::Legacy, ResumeOutcome::Allowed; "api key")]
 #[tokio::test]
 async fn thread_resume_account_check(
     client_name: &str,
-    account_check: AccountCheck,
     creator: Option<(&str, &str)>,
     current_owner: Option<(&str, &str)>,
     history_mode: ThreadHistoryMode,
@@ -39,11 +31,7 @@ async fn thread_resume_account_check(
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    let mut config = mock_responses_config(&server.uri());
-    if matches!(account_check, AccountCheck::Enabled) {
-        config = config.enable_feature(Feature::CliResumeAccountCheck);
-    }
-    config.write(codex_home.path())?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
     if let Some((user, account)) = current_owner {
         write_chatgpt_auth(
             codex_home.path(),
@@ -149,9 +137,7 @@ async fn thread_resume_account_check(
 async fn thread_resume_account_check_loaded_thread_recovers_after_switching_back() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .enable_feature(Feature::CliResumeAccountCheck)
-        .write(codex_home.path())?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("test-token")

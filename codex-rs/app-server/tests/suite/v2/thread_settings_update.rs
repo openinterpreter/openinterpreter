@@ -12,6 +12,7 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_app_server_protocol::ThreadEnvironment;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;

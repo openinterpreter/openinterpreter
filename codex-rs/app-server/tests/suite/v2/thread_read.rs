@@ -13,6 +13,7 @@ use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::DeprecationNoticeNotification;
+use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ImageReference;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
@@ -290,6 +291,7 @@ async fn thread_read_preserves_file_id_from_completed_turn() -> Result<()> {
         .await?;
     let ThreadReadResponse {
         thread: loaded_thread,
+        ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
     let ThreadItemPayload::UserMessage { content, .. } = &loaded_thread.turns[0].items[0].payload
     else {
@@ -312,6 +314,7 @@ async fn thread_read_preserves_file_id_from_completed_turn() -> Result<()> {
         .await?;
     let ThreadReadResponse {
         thread: restarted_thread,
+        ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
     let ThreadItemPayload::UserMessage { content, .. } =
         &restarted_thread.turns[0].items[0].payload
@@ -627,7 +630,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1880,7 +1883,6 @@ async fn thread_items_list_defers_requested_outputs() -> Result<()> {
                 status,
                 aggregated_output: output.cloned(),
                 exit_code,
-                sandbox_type: None,
                 model_context: None,
                 plugin_id: None,
                 script_path: None,
@@ -2162,6 +2164,9 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
     );
     store
         .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -2177,7 +2182,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -3207,7 +3212,7 @@ async fn seed_pathless_store_thread(
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

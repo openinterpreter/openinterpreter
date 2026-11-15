@@ -3012,7 +3012,10 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
 #[test_case(Personality::Friendly, Personality::Pragmatic; "pragmatic")]
 #[test_case(Personality::Friendly, Personality::None; "none")]
 #[tokio::test]
-async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
+async fn turn_start_ignores_personality_change_mid_thread_v2(
+    first_personality: Personality,
+    next_personality: Personality,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;

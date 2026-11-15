@@ -33,6 +33,7 @@ use codex_app_server_protocol::ThreadAttachmentListParams;
 use codex_app_server_protocol::ThreadAttachmentListResponse;
 use codex_app_server_protocol::ThreadAttachmentRemoveParams;
 use codex_app_server_protocol::ThreadAttachmentRemoveResponse;
+use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
