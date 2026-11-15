@@ -12,7 +12,6 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
-use codex_cli::cloud_config;
 use codex_cli::read_access_token_from_stdin;
 use codex_cli::read_api_key_from_stdin;
 use codex_cli::run_login_status;
@@ -207,7 +206,7 @@ enum Subcommand {
     Doctor(DoctorCommand),
 
     /// Run commands within the agent-provided sandbox.
-    Sandbox(HostSandboxArgs),
+    Sandbox(SandboxCommand),
 
     /// Debugging tools.
     Debug(DebugCommand),
@@ -658,7 +657,7 @@ struct AppServerCommand {
     analytics_default_enabled: bool,
 
     #[command(flatten)]
-    auth: codex_app_server::AppServerWebsocketAuthArgs,
+    auth: codex_websocket_auth::WebsocketAuthArgs,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -801,7 +800,10 @@ fn handle_app_exit(
             eprintln!("ERROR: {message}");
             true
         }
-        ExitReason::UserRequested | ExitReason::TurnInterrupted => false,
+        ExitReason::UserRequested
+        | ExitReason::TurnInterrupted
+        | ExitReason::Archived(_)
+        | ExitReason::ThreadRemoved => false,
     };
 
     let update_action = exit_info.update_action;
@@ -1436,14 +1438,6 @@ async fn dispatch_cli(
                         listen
                     };
                     let auth = auth.try_into_settings()?;
-                    if managed_daemon
-                        && matches!(
-                            &transport,
-                            codex_app_server::AppServerTransport::UnixSocket { .. }
-                        )
-                    {
-                        let _ = codex_app_server_daemon::maintain_stderr_log();
-                    }
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
                         cloud_skills_snapshot,
                         code_mode_host_transport: code_mode_host.into(),
@@ -1593,7 +1587,7 @@ async fn dispatch_cli(
                     AppServerDaemonSubcommand::PidUpdateLoop {
                         check_package_ownership: true,
                         ..
-                    } => return Ok(()),
+                    } => return Ok(None),
                     AppServerDaemonSubcommand::Update {
                         from_cli: false, ..
                     }
@@ -1609,7 +1603,7 @@ async fn dispatch_cli(
                             .build()
                             .await
                             .map_err(anyhow::Error::from);
-                        let http_client_factory = updater_http_client_factory(config);
+                        let http_client_factory = updater_http_client_factory(config)?;
                         if matches!(
                             daemon_cli.subcommand,
                             AppServerDaemonSubcommand::Update { .. }
