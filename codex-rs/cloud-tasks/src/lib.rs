@@ -18,7 +18,10 @@ use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::CodexAuth;
 use codex_login::default_client::get_codex_user_agent;
+use codex_model_provider::ClientAuth;
+use codex_model_provider::auth_provider_from_auth_manager;
 use codex_product_info::Product;
+use codex_utils_cli::CliConfigOverrides;
 use owo_colors::OwoColorize;
 use owo_colors::Stream;
 use std::cmp::Ordering;
@@ -52,7 +55,10 @@ pub(crate) fn product_cloud_command() -> String {
     format!("{command} cloud")
 }
 
-async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext> {
+async fn init_backend(
+    user_agent_suffix: &str,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<BackendContext> {
     #[cfg(debug_assertions)]
     let use_mock = matches!(
         std::env::var("CODEX_CLOUD_TASKS_MODE").ok().as_deref(),
