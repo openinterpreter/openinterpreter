@@ -1510,6 +1510,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         workspace_routing: None,
                         account: None,
+                        user_id: None,
                         requires_openai_auth: false,
                     })
                     .expect("response should serialize"),
@@ -1566,6 +1567,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         workspace_routing: None,
                         account: None,
+                        user_id: None,
                         requires_openai_auth: false,
                     })
                     .expect("response should serialize"),
@@ -1644,6 +1646,7 @@ mod tests {
             GetAccountResponse {
                 workspace_routing: None,
                 account: None,
+                user_id: None,
                 requires_openai_auth: false,
             }
         );
@@ -1750,6 +1753,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         workspace_routing: None,
                         account: None,
+                        user_id: None,
                         requires_openai_auth: false,
                     })
                     .expect("response should serialize"),
@@ -1804,6 +1808,7 @@ mod tests {
             GetAccountResponse {
                 workspace_routing: None,
                 account: None,
+                user_id: None,
                 requires_openai_auth: false,
             }
         );
