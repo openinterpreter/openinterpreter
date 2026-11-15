@@ -33,7 +33,7 @@ fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     })
 }
 
-fn attach_thread(app: &mut App, thread_id: ThreadId) {
+pub(crate) fn attach_thread(app: &mut App, thread_id: ThreadId) {
     app.chat_widget.handle_thread_session(ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
@@ -63,7 +63,7 @@ fn attach_thread(app: &mut App, thread_id: ThreadId) {
     });
 }
 
-fn buffer_text(buffer: &Buffer) -> String {
+pub(crate) fn buffer_text(buffer: &Buffer) -> String {
     buffer
         .content()
         .chunks(usize::from(buffer.area.width))
@@ -1189,7 +1189,7 @@ async fn find_refreshes_live_details_before_searching_the_first_query() -> Resul
     Ok(())
 }
 
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
+pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
     TuiEvent::Mouse(MouseEvent {
         kind,
         column,

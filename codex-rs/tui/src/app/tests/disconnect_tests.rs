@@ -5,6 +5,7 @@ use crate::app::reconnect::ReconnectPresentation;
 use crate::app::reconnect::reconnect;
 use crate::app_server_session::ThreadParamsMode;
 use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
+use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCRequest;
 use futures::SinkExt;

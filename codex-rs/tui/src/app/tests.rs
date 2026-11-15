@@ -528,7 +528,6 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         Ok(vec![McpServerStatus {
             environment_id: None,
             server_capabilities: None,
-            tool_list_meta: None,
             tools_error: None,
             name: "docs".to_string(),
             runtime_status: None,
@@ -5212,7 +5211,6 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         source: Default::default(),
         command_actions: Vec::new(),
         model_context: None,
-        sandbox_type: None,
         process_id: None,
         plugin_id: None,
         script_path: None,
@@ -9106,6 +9104,7 @@ async fn make_test_app() -> Box<App> {
         config_notification_test_generation: 0,
         config_notification_test_pending: None,
         model_catalog: chat_widget.model_catalog(),
+        composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
         session_telemetry,
         terminal_size_tags: Vec::new(),
         app_event_tx,
@@ -9248,6 +9247,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
             model_catalog: chat_widget.model_catalog(),
+            composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
             session_telemetry,
             terminal_size_tags: Vec::new(),
             app_event_tx,
@@ -10491,11 +10491,12 @@ async fn feedback_submission_stages_logs_cleans_up_and_emits_error_history_cell(
         if staging_fails {
             std::fs::write(&tmp, "not a directory")?;
         }
-        let mut params = background_requests::build_feedback_params(
+        let mut params = background_requests::build_feedback_upload_params(
             /*origin_thread_id*/ None,
             Some(PathBuf::from("existing-rollout.jsonl")),
             FeedbackCategory::Bug,
             /*reason*/ None,
+            /*report_passcode*/ None,
             /*turn_id*/ None,
             include_logs,
             crate::app_event::FeedbackDestination::OpenAi,
@@ -10590,6 +10591,7 @@ async fn local_feedback_saves_a_zip_with_only_consented_logs_and_never_uploads()
         &server,
         FeedbackCategory::Bug,
         /*reason*/ None,
+        /*report_passcode*/ None,
         /*turn_id*/ None,
         /*include_logs*/ true,
         FeedbackDestination::LocalZip,
@@ -10598,11 +10600,12 @@ async fn local_feedback_saves_a_zip_with_only_consented_logs_and_never_uploads()
 
     let home = tempdir()?;
     let save = |directory: &std::path::Path, include_logs| {
-        let params = background_requests::build_feedback_params(
+        let params = background_requests::build_feedback_upload_params(
             /*origin_thread_id*/ None,
             Some(directory.join("rollout-not-yet-created.jsonl")),
             FeedbackCategory::Bug,
             Some("Review before sharing".into()),
+            /*report_passcode*/ None,
             /*turn_id*/ None,
             include_logs,
             FeedbackDestination::LocalZip,

@@ -39,6 +39,7 @@ async fn owned_startup_preserves_loading_until_resume_replay_is_applied() -> Res
         startup.update_session_selection(
             &mut tui,
             &SessionSelection::Resume(crate::resume_picker::SessionTarget {
+                backend_id: app_server.backend_id(),
                 path: None,
                 thread_id,
                 cwd: None,

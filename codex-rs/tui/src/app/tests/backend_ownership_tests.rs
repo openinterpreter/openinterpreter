@@ -1,6 +1,6 @@
 //! Selection must retain backend provenance even when native thread IDs collide.
 
-use super::start_recording_app_server;
+use super::session_lifecycle_requests::start_recording_app_server;
 use super::*;
 use crate::app_server_session::ResumeModelSettings;
 use crate::backend_id::BackendId;
@@ -84,6 +84,7 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
                 config: &app.config,
                 local_settings: &app.local_settings,
             },
+            &app.app_server_target,
             &target,
             action,
             Err(color_eyre::eyre::eyre!(
@@ -281,15 +282,16 @@ async fn startup_rejects_foreign_resume_and_fork_before_requests() -> Result<()>
         let bootstrap = server.bootstrap(&app.config).await?;
         requests.lock().unwrap().clear();
         let mut tui = crate::tui::test_support::make_test_tui()?;
-        let result = super::startup_defaults_tests::run_startup_for_test(
-            &mut tui,
-            crate::app::backend_sessions::InitialBackendSessions::singleton(server),
-            app.config.clone(),
-            Some(bootstrap),
-            selection,
-            app.app_server_target.clone(),
-        )
-        .await;
+        let result =
+            super::session_lifecycle_requests::startup_defaults_tests::run_startup_for_test(
+                &mut tui,
+                crate::app::backend_sessions::InitialBackendSessions::singleton(server),
+                app.config.clone(),
+                Some(bootstrap),
+                selection,
+                app.app_server_target.clone(),
+            )
+            .await;
         assert!(
             result
                 .unwrap_err()

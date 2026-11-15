@@ -11,7 +11,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
-fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     buffer
         .content()
         .chunks(usize::from(buffer.area.width))
@@ -359,5 +359,5 @@ async fn assert_transcript_close_repaints_inline_draft(mut app: App) -> Result<(
 
 #[tokio::test]
 async fn transcript_viewer_close_repaints_preserved_inline_draft() -> Result<()> {
-    assert_transcript_close_repaints_inline_draft(make_test_app().await).await
+    assert_transcript_close_repaints_inline_draft(*make_test_app().await).await
 }

@@ -2083,7 +2083,13 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
         let mut side_config = app.config.clone();
         side_config.ephemeral = true;
         let side = server
-            .fork_side_thread(&app.local_settings, side_config.clone(), thread_id)
+            .fork_side_thread(
+                &app.local_settings,
+                side_config.clone(),
+                thread_id,
+                None,
+                SideChatStorage::Temporary,
+            )
             .await?;
         let side_id = side.session.thread_id;
         app.side_threads
@@ -2093,7 +2099,13 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
             side_config.cwd = side_config.cwd.join("failure");
             assert!(
                 server
-                    .fork_side_thread(&app.local_settings, side_config, thread_id)
+                    .fork_side_thread(
+                        &app.local_settings,
+                        side_config,
+                        thread_id,
+                        None,
+                        SideChatStorage::Temporary
+                    )
                     .await
                     .is_err()
             );
@@ -2374,7 +2386,13 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
         let mut side_config = app.config.clone();
         side_config.ephemeral = true;
         let side = server
-            .fork_side_thread(&app.local_settings, side_config, thread_id)
+            .fork_side_thread(
+                &app.local_settings,
+                side_config,
+                thread_id,
+                None,
+                SideChatStorage::Temporary,
+            )
             .await?;
         let side_id = side.session.thread_id;
         app.side_threads
@@ -2403,7 +2421,11 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
                 break;
             }
         }
-        assert!(app.agents_overview.initialized);
+        assert!(
+            app.agents_overview
+                .initialized
+                .contains(&server.backend_id())
+        );
         assert_eq!(
             (
                 app.active_thread_id,
@@ -3848,6 +3870,8 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     let exported = crate::app::transcript_export::load_export_transcript(
         &mut app_server,
         paginated_thread_id,
+        /*selected_profile*/ None,
+        SideChatStorage::Temporary,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
         vec![Arc::new(PlainHistoryCell::new(vec!["visible".into()]))],
@@ -6207,7 +6231,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
 #[path = "new_session_tests.rs"]
 mod new_session_tests;
 #[path = "startup_defaults_tests.rs"]
-mod startup_defaults_tests;
+pub(super) mod startup_defaults_tests;
 
 #[tokio::test]
 async fn external_writer_escape_preserves_snapshot_and_explicit_quits() -> Result<()> {
@@ -6334,6 +6358,7 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
                 let first_ordinal = contents.lines().count();
                 let events = [
                     EventMsg::TurnStarted(TurnStartedEvent {
+                        turn_attribution: None,
                         turn_id: format!("saved-turn-{index}"),
                         root_turn_id: None,
                         trace_id: None,
@@ -6342,6 +6367,7 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
                         collaboration_mode_kind: Default::default(),
                     }),
                     EventMsg::ItemCompleted(ItemCompletedEvent {
+                        content_token_count: None,
                         thread_id,
                         turn_id: format!("saved-turn-{index}"),
                         item: TurnItem::UserMessage(UserMessageItem::new(&[CoreUserInput::Text {
@@ -6352,9 +6378,11 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
                         completed_at_ms: 0,
                     }),
                     EventMsg::ItemCompleted(ItemCompletedEvent {
+                        content_token_count: None,
                         thread_id,
                         turn_id: format!("saved-turn-{index}"),
                         item: TurnItem::AgentMessage(AgentMessageItem {
+                            moderation: None,
                             id: format!("saved-answer-{index}"),
                             content: vec![AgentMessageContent::Text {
                                 text: "Saved final answer".to_string(),

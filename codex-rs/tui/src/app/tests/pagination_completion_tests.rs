@@ -57,6 +57,7 @@ pub(super) async fn completed_history_app(
         let turn_id = format!("turn-{index}");
         let finished = completed_at.timestamp() + index as i64 * 60;
         let mut events = vec![EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
             turn_id: turn_id.clone(),
             root_turn_id: None,
             trace_id: None,
@@ -74,6 +75,7 @@ pub(super) async fn completed_history_app(
                 }],
             }),
             TurnItem::AgentMessage(AgentMessageItem {
+                moderation: None,
                 id: format!("answer-{index}"),
                 content: vec![AgentMessageContent::Text {
                     text: format!("{name} answer"),
@@ -86,6 +88,7 @@ pub(super) async fn completed_history_app(
         ];
         events.extend(items.into_iter().map(|item| {
             EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id,
                 turn_id: turn_id.clone(),
                 item,
@@ -94,6 +97,7 @@ pub(super) async fn completed_history_app(
             })
         }));
         events.push(EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
             turn_id,
             last_agent_message: Some(format!("{name} answer")),
             error: None,
@@ -117,7 +121,7 @@ pub(super) async fn completed_history_app(
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(path, format!("{records}\n"))?;
-    Ok((app, codex_home, thread_id))
+    Ok((*app, codex_home, thread_id))
 }
 
 #[tokio::test]

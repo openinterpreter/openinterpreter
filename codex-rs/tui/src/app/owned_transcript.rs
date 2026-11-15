@@ -820,7 +820,7 @@ impl App {
 
 #[cfg(test)]
 #[path = "owned_transcript_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "empty_state_animation_tests.rs"]
