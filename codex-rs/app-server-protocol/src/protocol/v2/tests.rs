@@ -2238,6 +2238,7 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             model_catalog_json: None,
             check_for_update_on_startup: None,
             allow_login_shell: None,
+            otel: None,
             feedback: None,
         });
 
