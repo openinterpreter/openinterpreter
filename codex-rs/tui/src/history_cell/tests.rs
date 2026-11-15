@@ -625,6 +625,8 @@ fn image_generation_call_renders_saved_path() {
 fn session_configured_event(model: &str) -> ThreadSessionState {
     ThreadSessionState {
         read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -638,6 +640,7 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
         cwd: test_path_buf("/tmp/project").abs(),
+        primary_environment_cwd: None,
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -812,7 +815,6 @@ async fn session_info_preserves_styled_tooltip_links() {
                 .to_string(),
         ),
         Some(PlanType::Free),
-        /*show_fast_status*/ false,
     );
 
     let lines = cell.transcript_hyperlink_lines(/*width*/ 30);
