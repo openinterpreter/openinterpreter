@@ -44,6 +44,16 @@ fn turn_completed(items: Vec<ThreadItem>) -> ServerNotification {
 }
 
 async fn collect_updates(notifications: Vec<ServerNotification>) -> Vec<SessionUpdate> {
+    collect_notification_state(notifications).await.0
+}
+
+async fn collect_notification_state(
+    notifications: Vec<ServerNotification>,
+) -> (
+    Vec<SessionUpdate>,
+    Option<StopReason>,
+    HashMap<String, usize>,
+) {
     let (tx, rx) = async_channel::unbounded();
     let client = Client.builder().on_receive_notification(
         async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
@@ -60,8 +70,9 @@ async fn collect_updates(notifications: Vec<ServerNotification>) -> Vec<SessionU
             let session_id = SessionId::new("session");
             let mut completed_item_ids = HashSet::new();
             let mut streamed_agent_messages = HashMap::new();
+            let mut stop_reason = None;
             for notification in notifications {
-                handle_notification(
+                stop_reason = handle_notification(
                     &session_id,
                     "thread",
                     "turn",
@@ -78,7 +89,11 @@ async fn collect_updates(notifications: Vec<ServerNotification>) -> Vec<SessionU
             loop {
                 let update = rx.recv().await.expect("notification handler is alive");
                 if update == barrier {
-                    return Ok(updates);
+                    let pending_text_bytes = streamed_agent_messages
+                        .into_iter()
+                        .map(|(id, text)| (id, text.len()))
+                        .collect();
+                    return Ok((updates, stop_reason, pending_text_bytes));
                 }
                 updates.push(update);
             }
@@ -197,4 +212,76 @@ async fn mismatched_stream_keeps_complete_text_fallback() {
     ])
     .await;
     assert_eq!(updates, chunks(&["Draft answer", "Final answer"]));
+}
+
+#[tokio::test]
+async fn long_unicode_stream_delivers_suffix_and_releases_completed_text() {
+    let chunk = "中🙂".repeat(1024);
+    let streamed = chunk.repeat(128);
+    let full_text = format!("{streamed}完了");
+    let mut notifications: Vec<_> = (0..128).map(|_| delta("message", &chunk)).collect();
+    notifications.push(completed(message("message", &full_text)));
+    notifications.push(turn_completed(vec![message("message", &full_text)]));
+    let mut expected = vec![chunk.as_str(); 128];
+    expected.push("完了");
+
+    let result = collect_notification_state(notifications).await;
+    assert_eq!(
+        result,
+        (chunks(&expected), Some(StopReason::EndTurn), HashMap::new())
+    );
+}
+
+#[tokio::test]
+async fn long_mismatched_stream_preserves_full_completion_fallback() {
+    let streamed = "a".repeat(1024 * 1024);
+    let final_text = "b".repeat(1024 * 1024);
+    let item = message("message", &final_text);
+    let result = collect_notification_state(vec![
+        delta("message", &streamed),
+        completed(item.clone()),
+        turn_completed(vec![item]),
+    ])
+    .await;
+    assert_eq!(
+        result,
+        (
+            chunks(&[&streamed, &final_text]),
+            Some(StopReason::EndTurn),
+            HashMap::new()
+        )
+    );
+}
+
+#[tokio::test]
+async fn interrupted_turn_does_not_replay_or_complete_an_aborted_message() {
+    let partial_text = "partial ".repeat(16 * 1024);
+    let done = message("done", "Finished");
+    let interrupted = serde_json::from_value(serde_json::json!({
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread",
+            "turn": {
+                "id": "turn", "items": [done.clone()], "status": "interrupted", "error": null
+            }
+        }
+    }))
+    .expect("valid interrupted turn");
+    let result = collect_notification_state(vec![
+        delta("done", "Finished"),
+        completed(done),
+        delta("aborted", &partial_text),
+        interrupted,
+    ])
+    .await;
+    // The handler signals cancellation without inventing a completion for the omitted item.
+    // Its text remains owned by drain_turn_events until that function returns and drops it.
+    assert_eq!(
+        result,
+        (
+            chunks(&["Finished", &partial_text]),
+            Some(StopReason::Cancelled),
+            HashMap::from([("aborted".to_string(), partial_text.len())])
+        )
+    );
 }

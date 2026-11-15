@@ -870,6 +870,10 @@ impl AppServerAcpAgent {
         cx: ConnectionTo<Client>,
     ) -> Result<StopReason, Error> {
         let mut completed_item_ids = HashSet::new();
+        // Keep exact text to distinguish a repeated prefix from a mismatched completion.
+        // There is no byte cap: retained text grows with unfinished messages in this turn.
+        // Item completion removes its text; returning (including interruption or errors)
+        // drops any remaining text. This is turn-local state, not session history.
         let mut streamed_agent_messages = HashMap::new();
         loop {
             let event = self.event_rx.recv().await.ok();
