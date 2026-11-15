@@ -342,6 +342,35 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
 }
 
 #[tokio::test]
+async fn deferred_tool_dispatch_observes_cancellation_before_poll() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut ctx = output_context(Arc::new(session), Arc::new(turn_context)).await;
+    ctx.defer_tool_dispatch = true;
+    let call = serde_json::from_value(json!({
+        "type": "function_call", "call_id": "deferred-plan", "name": "update_plan",
+        "arguments": "{\"plan\": []}",
+    }))
+    .expect("direct tool input");
+    let future = handle_output_item_done(
+        &mut ctx, call, /*previously_active_item*/ None, /*moderation*/ None,
+    )
+    .await
+    .expect("deferred call should be recorded")
+    .tool_future
+    .expect("tool response future");
+
+    // Post-model hooks or a mailbox drain can cancel before polling the tool.
+    ctx.cancellation_token.cancel();
+    let response = future
+        .await
+        .expect("aborted tool response must reach model");
+    let ResponseItem::FunctionCallOutput { output, .. } = response.item else {
+        panic!("expected tool response");
+    };
+    assert_eq!(output.text_content(), Some("aborted before dispatch"));
+}
+
+#[tokio::test]
 async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
     let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),

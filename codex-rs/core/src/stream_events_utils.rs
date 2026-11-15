@@ -212,6 +212,8 @@ pub(crate) struct HandleOutputCtx {
     pub step_context: Arc<StepContext>,
     pub turn_store: Arc<ExtensionData>,
     pub tool_runtime: ToolCallRuntime,
+    /// Delay dispatch until the output future is polled, after synchronous post-model hooks.
+    pub defer_tool_dispatch: bool,
     pub cancellation_token: CancellationToken,
 }
 
@@ -357,8 +359,19 @@ pub(crate) async fn handle_output_item_done(
 
             let cancellation_token = ctx.cancellation_token.child_token();
             let runtime = ctx.tool_runtime.clone();
+            let defer_tool_dispatch = ctx.defer_tool_dispatch;
             let dispatch = |allowed: bool| -> InFlightFuture<'static> {
-                if allowed && !cancellation_token.is_cancelled() {
+                if defer_tool_dispatch {
+                    // ToolCallRuntime dispatches when handle_tool_call is called, rather than when
+                    // its future is polled. Sync post-model hooks and mailbox drains must run first.
+                    Box::pin(async move {
+                        if !allowed || cancellation_token.is_cancelled() {
+                            let output = ToolCallRuntime::aborted_before_dispatch(&call);
+                            return Ok(output.into_response(/*file_backed_tool_audio*/ false));
+                        }
+                        runtime.handle_tool_call(call, cancellation_token).await
+                    })
+                } else if allowed && !cancellation_token.is_cancelled() {
                     Box::pin(runtime.handle_tool_call(call, cancellation_token))
                 } else {
                     let output = ToolCallRuntime::aborted_before_dispatch(&call);

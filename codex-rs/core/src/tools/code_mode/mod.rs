@@ -391,6 +391,7 @@ fn submit_nested_tool(
                 &tool_name,
                 &call_id,
                 call_trace::Source::CodeMode,
+                dispatch_started.elapsed(),
             );
             return Err(FunctionCallError::RespondToModel(error));
         }
