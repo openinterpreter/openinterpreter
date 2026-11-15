@@ -194,6 +194,10 @@ pub(crate) fn new_cyber_policy_error_event(
                 "https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview#reduced-refusals-behavior-by-model",
             )],
         ),
+        Notice::Limited => (
+            "We take extra care with some cybersecurity requests.",
+            &[("Learn more", SAFETY_ACCESS_BLOCK_LEARN_MORE_URL)],
+        ),
         Notice::Enabled => (
             "Some cybersecurity requests are still limited, even when Daybreak is on.",
             &[("Learn more", SAFETY_ACCESS_BLOCK_LEARN_MORE_URL)],

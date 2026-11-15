@@ -1,6 +1,75 @@
 use super::*;
 use codex_protocol::openai_models::ModelAccessPrograms;
 use pretty_assertions::assert_eq;
+use serde_json::json;
+
+#[test]
+fn verified_access_eligibility_is_account_scoped_and_fail_closed() {
+    for (programs, notice, enrolled) in [
+        (json!([]), Notice::Apply, false),
+        (
+            json!([{"program":"cyber","state":"inactive","grants":[]}]),
+            Notice::Apply,
+            false,
+        ),
+        (
+            json!([{"program":"cyber","state":"unavailable","grants":[]}]),
+            Notice::Limited,
+            false,
+        ),
+        (
+            json!([{"program":"cyber","state":"active","grants":[]}]),
+            Notice::Limited,
+            false,
+        ),
+        (
+            json!([{"program":"cyber","state":"active","grants":[{"level":"tac2"}]}]),
+            Notice::Limited,
+            true,
+        ),
+        (
+            json!([{"program":"cyber","state":"inactive","grants":[{"level":"tac2"}]}]),
+            Notice::Limited,
+            false,
+        ),
+    ] {
+        let access: VerifiedAccess = serde_json::from_value(json!({"programs": programs})).unwrap();
+        assert_eq!(access.notice(), notice);
+        assert_eq!(access.confirmed_enrollment(), enrolled);
+    }
+}
+
+#[test]
+fn catalog_refusal_retry_requires_verified_account_enrollment() {
+    let cache = NoticeCache::default();
+    assert_eq!(
+        notice_for_account(Notice::Disabled, "gpt-5.6-sol", true, &cache),
+        Notice::Limited
+    );
+    cache.set(Notice::Limited).unwrap();
+    assert_eq!(
+        notice_for_account(Notice::Disabled, "gpt-5.6-sol", true, &cache),
+        Notice::Limited
+    );
+    cache.verified_enrolled.store(true, Ordering::Release);
+    assert_eq!(
+        notice_for_account(Notice::Disabled, "gpt-5.6-sol", true, &cache),
+        Notice::Disabled
+    );
+    assert_eq!(
+        notice_for_account(Notice::Astra, "gpt-6-astra", true, &cache),
+        Notice::Astra
+    );
+    assert_eq!(
+        notice_for_account(
+            Notice::Disabled,
+            "gpt-5.6-sol",
+            false,
+            &NoticeCache::default()
+        ),
+        Notice::Disabled
+    );
+}
 
 #[test]
 fn turn_program_uses_catalog_and_preserves_legacy_models() {

@@ -1251,6 +1251,11 @@ See the Codex keymap documentation for supported actions and examples."
         // already has data and available reset credits can be surfaced, without
         // delaying the initial frame render.
         if requires_openai_auth && has_chatgpt_account {
+            crate::daybreak::prefetch_notice(
+                &app.config,
+                &app_server,
+                app.chat_widget.cyber_policy_notice.clone(),
+            );
             crate::security_setup::prefetch(
                 &app.config,
                 &app_server,

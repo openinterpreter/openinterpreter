@@ -615,7 +615,14 @@ impl App {
             bootstrap.has_chatgpt_account,
             matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
         );
+        // Revalidate after reconnect even if the previous connection's account looked identical.
+        self.chat_widget.cyber_policy_notice = Default::default();
         if self.chat_widget.has_chatgpt_account() {
+            crate::daybreak::prefetch_notice(
+                &self.config,
+                app_server,
+                self.chat_widget.cyber_policy_notice.clone(),
+            );
             crate::security_setup::prefetch(
                 &self.config,
                 app_server,

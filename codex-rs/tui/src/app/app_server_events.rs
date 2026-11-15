@@ -441,6 +441,11 @@ impl App {
                     has_codex_backend_auth,
                 );
                 if self.chat_widget.has_chatgpt_account() {
+                    crate::daybreak::prefetch_notice(
+                        &self.config,
+                        app_server_client,
+                        self.chat_widget.cyber_policy_notice.clone(),
+                    );
                     self.refresh_account_email(app_server_client);
                     crate::security_setup::prefetch(
                         &self.config,

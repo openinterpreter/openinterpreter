@@ -8,6 +8,27 @@ use crate::style::accent_color;
 use codex_app_server_protocol::ThreadItemPayload;
 
 impl ChatWidget {
+    /// Retain the server's initial policy even if a local policy constraint predates attachment.
+    pub(crate) fn accept_startup_approval_policy(
+        &mut self,
+        app_policy: &mut Constrained<codex_protocol::protocol::AskForApproval>,
+        server_policy: AskForApproval,
+    ) -> ConstraintResult<()> {
+        let server_policy = server_policy.to_core();
+        if app_policy.can_set(&server_policy).is_err() {
+            let local = app_policy.clone();
+            *app_policy = Constrained::new(server_policy, move |candidate| {
+                if *candidate == server_policy {
+                    Ok(())
+                } else {
+                    local.can_set(candidate)
+                }
+            })?;
+            self.config.permissions.approval_policy = app_policy.clone();
+        }
+        Ok(())
+    }
+
     /// Offer the flourish only for a successful primary thread/start without initial work.
     pub(crate) fn mark_fresh_task_for_sparkle(
         &mut self,
@@ -402,6 +423,11 @@ impl ChatWidget {
             self.refresh_status_surfaces();
             self.request_redraw();
         }
+    }
+
+    /// A confirmed manual rename is visible immediately, before the server echoes metadata.
+    pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
+        self.display_thread_name(thread_id, name);
     }
 
     /// Update name metadata silently, including late and replayed notifications.

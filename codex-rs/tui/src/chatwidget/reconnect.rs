@@ -194,6 +194,10 @@ impl ChatWidget {
         had_view
     }
 
+    pub(crate) fn active_view_is(&self, view_id: &'static str) -> bool {
+        self.bottom_pane.active_view_id() == Some(view_id)
+    }
+
     pub(crate) fn cancel_cloud_handoff_input(&mut self) -> CancellationEvent {
         // Count buffered terminal input as part of the draft before deciding to quit.
         self.bottom_pane.flush_composer_paste_burst();

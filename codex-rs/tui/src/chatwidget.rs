@@ -539,6 +539,7 @@ pub(crate) enum ExternalEditorState {
 pub(crate) struct ChatWidget {
     pub(crate) empty_state_animation:
         std::cell::RefCell<crate::empty_state_animation::EmptyStateAnimation>,
+    pub(crate) cyber_policy_notice: crate::daybreak::NoticeCache,
     pub(crate) daybreak_enabled: bool,
     app_event_tx: AppEventSender,
     codex_op_target: CodexOpTarget,

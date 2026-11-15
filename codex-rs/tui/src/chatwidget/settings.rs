@@ -82,7 +82,6 @@ impl ChatWidget {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn set_permission_profile_with_active_profile(
         &mut self,
         profile: PermissionProfile,

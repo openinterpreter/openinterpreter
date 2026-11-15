@@ -435,11 +435,17 @@ impl ChatWidget {
     pub(super) fn cyber_policy_notice(&self) -> crate::daybreak::Notice {
         let can_enable_daybreak =
             self.daybreak_account_eligible() && !self.side_conversation_active();
-        crate::daybreak::notice_for_setting(
+        let catalog_notice = crate::daybreak::notice_for_setting(
             &self.model_catalog.models,
             self.current_model(),
             self.daybreak_enabled && can_enable_daybreak,
             can_enable_daybreak,
+        );
+        crate::daybreak::notice_for_account(
+            catalog_notice,
+            self.current_model(),
+            self.config.model_provider_id == "openai" && self.has_chatgpt_account,
+            &self.cyber_policy_notice,
         )
     }
 

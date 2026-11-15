@@ -104,6 +104,7 @@ impl ChatWidget {
         let config_panel_tui = local_settings.tui.clone();
         let mut widget = Self {
             empty_state_animation: Default::default(),
+            cyber_policy_notice: Default::default(),
             daybreak_enabled: false,
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
