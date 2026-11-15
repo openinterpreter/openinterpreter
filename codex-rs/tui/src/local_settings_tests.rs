@@ -2,7 +2,6 @@ use super::*;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use codex_config::LoaderOverrides;
-use codex_config::types::RightClickPaste;
 use codex_config::types::SessionPickerViewMode;
 use codex_terminal_detection::Multiplexer;
 use pretty_assertions::assert_eq;
@@ -117,45 +116,67 @@ max_bytes = 4096
 fast_default_opt_out = true
 "#,
     ] {
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        tui.set_alt_screen_enabled(alternate_screen);
-        tui.set_owned_screen(owned)?;
-        let local = LocalSettings::for_tui(&config, &tui);
+        let home = tempfile::tempdir()?;
+        std::fs::write(home.path().join("config.toml"), config_text)?;
+        let config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .strict_config(true)
+            .loader_overrides(LoaderOverrides {
+                ignore_project_config: true,
+                ..LoaderOverrides::without_managed_config_for_tests()
+            })
+            .cli_overrides(vec![
+                ("tui.disable_paste_burst".into(), true.into()),
+                (
+                    "features.transcript_v2".into(),
+                    config_text.is_empty().into(),
+                ),
+            ])
+            .build()
+            .await?;
+        assert_eq!(config.startup_warnings, Vec::<String>::new());
+        let local = LocalSettings::from(&config);
+        let mut expected: Tui = toml::from_str("")?;
+        expected.disable_paste_burst = Some(true);
+        expected.session_picker_view = Some(SessionPickerViewMode::Dense);
+        if !config_text.is_empty() {
+            expected.animations = false;
+            expected.effects.shimmer = false;
+            expected.rendering = codex_config::types::TuiRendering {
+                mermaid: false,
+                math: false,
+                tables: false,
+                lists: false,
+            };
+            expected.show_tooltips = false;
+            expected.show_server_version_notice = false;
+            expected.auto_recap = false;
+            expected.fullscreen_transcript = true;
+            expected.vim_mode_default = true;
+            expected.terminal_resize_reflow_max_rows = Some(0);
+            expected.session_picker_view = Some(SessionPickerViewMode::Comfortable);
+        }
         assert_eq!(
-            (local.transcript_mode, local.tui.alternate_screen),
-            (expected_mode, expected_alt),
+            local.transcript_mode.is_owned(),
+            expected.fullscreen_transcript
         );
-
-        let mut reloaded_config = config.clone();
-        reloaded_config.tui_fullscreen_transcript = false;
-        reloaded_config.tui_copy_on_select = CopyOnSelect::Never;
-        reloaded_config.tui_copy_on_select_clear_selection = false;
-        reloaded_config.tui_right_click_paste = RightClickPaste::Off;
-        reloaded_config.tui_alternate_screen = AltScreenMode::Never;
-        reloaded_config.tui_theme = Some("nord".into());
-        reloaded_config.animations = false;
-        reloaded_config.tui_auto_recap = false;
-        reloaded_config.tui_effects.starfield = false;
-        reloaded_config.disable_paste_burst = true;
-        reloaded_config.show_tooltips = false;
-        let mut expected_reload = LocalSettings::from(&reloaded_config);
-        expected_reload.transcript_mode = expected_mode;
-        expected_reload.tui.alternate_screen = expected_alt;
-        expected_reload.tui.animations = local.tui.animations;
-        expected_reload.tui.auto_recap = local.tui.auto_recap;
-        expected_reload.tui.effects.starfield = local.tui.effects.starfield;
-        expected_reload.tui.disable_paste_burst = local.tui.disable_paste_burst;
-        expected_reload.tui.show_tooltips = local.tui.show_tooltips;
-        assert_eq!(local.reloaded(&reloaded_config), expected_reload);
-
-        let mut expected_launch = LocalSettings::from(&reloaded_config);
-        expected_launch.transcript_mode = expected_mode;
-        expected_launch.tui.alternate_screen = expected_alt;
+        assert_eq!(local.tui, expected);
         assert_eq!(
-            LocalSettings::for_tui(&reloaded_config, &tui),
-            expected_launch
+            config
+                .features
+                .legacy_feature_usages()
+                .map(|usage| usage.alias.as_str())
+                .collect::<Vec<_>>(),
+            vec!["features.transcript_v2"],
         );
-        tui.set_owned_screen(/*owned*/ false)?;
+        assert_eq!(
+            local.terminal_resize_reflow(),
+            config.terminal_resize_reflow
+        );
+        assert_eq!(
+            (&local.history, &local.notices),
+            (&config.history, &config.notices)
+        );
     }
     Ok(())
 }

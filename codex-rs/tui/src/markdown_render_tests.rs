@@ -12,6 +12,7 @@ use crate::markdown_render::render_markdown_lines_with_width_and_cwd;
 use crate::markdown_render::render_markdown_text;
 use crate::markdown_render::render_markdown_text_with_width;
 use crate::markdown_render::render_markdown_text_with_width_and_cwd;
+use crate::render::highlight::set_syntax_theme;
 use insta::assert_debug_snapshot;
 use insta::assert_snapshot;
 
@@ -809,13 +810,12 @@ fn inline_code_and_file_paths_follow_syntax_theme() {
             let code_style = styles.code;
             let mut writer = super::Writer::new(
                 markdown,
-                pulldown_cmark::Parser::new(markdown).into_offset_iter(),
                 /*wrap_width*/ Some(24),
                 /*cwd*/ None,
                 &|_| false,
             );
             writer.styles = styles;
-            writer.run();
+            writer.run(&mut pulldown_cmark::Parser::new(markdown).into_offset_iter());
             let lines = crate::terminal_hyperlinks::visible_lines(writer.text);
             let paths = lines
                 .iter()
