@@ -26,6 +26,8 @@ pub(super) struct StreamingRender {
     pub(super) lines: Vec<HyperlinkLine>,
     pub(super) pending_math_start: Option<usize>,
     pub(super) mutable_fence_start: Option<usize>,
+    /// Source boundary before the final top-level block, including after full re-renders.
+    pub(super) completed_source_len: usize,
     /// Source prefix containing only completed top-level markdown blocks.
     stable_source_len: usize,
     /// Rendered-line boundary corresponding to `stable_source_len`.
@@ -45,6 +47,7 @@ impl StreamingRender {
             lines: Vec::with_capacity(64),
             pending_math_start: None,
             mutable_fence_start: None,
+            completed_source_len: 0,
             stable_source_len: 0,
             stable_rendered_len: 0,
             has_reference_link_definition: false,
@@ -57,6 +60,7 @@ impl StreamingRender {
         self.lines.clear();
         self.pending_math_start = None;
         self.mutable_fence_start = None;
+        self.completed_source_len = 0;
         self.stable_source_len = 0;
         self.stable_rendered_len = 0;
         self.has_reference_link_definition = false;
@@ -79,6 +83,7 @@ impl StreamingRender {
         self.open_code_fence = None;
         self.pending_math_start = None;
         self.mutable_fence_start = None;
+        self.completed_source_len = 0;
         self.has_inline_visualization_directive = contains_inline_visualization(source);
         self.lines = match (render_mode, inline_visualization_context) {
             (HistoryRenderMode::Rich, None) if !self.has_inline_visualization_directive => {
