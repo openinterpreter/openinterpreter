@@ -1084,7 +1084,7 @@ fn keyboard_cell_text_crosses_wraps_without_selecting_neighbors() {
             view.handle_key(KeyCode::Char('y').into(), &cells),
             Some(ViewAction::Copy(copy)) if copy == text
         ));
-        view.copy_selected_text_with(
+        view.copy_selected_text_with_format(
             &cells,
             text,
             /*clear_selection*/ false,

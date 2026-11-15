@@ -21,7 +21,7 @@ async fn resumed_initial_messages_render_history() {
 
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
-    let configured = crate::session_state::ThreadSessionState {
+    let mut configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
         daybreak_enabled: false,
