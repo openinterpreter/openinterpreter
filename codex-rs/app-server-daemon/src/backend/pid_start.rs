@@ -239,10 +239,10 @@ impl PidBackend {
             .id()
             .context("spawned app-server process has no pid")?;
         let record = match async {
-            #[cfg(windows)]
-            super::super::windows::Process::open(pid)?
-                .context("daemon exited during launch")?
-                .ensure_detached()?;
+            // CREATE_BREAKAWAY_FROM_JOB is enforced by the launch call, and
+            // ensure_detached_launch probed it before lifecycle mutation.
+            // Do not reject membership in an unrelated outer host job: the
+            // daemon may retain that job while leaving the updater's inner job.
             let process_start_time = read_process_start_time(pid).await?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let process_identity = super::identity::read_process_details(pid)

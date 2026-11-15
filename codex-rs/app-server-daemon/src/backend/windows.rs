@@ -292,10 +292,10 @@ pub(crate) fn installer_job(child: &tokio::process::Child) -> Result<OwnedHandle
     let process = child
         .raw_handle()
         .context("installer process handle is unavailable")?;
-    process_job(process as isize)
+    process_job(process)
 }
 
-fn process_job(process: isize) -> Result<OwnedHandle> {
+fn process_job(process: HANDLE) -> Result<OwnedHandle> {
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() {
         return Err(io::Error::last_os_error()).context("failed to create updater job");
