@@ -337,6 +337,10 @@ impl SqliteQueueStore {
     /// as completed. The update is one-shot; later Goal replacement cannot
     /// erase this historical proof, and a mismatched dispatch turn is never
     /// promoted to completion.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the durable completion receipt records exact Goal identity, revisions, and turn lineage"
+    )]
     pub async fn mark_admission_completed(
         &self,
         thread_id: ThreadId,
@@ -395,6 +399,10 @@ impl SqliteQueueStore {
     /// recorded as terminal lineage without changing the immutable dispatch
     /// turn. The queue service only calls this after an exact current-Goal
     /// proof selected one retained admission at the native idle boundary.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "continuation completion preserves exact admission, Goal, and completing-turn lineage"
+    )]
     pub async fn mark_admission_completed_from_continuation(
         &self,
         thread_id: ThreadId,
