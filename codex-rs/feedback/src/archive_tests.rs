@@ -10,6 +10,7 @@ fn options() -> FeedbackUploadOptions<'static> {
     FeedbackUploadOptions {
         classification: "bug",
         reason: Some("synthetic feedback"),
+        report_passcode: None,
         tags: None,
         include_logs: false,
         extra_attachments: Vec::new(),

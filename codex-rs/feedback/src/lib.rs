@@ -1203,7 +1203,7 @@ mod tests {
                     report_passcode: Some(secret),
                     tags: None,
                     include_logs: false,
-                    extra_attachments: &[],
+                    extra_attachments: Vec::new(),
                     extra_attachment_paths: &[],
                     session_source: Some(SessionSource::Cli),
                     logs_override: None,
@@ -1251,7 +1251,7 @@ mod tests {
                     report_passcode: Some("operator-secret-123"),
                     tags: None,
                     include_logs: false,
-                    extra_attachments: &[attachment],
+                    extra_attachments: vec![attachment],
                     extra_attachment_paths: &[],
                     session_source: Some(SessionSource::Cli),
                     logs_override: None,
@@ -1355,7 +1355,7 @@ mod tests {
     async fn upload_test_feedback(
         feedback: &CodexFeedback,
         dsn: &str,
-        extra_attachments: &[FeedbackAttachment],
+        extra_attachments: Vec<FeedbackAttachment>,
     ) -> Result<()> {
         feedback
             .snapshot(/*session_id*/ None)
@@ -1398,7 +1398,7 @@ mod tests {
             content_type: None,
             buffer: b"later diagnostic".to_vec(),
         };
-        upload_test_feedback(&CodexFeedback::new(), &dsn, &[attachment])
+        upload_test_feedback(&CodexFeedback::new(), &dsn, vec![attachment])
             .await
             .expect("all three envelopes should finish across twelve seconds of network waits");
     }
@@ -1441,7 +1441,7 @@ mod tests {
                     report_passcode: None,
                     tags: None,
                     include_logs: true,
-                    extra_attachments: &attachments,
+                    extra_attachments: attachments.into(),
                     extra_attachment_paths: &[],
                     session_source: Some(SessionSource::Cli),
                     logs_override: Some(b"log contents".to_vec()),
@@ -1500,7 +1500,7 @@ mod tests {
             buffer: filename.as_bytes().to_vec(),
         });
         let started = Instant::now();
-        upload_test_feedback(&CodexFeedback::new(), &dsn, &attachments)
+        upload_test_feedback(&CodexFeedback::new(), &dsn, attachments.into())
             .await
             .expect_err("legacy uploads report incomplete diagnostics");
         assert!(started.elapsed() >= Duration::from_secs(2));
@@ -1582,7 +1582,7 @@ mod tests {
                     report_passcode: None,
                     tags: None,
                     include_logs: false,
-                    extra_attachments: &[],
+                    extra_attachments: Vec::new(),
                     extra_attachment_paths: &[
                         FeedbackAttachmentPath {
                             path: first_path.clone(),
@@ -1678,7 +1678,7 @@ mod tests {
                     report_passcode: None,
                     tags: None,
                     include_logs: false,
-                    extra_attachments: &[attachment],
+                    extra_attachments: vec![attachment],
                     extra_attachment_paths: &[],
                     session_source: Some(SessionSource::Cli),
                     logs_override: None,
@@ -1729,7 +1729,7 @@ mod tests {
                     report_passcode: None,
                     tags: None,
                     include_logs: false,
-                    extra_attachments: &[attachment],
+                    extra_attachments: vec![attachment],
                     extra_attachment_paths: &[],
                     session_source: Some(SessionSource::Cli),
                     logs_override: None,
@@ -1783,7 +1783,7 @@ mod tests {
                         report_passcode: None,
                         tags: None,
                         include_logs: false,
-                        extra_attachments: &[],
+                        extra_attachments: Vec::new(),
                         extra_attachment_paths: &[FeedbackAttachmentPath {
                             path,
                             attachment_filename_override: None,
@@ -1864,7 +1864,7 @@ mod tests {
                 content_type: None,
                 buffer: b"later diagnostic".to_vec(),
             };
-            upload_test_feedback(&CodexFeedback::new(), &dsn, &[later])
+            upload_test_feedback(&CodexFeedback::new(), &dsn, vec![later])
                 .await
                 .expect_err("legacy uploads report rate-limited diagnostics");
         }
@@ -1883,7 +1883,7 @@ mod tests {
         let feedback = CodexFeedback::new();
         let dsn = format!("http://public@{}/42", server.address());
 
-        let error = upload_test_feedback(&feedback, &dsn, &[])
+        let error = upload_test_feedback(&feedback, &dsn, Vec::new())
             .await
             .expect_err("rejected Sentry responses must fail feedback uploads");
 
@@ -1906,7 +1906,7 @@ mod tests {
             .mount(&sentry_server)
             .await;
         let dsn = format!("http://public@{}/42", sentry_server.address());
-        let error = upload_test_feedback(&CodexFeedback::new(), &dsn, &[])
+        let error = upload_test_feedback(&CodexFeedback::new(), &dsn, Vec::new())
             .await
             .expect_err("redirected feedback uploads must be rejected");
 
@@ -1930,7 +1930,7 @@ mod tests {
         drop(listener);
 
         let dsn = format!("http://public@{address}/42");
-        let error = upload_test_feedback(&CodexFeedback::new(), &dsn, &[])
+        let error = upload_test_feedback(&CodexFeedback::new(), &dsn, Vec::new())
             .await
             .expect_err("transport failures must fail feedback uploads");
 
@@ -1964,7 +1964,7 @@ mod tests {
             .feedback_attachments(
                 &headers,
                 /*include_logs*/ true,
-                &[FeedbackAttachment {
+                vec![FeedbackAttachment {
                     filename: DOCTOR_REPORT_ATTACHMENT_FILENAME.to_string(),
                     content_type: Some("application/json".to_string()),
                     buffer: b"{\"overallStatus\":\"ok\"}".to_vec(),
@@ -2011,7 +2011,7 @@ mod tests {
             .feedback_attachments(
                 &headers,
                 /*include_logs*/ true,
-                &[],
+                Vec::new(),
                 &[],
                 Some(vec![1]),
             )
@@ -2047,7 +2047,7 @@ mod tests {
             .feedback_attachments(
                 &headers,
                 /*include_logs*/ false,
-                &[],
+                Vec::new(),
                 &[
                     FeedbackAttachmentPath {
                         path: gzip_path.clone(),

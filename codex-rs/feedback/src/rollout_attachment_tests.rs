@@ -57,7 +57,7 @@ fn unloaded_compressed_rollout_is_included_in_bounded_archive() {
         .feedback_attachments(
             &headers,
             /*include_logs*/ false,
-            &[],
+            Vec::new(),
             &paths,
             /*logs_override*/ None,
         )

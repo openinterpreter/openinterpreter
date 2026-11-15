@@ -198,6 +198,7 @@ async fn feedback_upload_sends_safe_reason_tag_and_full_comment() {
             FeedbackUploadOptions {
                 classification: "bug",
                 reason: Some(&reason),
+                report_passcode: None,
                 tags: Some(&tags),
                 include_logs: false,
                 extra_attachments: Vec::new(),
