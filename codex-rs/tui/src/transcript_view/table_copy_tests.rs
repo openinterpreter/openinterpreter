@@ -99,7 +99,7 @@ fn rectangular_clipboard_text_escapes_literal_pipes() {
     let text = view.selected_text(&cells).unwrap();
     let expected = "|  |  |\n|---|---|\n| a\\|b | Value |";
     assert_eq!(text, expected);
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &text,
         /*clear_selection*/ false,
@@ -451,7 +451,7 @@ fn mouse_selects_wrapped_cell_text_and_rectangles() {
 
     render(&mut view, &cells, /*width*/ 32, /*height*/ 12);
     assert_eq!(view.selected_text(&cells).as_deref(), Some(full.as_str()));
-    view.copy_selected_text_with(
+    view.copy_selected_text_with_format(
         &cells,
         &full,
         /*clear_selection*/ false,
