@@ -132,7 +132,14 @@ pub(crate) fn render_markdown_agent_with_list_spacing(
     list_spacing: ListSpacing,
 ) -> Vec<HyperlinkLine> {
     let rewritten = rewrite_inline_visualizations(markdown_source, inline_visualization_context);
-    let normalized = normalize_markdown_for_rendering(&rewritten.markdown);
+    // Keep the source-to-rendered-code mapping while applying the same
+    // table-fence normalization used by other agent Markdown entry points.
+    let mut code_sources = Vec::new();
+    let normalized = if crate::markdown_render::preferences::current().tables {
+        unwrap_markdown_fences_with_sources(&rewritten.markdown, &mut code_sources)
+    } else {
+        Cow::Borrowed(rewritten.markdown.as_ref())
+    };
     let is_hidden_link_destination = |destination: &str| {
         rewritten.trusted_file_links.contains_key(destination)
             || crate::markdown_render::hide_web_link_destination(destination)
@@ -143,6 +150,7 @@ pub(crate) fn render_markdown_agent_with_list_spacing(
         cwd,
         &is_hidden_link_destination,
         list_spacing,
+        code_sources,
     )
     .lines;
     for hyperlink in lines.iter_mut().flat_map(|line| &mut line.hyperlinks) {
