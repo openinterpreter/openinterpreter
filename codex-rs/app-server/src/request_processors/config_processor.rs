@@ -635,6 +635,9 @@ pub(crate) fn map_requirements_to_api(
         model_catalog_json: requirements.model_catalog_json.map(Into::into),
         check_for_update_on_startup: requirements.check_for_update_on_startup,
         allow_login_shell: requirements.allow_login_shell,
+        otel: requirements
+            .otel
+            .map(|otel| crate::otel_config::map_otel_requirements_to_api(*otel)),
         feedback: requirements.feedback.map(|feedback| FeedbackRequirements {
             enabled: feedback.enabled,
         }),

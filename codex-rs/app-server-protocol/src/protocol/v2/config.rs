@@ -458,6 +458,7 @@ pub struct ConfigRequirements {
     pub model_catalog_json: Option<PathUri>,
     pub check_for_update_on_startup: Option<bool>,
     pub allow_login_shell: Option<bool>,
+    pub otel: Option<OtelRequirements>,
     pub feedback: Option<FeedbackRequirements>,
 }
 

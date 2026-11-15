@@ -94,6 +94,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use test_case::test_case;
 use test_case::test_matrix;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use uuid::Uuid;
 use wiremock::Match;

@@ -4,7 +4,6 @@ use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
 use super::connection_handling_websocket::create_config_toml;
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 use app_test_support::create_final_assistant_message_sse_response;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -812,7 +811,7 @@ pub(super) fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
     let binary = codex_utils_cargo_bin::cargo_bin("codex-app-server")?;
     Ok(Command::new(binary)
         .args(["--listen", &format!("unix://{}", socket_path.display())])
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .arg("--disable-plugin-startup-tasks-for-tests")
         .env("CODEX_HOME", home)
         .arg("--managed-daemon")
         .env(
