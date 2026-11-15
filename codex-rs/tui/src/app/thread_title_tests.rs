@@ -407,7 +407,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
                 {
                     interrupted = completed.turn.status == TurnStatus::Interrupted;
                 }
-                app.handle_app_server_event(&app_server, event).await;
+                app.handle_app_server_event(&app_server, event.event).await;
             }
             TitleDriveEvent::RequestStarted => {
                 let name = "Keep this title".to_string();
