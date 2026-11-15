@@ -10,6 +10,7 @@ use super::*;
 pub(crate) enum RestrictedInputMode {
     Disconnected,
     UnavailableThread,
+    DraftHandoff,
 }
 
 impl ChatComposer {
@@ -62,6 +63,32 @@ impl ChatComposer {
         key: KeyEvent,
         mode: RestrictedInputMode,
     ) -> InputResult {
+        if mode == RestrictedInputMode::DraftHandoff {
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                let now = tokio::time::Instant::now().into_std();
+                self.flush_handoff_paste(now);
+                self.popups.active = ActivePopup::None;
+                if self.draft.textarea.wants_vim_search_key(key) {
+                    self.edit_restricted_draft(key);
+                } else if self.handle_vim_history_key(key) {
+                    self.draft.textarea_state.get_mut().follow_cursor();
+                } else {
+                    let paste_separator = (key.code == KeyCode::Enter
+                        && key.modifiers.is_empty()
+                        && (self.append_paste_newline(now)
+                            || self.append_recent_paste_separator('\n', now)))
+                        || self.handle_paste_tab(key, now);
+                    if !paste_separator
+                        && !self.submit_keys.is_pressed(key)
+                        && !self.queue_keys.is_pressed(key)
+                    {
+                        self.edit_restricted_draft(key);
+                    }
+                }
+                self.popups.active = ActivePopup::None;
+            }
+            return InputResult::None;
+        }
         self.cancel_history_search();
         self.attachments.clear_remote_image_selection();
         self.popups.active = ActivePopup::None;

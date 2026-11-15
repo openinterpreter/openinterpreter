@@ -175,6 +175,8 @@ pub struct TuiGlobalKeymap {
     pub open_transcript: Option<KeybindingsSpec>,
     /// Find text in the full transcript.
     pub find_transcript: Option<KeybindingsSpec>,
+    /// Enter keyboard selection mode for the transcript.
+    pub select_transcript: Option<KeybindingsSpec>,
     /// Focus activity groups in the owned transcript to inspect their details.
     pub focus_activity: Option<KeybindingsSpec>,
     /// Open the external editor for the current draft.
@@ -203,6 +205,8 @@ pub struct TuiGlobalKeymap {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiChatKeymap {
+    /// Open the preset submenu.
+    pub open_presets: Option<KeybindingsSpec>,
     /// Start or stop a voice conversation.
     pub toggle_voice: Option<KeybindingsSpec>,
     /// Toggle the microphone in an active voice conversation.

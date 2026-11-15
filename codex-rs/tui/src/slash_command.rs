@@ -13,6 +13,7 @@ pub enum SlashCommand {
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
+    Daybreak,
     Harness,
     Ide,
     Permissions,
@@ -158,6 +159,7 @@ impl SlashCommand {
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
             SlashCommand::Model => "choose provider, model, reasoning effort, and harness",
+            SlashCommand::Daybreak => "turn Daybreak on or off",
             SlashCommand::Harness => "choose the tool harness for the current model",
             SlashCommand::Ide => {
                 "include current selection, open files, and other context from your IDE"
@@ -309,6 +311,7 @@ impl SlashCommand {
             | SlashCommand::Archive
             | SlashCommand::Resume
             | SlashCommand::Model
+            | SlashCommand::Daybreak
             | SlashCommand::Harness
             | SlashCommand::Permissions
             | SlashCommand::Copy

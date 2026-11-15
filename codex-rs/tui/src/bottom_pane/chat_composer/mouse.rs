@@ -19,6 +19,14 @@ pub(crate) enum ClipboardPasteTarget {
 }
 
 impl ChatComposer {
+    pub(in crate::bottom_pane) fn finish_copy(
+        &mut self,
+        completion: &(u64, crate::clipboard_copy::worker::CopyResult),
+        current: bool,
+    ) -> Option<usize> {
+        self.draft.textarea.finish_copy(completion, current)
+    }
+
     /// Drop the draft's painted selection without changing its text or cursor.
     pub(crate) fn clear_mouse_selection(&mut self) {
         self.end_mouse_drag();
@@ -76,6 +84,9 @@ impl ChatComposer {
         let text = &self.draft.textarea.text()[range];
         let char_count = text.chars().count();
         let result = copy(text);
+        if let Ok(CopyStatus::Pending(id)) = result {
+            self.draft.textarea.defer_copy(id);
+        }
         if matches!(event, TuiEvent::Mouse(_)) && result == Ok(CopyStatus::Confirmed) {
             self.draft.textarea.set_cursor(self.draft.textarea.cursor());
         }

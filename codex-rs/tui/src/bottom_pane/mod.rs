@@ -492,6 +492,11 @@ impl BottomPane {
         self.composer.command_center_enabled = true;
     }
 
+    pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
+        self.composer.command_center_enabled = enabled;
+        self.request_redraw();
+    }
+
     pub(crate) fn agents_navigation_key_available(&self) -> bool {
         let left = KeyEvent::from(KeyCode::Left);
         self.composer.agents_navigation_key_available()
@@ -652,6 +657,11 @@ impl BottomPane {
 
     pub fn set_service_tier_commands_enabled(&mut self, enabled: bool) {
         self.composer.set_service_tier_commands_enabled(enabled);
+        self.request_redraw();
+    }
+
+    pub fn set_daybreak_command_description(&mut self, description: Option<&'static str>) {
+        self.composer.set_daybreak_command_description(description);
         self.request_redraw();
     }
 
@@ -1889,6 +1899,14 @@ impl BottomPane {
             .is_some_and(|view| view.presentation() == ViewPresentation::Centered)
     }
 
+    pub(crate) fn centered_dialog(&self) -> Option<CenteredView<'_>> {
+        self.active_view()
+            .filter(|view| {
+                !self.warnings_active() && view.presentation() == ViewPresentation::Centered
+            })
+            .map(CenteredView)
+    }
+
     pub(crate) fn has_active_view(&self) -> bool {
         self.warnings_view.is_some() || self.has_active_modal()
     }
@@ -1935,6 +1953,12 @@ impl BottomPane {
             && !self.questions.as_ref().is_some_and(|q| q.expanded)
     }
 
+    pub(crate) fn completion_can_yield_focus(&self) -> bool {
+        !self.has_active_view()
+            && !self.composer.query_active()
+            && !self.questions.as_ref().is_some_and(|q| q.expanded)
+    }
+
     /// Returns true when the bottom pane has no active modal view and no active composer popup.
     ///
     /// This is the UI-level definition of "no modal/popup is active" for key routing decisions.
@@ -1951,6 +1975,15 @@ impl BottomPane {
     pub(crate) fn clear_composer_selection(&mut self) {
         self.composer.clear_mouse_selection();
         self.request_redraw();
+    }
+
+    pub(crate) fn finish_composer_copy(
+        &mut self,
+        completion: &(u64, crate::clipboard_copy::worker::CopyResult),
+        visible: bool,
+    ) -> Option<usize> {
+        let current = visible && !self.has_active_view();
+        self.composer.finish_copy(completion, current)
     }
 
     pub(crate) fn copy_composer_selection(

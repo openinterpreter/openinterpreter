@@ -715,12 +715,41 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn is_pending_workspace_headline(&self, request_id: u64) -> bool {
+        self.status_line_workspace_headline_pending_request_id == Some(request_id)
+    }
+
+    pub(super) fn status_model_display_name(&self) -> String {
+        let model = self
+            .thread_id
+            .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.model(id));
+        model.map_or_else(
+            || {
+                self.cloud_picker_selection
+                    .as_ref()
+                    .map_or_else(
+                        || self.model_display_name(),
+                        |selection| self.model_catalog.display_name(&selection.model),
+                    )
+                    .to_string()
+            },
+            |model| self.model_catalog.display_name(&model).to_string(),
+        )
+    }
+
+    pub(super) fn status_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
+        self.cloud_picker_selection.as_ref().map_or_else(
+            || self.effective_reasoning_effort(),
+            |selection| selection.effort.clone(),
+        )
+    }
+
     pub(crate) fn set_status_line_workspace_headline(
         &mut self,
         request_id: u64,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     ) -> bool {
-        if self.status_line_workspace_headline_pending_request_id != Some(request_id) {
+        if !self.is_pending_workspace_headline(request_id) {
             return false;
         }
         self.status_line_workspace_headline_pending_request_id = None;
@@ -758,7 +787,7 @@ impl ChatWidget {
     /// git metadata.
     pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
         let value = match item {
-            StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
+            StatusLineItem::ModelName => Some(self.status_model_display_name()),
             StatusLineItem::ModelWithReasoning => {
                 let service_tier = self.processing_tier_display_name().map(str::to_lowercase);
                 Some(self.model_with_reasoning_display_name(service_tier.as_deref()))
@@ -1013,7 +1042,7 @@ impl ChatWidget {
                 self.status_line_value_for_item(StatusLineItem::Daybreak)
             }
             TerminalTitleItem::Model => Some(Self::truncate_terminal_title_part(
-                self.model_display_name().to_string(),
+                self.status_model_display_name(),
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::ModelWithReasoning => Some(Self::truncate_terminal_title_part(
@@ -1029,7 +1058,7 @@ impl ChatWidget {
     }
 
     fn reasoning_display_name(&self) -> String {
-        let effort = self.effective_reasoning_effort();
+        let effort = self.status_reasoning_effort();
         Self::status_line_reasoning_effort_label(effort.as_ref())
     }
 
@@ -1038,15 +1067,23 @@ impl ChatWidget {
         let service_tier_label = service_tier
             .map(|tier| format!(" {tier}"))
             .unwrap_or_default();
-        format!("{} {label}{service_tier_label}", self.model_display_name())
+        format!(
+            "{} {label}{service_tier_label}",
+            self.status_model_display_name()
+        )
     }
 
     pub(super) fn processing_tier_display_name(&self) -> Option<&str> {
         let id = self.current_service_tier()?;
+        let pending_model = self
+            .thread_id
+            .and_then(|thread_id| self.pending_cloud_turn_settings.as_ref()?.model(thread_id));
         self.model_catalog
             .models
             .iter()
-            .find(|preset| preset.model == self.current_model())
+            .find(|preset| {
+                preset.model == pending_model.as_deref().unwrap_or(self.selected_model())
+            })
             .and_then(|preset| preset.service_tiers.iter().find(|tier| tier.id == id))
             .map(|tier| tier.name.as_str())
             .or_else(|| {

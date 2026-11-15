@@ -476,6 +476,27 @@ impl App {
         Ok(())
     }
 
+    pub(super) async fn hide_focused_side_pane(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(child) = self.current_displayed_thread_id() else {
+            return Ok(());
+        };
+        let Some(side) = self.side_threads.get(&child) else {
+            return Ok(());
+        };
+        let parent = side.parent_thread_id;
+        self.select_agent_thread(tui, app_server, parent).await?;
+        if self.current_displayed_thread_id() == Some(parent) {
+            self.sidebar_mut().hide();
+            tui.frame_requester().schedule_frame();
+            self.focus_returned_parent_composer(parent).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn discard_side_thread(
         &mut self,
         app_server: &mut AppServerSession,

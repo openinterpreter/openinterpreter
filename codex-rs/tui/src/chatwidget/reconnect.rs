@@ -180,6 +180,20 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn active_view_accepts_input_when_disconnected(&self) -> bool {
+        self.bottom_pane
+            .active_view_accepts_input_when_disconnected()
+    }
+
+    pub(crate) fn cancel_active_disconnected_view(&mut self) -> bool {
+        let had_view = self.active_view_accepts_input_when_disconnected();
+        if had_view {
+            self.revert_terminal_title_setup_preview();
+            let _ = self.bottom_pane.on_ctrl_c();
+        }
+        had_view
+    }
+
     pub(crate) fn cancel_cloud_handoff_input(&mut self) -> CancellationEvent {
         // Count buffered terminal input as part of the draft before deciding to quit.
         self.bottom_pane.flush_composer_paste_burst();
@@ -190,7 +204,11 @@ impl ChatWidget {
         cancellation
     }
 
-    pub(crate) fn handle_restricted_key(&mut self, key: KeyEvent, mode: RestrictedInputMode) {
+    pub(crate) fn handle_restricted_key(
+        &mut self,
+        key: KeyEvent,
+        mode: RestrictedInputMode,
+    ) -> KeyEventAction {
         if self.is_read_only_view() {
             return KeyEventAction::None;
         }

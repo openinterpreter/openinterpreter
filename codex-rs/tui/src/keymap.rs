@@ -126,6 +126,7 @@ pub(crate) struct AppKeymap {
     pub(crate) open_transcript: Vec<KeyBinding>,
     /// Find text in the full transcript.
     pub(crate) find_transcript: Vec<KeyBinding>,
+    pub(crate) select_transcript: Vec<KeyBinding>,
     /// Focus activity groups in the owned transcript to inspect their details.
     pub(crate) focus_activity: Vec<KeyBinding>,
     /// Open retained warnings without replacing the composer.
@@ -154,11 +155,12 @@ pub(crate) struct AppKeymap {
 /// handler code, not here.
 #[derive(Clone, Debug)]
 pub(crate) struct ChatKeymap {
+    pub(crate) open_presets: Vec<KeyBinding>,
     /// Start or stop a voice conversation.
     pub(crate) toggle_voice: Vec<KeyBinding>,
     /// Toggle capture in the active voice session.
     pub(crate) toggle_voice_mute: Vec<KeyBinding>,
-    chord_hints: Arc<RuntimeChordKeymap>,
+    pub(crate) chord_hints: Arc<RuntimeChordKeymap>,
     /// Interrupt the active turn.
     pub(crate) interrupt_turn: Vec<KeyBinding>,
     /// Decrease the active reasoning effort.
@@ -863,6 +865,11 @@ impl RuntimeKeymap {
                 &defaults.app.find_transcript,
                 "tui.keymap.global.find_transcript",
             )?,
+            select_transcript: resolve_bindings(
+                keymap.global.select_transcript.as_ref(),
+                &defaults.app.select_transcript,
+                "tui.keymap.global.select_transcript",
+            )?,
             focus_activity: resolve_bindings(
                 keymap.global.focus_activity.as_ref(),
                 &focus_activity_defaults,
@@ -920,6 +927,7 @@ impl RuntimeKeymap {
                 }));
 
         let mut chat = ChatKeymap {
+            open_presets: resolve_local!(keymap, defaults, chat, open_presets),
             toggle_voice: if voice_toggle_default_is_shadowed {
                 Vec::new()
             } else {
@@ -1607,6 +1615,10 @@ impl RuntimeKeymap {
                 app.find_transcript.as_slice(),
             ),
             (
+                keymap.global.select_transcript.as_ref(),
+                app.select_transcript.as_slice(),
+            ),
+            (
                 keymap.global.focus_activity.as_ref(),
                 app.focus_activity.as_slice(),
             ),
@@ -1840,6 +1852,7 @@ impl RuntimeKeymap {
                 open_agents: default_bindings![],
                 open_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 find_transcript: default_bindings![plain(KeyCode::F(3))],
+                select_transcript: default_bindings![],
                 focus_activity: default_bindings![plain(KeyCode::F(4))],
                 open_warnings: default_bindings![plain(KeyCode::F(2))],
                 open_external_editor: default_bindings![ctrl(KeyCode::Char('g'))],
@@ -1852,6 +1865,7 @@ impl RuntimeKeymap {
             },
             chords: Arc::default(),
             chat: ChatKeymap {
+                open_presets: Vec::new(),
                 toggle_voice: default_bindings![plain(KeyCode::F(8))],
                 toggle_voice_mute: default_bindings![ctrl(KeyCode::Char('x'))],
                 chord_hints: Arc::default(),
@@ -2162,6 +2176,7 @@ impl RuntimeKeymap {
     ///    backtracking, intentionally stay outside this configurable keymap.
     fn validate_conflicts(&self) -> Result<(), String> {
         for (action, bindings) in [
+            ("chat.open_presets", &self.chat.open_presets),
             ("toggle_voice", &self.chat.toggle_voice),
             (
                 "chat.previous_permission_mode",
@@ -2188,6 +2203,7 @@ impl RuntimeKeymap {
         #[cfg(unix)]
         for (action, bindings) in [
             ("global.open_agents", &self.app.open_agents),
+            ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
         ] {
             if bindings.contains(&key_hint::ctrl(KeyCode::Char('z'))) {
@@ -2243,6 +2259,7 @@ impl RuntimeKeymap {
             ("open_agents", self.app.open_agents.as_slice()),
             ("open_transcript", self.app.open_transcript.as_slice()),
             ("find_transcript", self.app.find_transcript.as_slice()),
+            ("select_transcript", self.app.select_transcript.as_slice()),
             ("focus_activity", self.app.focus_activity.as_slice()),
             ("open_warnings", self.app.open_warnings.as_slice()),
             (
@@ -2256,6 +2273,7 @@ impl RuntimeKeymap {
             ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
             ("toggle_side_conversation", side_toggle_bindings.as_slice()),
             ("chat.toggle_voice", self.chat.toggle_voice.as_slice()),
+            ("chat.open_presets", self.chat.open_presets.as_slice()),
             (
                 "chat.toggle_voice_mute",
                 self.chat.toggle_voice_mute.as_slice(),
@@ -2349,6 +2367,7 @@ impl RuntimeKeymap {
                 ("open_agents", self.app.open_agents.as_slice()),
                 ("open_transcript", self.app.open_transcript.as_slice()),
                 ("find_transcript", self.app.find_transcript.as_slice()),
+                ("select_transcript", self.app.select_transcript.as_slice()),
                 ("focus_activity", self.app.focus_activity.as_slice()),
                 ("open_warnings", self.app.open_warnings.as_slice()),
                 (
@@ -2430,6 +2449,7 @@ impl RuntimeKeymap {
                 ("open_agents", self.app.open_agents.as_slice()),
                 ("open_transcript", self.app.open_transcript.as_slice()),
                 ("find_transcript", self.app.find_transcript.as_slice()),
+                ("select_transcript", self.app.select_transcript.as_slice()),
                 ("focus_activity", self.app.focus_activity.as_slice()),
                 ("open_warnings", self.app.open_warnings.as_slice()),
                 (
@@ -2439,6 +2459,7 @@ impl RuntimeKeymap {
                 ("copy", self.app.copy.as_slice()),
                 ("clear_terminal", self.app.clear_terminal.as_slice()),
                 ("chat.toggle_voice", self.chat.toggle_voice.as_slice()),
+                ("chat.open_presets", self.chat.open_presets.as_slice()),
                 (
                     "chat.toggle_voice_mute",
                     self.chat.toggle_voice_mute.as_slice(),
@@ -2562,6 +2583,10 @@ impl RuntimeKeymap {
                 (
                     "global.find_transcript",
                     self.app.find_transcript.as_slice(),
+                ),
+                (
+                    "global.select_transcript",
+                    self.app.select_transcript.as_slice(),
                 ),
             ]),
         )?;

@@ -129,10 +129,11 @@ fn resolve_model_command(chat: &ChatWidget, args: &str) -> Result<ModelCommand, 
     if let Some(message) = chat.model_picker_unavailable() {
         return Err(message);
     }
-    let model_name = args
-        .model
-        .clone()
-        .unwrap_or_else(|| chat.selected_model().to_owned());
+    let model_name = args.model.clone().unwrap_or_else(|| {
+        chat.thread_id
+            .and_then(|id| chat.pending_cloud_turn_settings.as_ref()?.model(id))
+            .unwrap_or_else(|| chat.selected_model().to_owned())
+    });
     let Some(model) =
         chat.model_catalog.models.iter().find(|model| {
             model.model == model_name && (args.model.is_none() || model.show_in_picker)

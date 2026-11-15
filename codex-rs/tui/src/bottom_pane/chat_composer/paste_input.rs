@@ -6,6 +6,34 @@ use super::*;
 use crate::bottom_pane::paste_burst::FlushResult;
 
 impl ChatComposer {
+    /// Preserve a separator after a recently inserted paste prefix during draft handoff.
+    pub(super) fn append_recent_paste_separator(&mut self, separator: char, now: Instant) -> bool {
+        if self.draft.disable_paste_burst || !self.draft.textarea.allows_paste_burst() {
+            return false;
+        }
+        self.handle_paste_burst_flush(now);
+        if self
+            .draft
+            .paste_burst
+            .append_control_char_if_active(separator, now)
+        {
+            return true;
+        }
+        if self
+            .draft
+            .paste_burst
+            .direct_insert_newline_should_insert(now)
+        {
+            self.draft
+                .paste_burst
+                .begin_with_retro_grabbed(String::new(), now);
+            return self
+                .draft
+                .paste_burst
+                .append_control_char_if_active(separator, now);
+        }
+        false
+    }
     pub(crate) fn insert_str(&mut self, text: &str) {
         if !text.is_empty() && self.sparkle.draft.get() == sparkle::SparkleDraft::Untouched {
             self.dismiss_sparkle();

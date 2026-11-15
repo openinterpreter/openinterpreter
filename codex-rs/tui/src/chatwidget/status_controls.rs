@@ -220,7 +220,10 @@ impl ChatWidget {
             .map(|ti| &ti.total_token_usage)
             .unwrap_or(&default_usage);
         let collaboration_mode = self.collaboration_mode_label();
-        let model = self.selected_model().to_string();
+        let model = self
+            .thread_id
+            .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.model(id))
+            .unwrap_or_else(|| self.selected_model().to_string());
         let model_default_reasoning_effort =
             self.model_catalog
                 .try_list_models()
@@ -248,6 +251,7 @@ impl ChatWidget {
             .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
+        let status_model_display_name = self.status_model_display_name();
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
             self.requires_openai_auth,
@@ -263,7 +267,7 @@ impl ChatWidget {
             rate_limit_snapshots.as_slice(),
             self.plan_type,
             Local::now(),
-            self.status_model_display_name(),
+            &status_model_display_name,
             collaboration_mode,
             reasoning_effort_override,
             agents_summary,

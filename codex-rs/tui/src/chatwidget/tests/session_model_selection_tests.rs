@@ -100,8 +100,8 @@ async fn session_model_selection_notifies_the_original_task_after_each_final_ast
         assert_matches!(events.try_recv(), Ok(AppEvent::AstraSelectedFromModelPicker {
             thread_id: selected_thread,
             model,
-            action: AstraModelPickerAction::SelectSessionModel { effort: selected_effort },
-        }) if selected_thread == thread_id && model == "gpt-6-astra" && selected_effort == Some(effort));
+            action: AstraModelPickerAction::SelectSessionModel { effort: selected_effort, service_tier },
+        }) if selected_thread == thread_id && model == "gpt-6-astra" && selected_effort == Some(effort) && service_tier.is_none());
         assert!(
             std::iter::from_fn(|| events.try_recv().ok()).all(|event| matches!(
                 event,

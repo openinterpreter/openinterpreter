@@ -10,6 +10,7 @@ pub(crate) struct RemoteConnectionStatus {
     pub(crate) address: String,
     pub(crate) version: String,
     pub(crate) is_local_daemon: bool,
+    pub(crate) is_managed_daemon: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +46,7 @@ pub(crate) fn remote_connection_status_value(
         address,
         version,
         is_local_daemon: matches!(app_server_target, AppServerTarget::LocalDaemon { .. }),
+        is_managed_daemon: false,
     })
 }
 
@@ -193,6 +195,7 @@ mod tests {
                 address: "ws://127.0.0.1:4500/".to_string(),
                 version: "v1.2.3".to_string(),
                 is_local_daemon: false,
+                is_managed_daemon: false,
             })
         );
 
@@ -209,6 +212,7 @@ mod tests {
                 address: format!("unix://{}", socket_path.display()),
                 version: "unknown".to_string(),
                 is_local_daemon: true,
+                is_managed_daemon: false,
             })
         );
         let remote_socket_target = AppServerTarget::Remote {
@@ -222,6 +226,7 @@ mod tests {
                 address: format!("unix://{}", socket_path.display()),
                 version: "v1.2.3".to_string(),
                 is_local_daemon: false,
+                is_managed_daemon: false,
             })
         );
         Ok(())

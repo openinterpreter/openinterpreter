@@ -19,6 +19,31 @@ pub(crate) enum KeyEventAction {
 }
 
 impl ChatWidget {
+    pub(crate) fn suppress_current_view_key_until_release(
+        &mut self,
+        key: KeyBinding,
+        activated_at: Instant,
+        suppression: ActivationKeySuppression,
+    ) {
+        self.bottom_pane
+            .suppress_current_view_key_until_release(key, activated_at, suppression);
+    }
+
+    /// Capture the last response before another key changes transcript selection.
+    pub(super) fn prepare_last_response_copy(&mut self) -> KeyEventAction {
+        self.app_event_tx.send(AppEvent::FollowTranscript);
+        let action = match self.transcript.last_agent_markdown.as_deref() {
+            Some(markdown) if !markdown.is_empty() => {
+                KeyEventAction::CopyLastResponse(markdown.into())
+            }
+            _ => {
+                self.add_error_message("No agent response to copy".into());
+                KeyEventAction::None
+            }
+        };
+        self.request_redraw();
+        action
+    }
     pub(crate) fn end_composer_drag(&mut self) {
         self.bottom_pane.end_composer_drag();
     }

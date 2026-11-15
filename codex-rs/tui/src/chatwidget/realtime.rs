@@ -140,6 +140,7 @@ enum StartupRetry {
 #[derive(Default)]
 pub(super) struct RealtimeConversationUiState {
     startup_retry: StartupRetry,
+    session_lock: Option<session_lock::SessionLock>,
     pub(super) phase: RealtimeConversationPhase,
     recover_late_transcripts: bool,
     attempt_id: u64,
@@ -339,7 +340,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn stop_realtime_conversation(&mut self) {
+    pub(crate) fn stop_realtime_conversation(&mut self) {
         self.realtime_conversation.startup_retry = StartupRetry::Used;
         if matches!(
             self.realtime_conversation.phase,

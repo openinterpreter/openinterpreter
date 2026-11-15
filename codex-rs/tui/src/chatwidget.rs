@@ -564,6 +564,8 @@ pub(crate) struct ChatWidget {
     /// Cloud settings accepted for future turns. Serving model metadata comes from the session.
     pub(crate) cloud_picker_selection:
         Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
+    pub(crate) pending_cloud_turn_settings:
+        Option<crate::app_server_session::user_message_submission::PendingCloudTurnSettings>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -578,6 +580,7 @@ pub(crate) struct ChatWidget {
     pub(crate) initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
+    pub(crate) thread_settings_owner: crate::app_server_session::ThreadSettingsOwner,
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,

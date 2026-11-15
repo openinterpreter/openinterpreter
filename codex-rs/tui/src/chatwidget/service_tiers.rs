@@ -10,6 +10,12 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::openai_models::SPEED_TIER_FAST;
 
 impl ChatWidget {
+    pub(super) fn selected_model(&self) -> &str {
+        self.cloud_picker_selection.as_ref().map_or_else(
+            || self.current_model(),
+            |selection| selection.model.as_str(),
+        )
+    }
     pub(crate) fn set_service_tier(&mut self, service_tier: Option<String>) {
         self.config.service_tier = service_tier;
         self.refresh_effective_service_tier();
@@ -25,6 +31,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn service_tier_update_for_core(&self) -> Option<Option<String>> {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            return None;
+        }
         service_tier_resolution::service_tier_update_for_core(
             &self.config,
             &self.local_settings.notices,
@@ -98,6 +107,13 @@ impl ChatWidget {
     }
 
     fn set_service_tier_selection(&mut self, service_tier: Option<String>) {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            self.effective_service_tier.clone_from(&service_tier);
+            self.refresh_model_dependent_surfaces();
+            self.app_event_tx
+                .send(AppEvent::PersistServiceTierSelection { service_tier });
+            return;
+        }
         self.set_service_tier(service_tier.clone());
         self.app_event_tx
             .send(AppEvent::CodexOp(AppCommand::override_turn_context(
@@ -123,10 +139,21 @@ impl ChatWidget {
     }
 
     pub(super) fn refresh_effective_service_tier(&mut self) {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            self.effective_service_tier = self
+                .thread_id
+                .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.service_tier(id))
+                .or_else(|| self.config.service_tier.clone());
+            return;
+        }
+        let model = self
+            .thread_id
+            .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.model(id))
+            .unwrap_or_else(|| self.selected_model().to_string());
         self.effective_service_tier = service_tier_resolution::effective_service_tier(
             &self.config,
             &self.local_settings.notices,
-            self.current_model(),
+            &model,
             &self.model_catalog.try_list_models().unwrap_or_default(),
         );
     }

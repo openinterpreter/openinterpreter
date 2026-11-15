@@ -97,6 +97,17 @@ impl ChatWidget {
         self.flush_active_cell();
     }
 
+    pub(crate) fn replay_backend_thread_turns(
+        &mut self,
+        turns: Vec<Turn>,
+        replay_kind: ReplayKind,
+        target: &crate::AppServerTarget,
+    ) {
+        self.transcript.replayed_cloud_text =
+            matches!(target, crate::AppServerTarget::Cloud).then(std::collections::HashMap::new);
+        self.replay_thread_turns(turns, replay_kind);
+    }
+
     /// Replay a subset of initial events into the UI to seed the transcript when
     /// resuming an existing session. This approximates the live event flow and
     /// is intentionally conservative: only safe-to-replay items are rendered to

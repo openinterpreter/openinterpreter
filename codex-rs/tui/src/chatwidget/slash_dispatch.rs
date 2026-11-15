@@ -164,7 +164,7 @@ impl ChatWidget {
                     || self.input_queue.has_queued_follow_up_messages()))
     }
 
-    pub(super) fn dispatch_command(&mut self, cmd: SlashCommand) {
+    pub(crate) fn dispatch_command(&mut self, cmd: SlashCommand) {
         self.dispatch_command_from_source(cmd, SlashCommandDispatchSource::Live);
     }
 
@@ -1296,6 +1296,7 @@ impl ChatWidget {
         let allow_elevate_sandbox = false;
 
         BuiltinCommandFlags {
+            daybreak_command_description: self.daybreak_command_description(),
             collaboration_modes_enabled: self.collaboration_modes_enabled(),
             connectors_enabled: self.connectors_enabled(),
             plugins_command_enabled: self.config.features.enabled(Feature::Plugins),
