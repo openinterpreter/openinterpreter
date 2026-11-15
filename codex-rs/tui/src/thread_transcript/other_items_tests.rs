@@ -7,6 +7,7 @@ use crate::history_cell::HistoryCell;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use codex_app_server_protocol::FileUpdateChange;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
@@ -125,10 +126,13 @@ fn tool_and_notice_projection_uses_normal_transcript_presentation() {
         id: "image-1".to_string(),
         status: "completed".to_string(),
         revised_prompt: Some("A diagram of the history pages".to_string()),
-        result: String::new(),
+        image: GeneratedImageRef::Inline {
+            result: String::new(),
+        },
         transparent_background: None,
         failure: None,
         saved_path: None,
+        input_images: Vec::new(),
         imagegen_request_id: None,
         generation_id: None,
     };
