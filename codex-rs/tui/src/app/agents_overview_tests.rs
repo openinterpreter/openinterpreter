@@ -1,8 +1,10 @@
 #[path = "agent_center_tests.rs"]
-mod command_center;
+pub(in crate::app) mod command_center;
 
 use super::super::agents_overview_view::AgentsOverviewGrouping;
 use super::*;
+use crate::app::tests::make_test_app_with_channels;
+use crate::app_server_session::ThreadParamsMode;
 use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemPayload;
@@ -755,7 +757,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
     Ok(())
 }
 
-async fn finish_overview_refresh(
+pub(in crate::app) async fn finish_overview_refresh(
     app: &mut App,
     app_server: &AppServerSession,
     events: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
@@ -876,7 +878,7 @@ async fn check_hidden_thread_does_not_refresh_shared_overview(source: &str) {
 
 #[tokio::test]
 async fn agents_overview_details_show_available_attention_without_expanding_rows() -> Result<()> {
-    let mut app = make_test_app_with_chat().await;
+    let mut app = make_test_app().await;
     let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let [root, failed_agent, child, unloaded] = std::array::from_fn(|_| ThreadId::new());
     let waiting = ThreadStatus::Active {
@@ -1140,7 +1142,7 @@ fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
 
 #[tokio::test]
 async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachment() {
-    let mut app = make_test_app_with_chat().await;
+    let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
     let mut thread = overview_thread(
         thread_id,
@@ -1240,7 +1242,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
 
 #[tokio::test]
 async fn worktrees_overview_groups_by_project_or_directory() {
-    let mut app = make_test_app_with_chat().await;
+    let mut app = make_test_app().await;
     let root = tempfile::tempdir().unwrap();
     let primary = root.path().join("primary");
     let linked = root.path().join("linked");
@@ -1264,19 +1266,24 @@ async fn worktrees_overview_groups_by_project_or_directory() {
     .unwrap();
     std::fs::write(linked.join(".git"), format!("gitdir: {}", admin.display())).unwrap();
     let primary = dunce::canonicalize(primary).unwrap();
-    let threads = [primary.clone(), linked, linked_subdir, nested_child]
-        .into_iter()
-        .map(|cwd| {
-            let mut thread = overview_thread(
-                ThreadId::new(),
-                /*parent_thread_id*/ None,
-                "Task",
-                ThreadStatus::Idle,
-            );
-            thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap();
-            thread
-        })
-        .collect::<Vec<_>>();
+    let threads = [
+        primary.clone(),
+        linked.clone(),
+        linked_subdir.clone(),
+        nested_child.clone(),
+    ]
+    .into_iter()
+    .map(|cwd| {
+        let mut thread = overview_thread(
+            ThreadId::new(),
+            /*parent_thread_id*/ None,
+            "Task",
+            ThreadStatus::Idle,
+        );
+        thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap();
+        thread
+    })
+    .collect::<Vec<_>>();
     let headings = [primary.join(""), primary.join("subdir").join("child")].map(|path| {
         crate::text_formatting::center_truncate_path(
             &crate::status::format_directory_display(&path, /*max_width*/ None),
@@ -1312,12 +1319,28 @@ async fn worktrees_overview_groups_by_project_or_directory() {
             });
         }
     }
-    let project_grouping = project_grouping.replace('\\', "/");
+    let project_grouping = render_bottom_popup(&app.chat_widget, width)
+        .replace(&headings[1], "/tmp/worktree-root/primary/subdir/child")
+        .replace(display_heading, "/tmp/worktree-root/primary")
+        .replace('\\', "/");
+    let directory_headings = [
+        (primary.clone(), "/tmp/worktree-root/primary"),
+        (linked, "/tmp/worktree-root/linked"),
+        (linked_subdir, "/tmp/worktree-root/linked/shared/child"),
+        (nested_child, "/tmp/worktree-root/primary/subdir/child"),
+    ]
+    .map(|(path, stable)| {
+        let display = crate::text_formatting::center_truncate_path(
+            &crate::status::format_directory_display(&path, /*max_width*/ None),
+            /*max_width*/ 64,
+        );
+        (display, stable)
+    });
     app.agents_overview.view_state.lock().unwrap().grouping = AgentsOverviewGrouping::Directory;
     let directory_popup = render_bottom_popup(&app.chat_widget, width);
-    for (heading, _) in &directory_headings[..2] {
+    for (heading, _) in &directory_headings {
         assert!(
-            directory_popup.contains(&format!("{heading}  2")),
+            directory_popup.contains(&format!("{heading}  1")),
             "{directory_popup}"
         );
     }
@@ -1424,7 +1447,34 @@ async fn shared_overview_shows_only_root_sessions() {
     let first_root = ThreadId::from_string("00000000-0000-0000-0000-000000000101").unwrap();
     let unloaded_root = ThreadId::from_string("00000000-0000-0000-0000-000000000102").unwrap();
     let [child, second_root, side_thread] = std::array::from_fn(|_| ThreadId::new());
-    attach_thread(&mut app, first_root);
+    app.chat_widget
+        .handle_thread_session(crate::session_state::ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            daybreak_enabled: false,
+            primary_environment_cwd: None,
+            windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
+            thread_id: first_root,
+            forked_from_id: None,
+            fork_parent_title: None,
+            thread_name: None,
+            model: "gpt-test".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: codex_app_server_protocol::AskForApproval::Never,
+            approvals_reviewer: codex_config::types::ApprovalsReviewer::User,
+            permission_profile: codex_protocol::models::PermissionProfile::read_only(),
+            active_permission_profile: None,
+            cwd: test_path_buf("/tmp/project").abs(),
+            runtime_workspace_roots: Vec::new(),
+            instruction_source_paths: Vec::new(),
+            reasoning_effort: None,
+            collaboration_mode: None,
+            personality: None,
+            message_history: None,
+            network_proxy: None,
+            rollout_path: None,
+        });
     app.primary_thread_id = Some(first_root);
 
     let mut threads = vec![
@@ -3022,17 +3072,20 @@ async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<
     );
     app.agents_overview.dispatched_requests.insert(
         thread_id,
-        vec![ServerRequest::ToolRequestUserInput {
-            request_id: RequestId::Integer(42),
-            params: ToolRequestUserInputParams {
-                thread_id: thread_id.to_string(),
-                turn_id: "turn".into(),
-                item_id: "question".into(),
-                questions: Vec::new(),
-                is_blocking: true,
-                auto_resolution_ms: None,
+        vec![BufferedServerRequest::new(
+            ServerRequest::ToolRequestUserInput {
+                request_id: RequestId::Integer(42),
+                params: ToolRequestUserInputParams {
+                    thread_id: thread_id.to_string(),
+                    turn_id: "turn".into(),
+                    item_id: "question".into(),
+                    questions: Vec::new(),
+                    is_blocking: true,
+                    auto_resolution_ms: None,
+                },
             },
-        }],
+            &server.request_handle(),
+        )],
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.app_event_tx = AppEventSender::new(tx);
@@ -3161,9 +3214,12 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
     for result in [
         Err("unavailable".into()),
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             threads: HashMap::new(),
             last_messages: HashMap::new(),
             recent_seed_complete: false,
+            discovery: None,
+            pinned_thread_ids: None,
         }),
     ] {
         let request_id = Uuid::new_v4();
@@ -3191,9 +3247,12 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
         &server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             threads: HashMap::new(),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
+            discovery: None,
+            pinned_thread_ids: None,
         }),
     );
     assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 48), before);

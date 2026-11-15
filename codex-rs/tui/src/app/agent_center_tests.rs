@@ -3,7 +3,7 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-fn screen(view: &AgentsOverviewView, width: u16, height: u16) -> String {
+pub(in crate::app) fn screen(view: &AgentsOverviewView, width: u16, height: u16) -> String {
     let area = Rect::new(/*x*/ 0, /*y*/ 0, width, height);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     view.render(area, &mut buf);

@@ -1,10 +1,13 @@
 //! Demand-driven discovery, cursor retry, and visible Show more behavior.
 
 use super::*;
+use crate::app::agents_overview::tests::command_center;
+use crate::app::agents_overview::tests::finish_overview_refresh;
 use crate::app::agents_overview::tests::overview_thread;
 use crate::app::agents_overview_discovery::AgentsOverviewDiscovery;
 use crate::app_event::AgentsOverviewAction;
 use crate::app_server_session::ThreadParamsMode;
+use crate::bottom_pane::BottomPaneView;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::CloudClient;
 use codex_app_server_client::CloudOperation;
@@ -256,10 +259,10 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
     assert_eq!(app.agents_overview.threads, browse);
     view.handle_key_event(KeyCode::Char('/').into());
     view.handle_paste("TASK 22".into());
-    assert!(super::command_center::screen(&view, /*width*/ 100, /*height*/ 16).contains("All 10 "));
+    assert!(command_center::screen(&view, /*width*/ 100, /*height*/ 16).contains("All 10 "));
     finish_history_search(&mut app, &mut tui, &mut session, &mut rx).await?;
     view = app.agents_overview_view(browse_rows(), /*selected_thread_id*/ None);
-    let rendered = super::command_center::screen(&view, /*width*/ 100, /*height*/ 16);
+    let rendered = command_center::screen(&view, /*width*/ 100, /*height*/ 16);
     assert!(rendered.contains("All 11 "));
     assert!(rendered.contains("1 of 10"), "{rendered}"); // The pinned task has its own group.
     view.handle_key_event(KeyCode::Esc.into());
