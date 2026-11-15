@@ -179,7 +179,7 @@ async fn code_mode_model_output_uses_structured_host_timing(
     assert_eq!(host_fields["call_id"], "timed-call");
     assert_eq!(host_fields["tool_name"], tool_name);
     let handler_timing = app_server
-        .wait_for_json_log_event("codex.tool_call")
+        .wait_for_json_log_event("codex.tool_call", Duration::from_secs(30))
         .await?;
     let handler_fields = &handler_timing["fields"];
     let handler_duration_ms = handler_fields["handler_duration_ms"]
