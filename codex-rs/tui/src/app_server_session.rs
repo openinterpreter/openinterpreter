@@ -3338,6 +3338,7 @@ mod tests {
                 plan_type: codex_protocol::account::PlanType::Plus,
                 workspace_name: None,
             }),
+            user_id: None,
             requires_openai_auth: true,
         };
 
@@ -4891,20 +4892,23 @@ mod tests {
         config.personality = None;
 
         let implicit_overrides =
-            config_request_overrides_from_config(&config).expect("config overrides");
+            config_request_overrides_from_config(&config, ThreadParamsMode::Embedded)
+                .expect("config overrides");
 
         assert!(!implicit_overrides.contains_key("personality"));
 
         for personality in [Personality::Friendly, Personality::Pragmatic] {
             config.personality = Some(personality);
             let ordinary_overrides =
-                config_request_overrides_from_config(&config).expect("config overrides");
+                config_request_overrides_from_config(&config, ThreadParamsMode::Embedded)
+                    .expect("config overrides");
             assert!(!ordinary_overrides.contains_key("personality"));
         }
 
         config.personality = Some(Personality::None);
         let explicit_overrides =
-            config_request_overrides_from_config(&config).expect("config overrides");
+            config_request_overrides_from_config(&config, ThreadParamsMode::Embedded)
+                .expect("config overrides");
 
         assert_eq!(
             explicit_overrides.get("personality"),
@@ -4922,6 +4926,7 @@ mod tests {
                 mode,
                 /*remote_cwd_override*/ None,
                 ResumeModelSettings::OverrideFromCurrentConfig,
+                crate::resume_permissions::ResumePermissions::CURRENT_CONFIG,
             );
             let fork = thread_fork_params_from_config(
                 config.clone(),

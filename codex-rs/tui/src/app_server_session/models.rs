@@ -12,9 +12,33 @@ use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_protocol::openai_models::ModelPreset;
+use futures::FutureExt;
 use uuid::Uuid;
 
 impl AppServerSession {
+    /// Start discovery alongside startup's other read-only requests, without changing the
+    /// Cloud fallback semantics used when the server has no model/list method.
+    pub(crate) fn prefetch_model_list(&mut self) {
+        if self.thread_params_mode == ThreadParamsMode::Cloud {
+            // Cloud catalog requests remain deferred until the explicit picker refresh. A
+            // missing or delayed cloud model/list cannot block connection bootstrap.
+            let (request, models) = futures::future::ready(Ok(Vec::new())).remote_handle();
+            tokio::spawn(request);
+            self.prefetched_model_list = Some(models);
+            return;
+        }
+        let request_id = self.next_request_id();
+        let (request, models) = list(self.thread_params_mode, self.request_handle(), request_id)
+            .map(|result| {
+                result.map_err(|error| {
+                    super::bootstrap_request_error("model/list failed during TUI bootstrap", error)
+                })
+            })
+            .remote_handle();
+        tokio::spawn(request);
+        self.prefetched_model_list = Some(models);
+    }
+
     pub(crate) fn set_available_models(&mut self, models: Vec<ModelPreset>) {
         if let Some(default) = models
             .iter()
