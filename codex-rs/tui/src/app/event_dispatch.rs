@@ -49,9 +49,27 @@ impl App {
         app_server: &mut AppServerSession,
         event: AppEvent,
     ) -> Result<AppRunControl> {
+        // A picker event may be wrapped more than once. Unwrap before applying the ordinary
+        // ownership and availability guards so a scoped event cannot bypass them.
+        let mut event = event;
+        while let AppEvent::ScopedModelPicker {
+            backend,
+            thread_id,
+            event: next,
+        } = event
+        {
+            if backend != app_server.backend_id()
+                || thread_id != self.chat_widget.thread_id()
+                || self.chat_widget.model_catalog().provider_may_have_changed()
+            {
+                return Ok(AppRunControl::Continue);
+            }
+            event = *next;
+        }
         let from_agents_overview = matches!(event, AppEvent::ForkAgentsOverviewThreadReady { .. });
         let event = if let AppEvent::ForkAgentsOverviewThreadReady { thread_id } = event {
-            if self.current_displayed_thread_id() != Some(thread_id)
+            if self.backend_registry.owner(thread_id) != Some(app_server.backend_id())
+                || self.current_displayed_thread_id() != Some(thread_id)
                 || (self.thread_unavailable(thread_id)
                     && !self.chat_widget.is_external_writer_view())
             {
@@ -140,6 +158,7 @@ impl App {
                 AppEvent::OpenAgentPicker
                     | AppEvent::SelectAgentThread(_)
                     | AppEvent::StartSide { .. }
+                    | AppEvent::ForkAgentsOverviewThread { .. }
                     | AppEvent::ForkCurrentSession { .. }
                     | AppEvent::StartManagedWorktree {
                         mode: crate::app_event::ManagedWorktreeMode::Fork,
@@ -159,25 +178,6 @@ impl App {
         if matches!(event, AppEvent::OpenDaemonMenu | AppEvent::OpenWarnings) {
             self.verify_managed_daemon().await;
         }
-
-        // Keep the picker check and model update in one event without recursively polling this
-        // large dispatcher on the TUI thread's stack.
-        let event = match event {
-            AppEvent::ScopedModelPicker {
-                backend,
-                thread_id,
-                event,
-            } => {
-                if backend != app_server.backend_id()
-                    || thread_id != self.chat_widget.thread_id()
-                    || self.chat_widget.model_catalog().provider_may_have_changed()
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                *event
-            }
-            event => event,
-        };
 
         let (event, sparkle_model) = match event {
             AppEvent::AstraSelectedFromModelPicker {
@@ -714,6 +714,46 @@ impl App {
             }
             AppEvent::DeleteCurrentThread => {
                 return self.delete_current_thread(tui, app_server).await;
+            }
+            AppEvent::ForkAgentsOverviewThread { thread_id } => {
+                // Fork only from the selected task's own backend, never from whichever
+                // conversation happened to be displayed when the shortcut was pressed.
+                if self.backend_registry.owner(thread_id) != Some(app_server.backend_id()) {
+                    self.add_agents_overview_error(
+                        "Open this task before using that action.".into(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                }
+                if self.current_displayed_thread_id() != Some(thread_id) {
+                    // Cloud navigation is queued through ResumeBackendSession; the TUI loop
+                    // processes that event before this readiness check. A failed resume leaves
+                    // the old thread displayed, so the readiness guard rejects the fork.
+                    let queued_cloud_resume = app_server.thread_params_mode()
+                        == crate::app_server_session::ThreadParamsMode::Cloud
+                        && self
+                            .agents_overview
+                            .threads
+                            .get(&thread_id)
+                            .and_then(Option::as_ref)
+                            .or_else(|| self.agents_overview.search_matches.get(&thread_id))
+                            .is_some();
+                    let control = self
+                        .select_agents_overview_thread(tui, app_server, thread_id)
+                        .await?;
+                    if queued_cloud_resume
+                        || (self.current_displayed_thread_id() == Some(thread_id)
+                            && !self.thread_unavailable(thread_id))
+                    {
+                        self.app_event_tx
+                            .send(AppEvent::ForkAgentsOverviewThreadReady { thread_id });
+                    }
+                    return Ok(control);
+                }
+                self.app_event_tx
+                    .send(AppEvent::ForkAgentsOverviewThreadReady { thread_id });
+            }
+            AppEvent::ForkAgentsOverviewThreadReady { .. } | AppEvent::ScopedModelPicker { .. } => {
+                unreachable!("the event is normalized before dispatch")
             }
             AppEvent::ForkCurrentSession { name } => {
                 let from_locked_thread = self.chat_widget.is_external_writer_view();

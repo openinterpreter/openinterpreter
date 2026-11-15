@@ -12,6 +12,53 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn overview_fork_routes_only_a_locally_owned_displayed_thread() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let current = ThreadId::new();
+    app.enqueue_primary_thread_session(
+        test_thread_session(current, app.config.cwd.to_path_buf()),
+        Vec::new(),
+    )
+    .await?;
+    assert!(app.backend_registry.observe(server.backend_id(), current));
+    while events.try_recv().is_ok() {}
+
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::ForkAgentsOverviewThread { thread_id: current },
+    )
+    .await?;
+    assert!(matches!(
+        events.try_recv()?,
+        AppEvent::ForkAgentsOverviewThreadReady { thread_id } if thread_id == current
+    ));
+
+    let foreign = ThreadId::new();
+    assert!(app.backend_registry.observe(BackendId::new(), foreign));
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::ForkAgentsOverviewThread { thread_id: foreign },
+    )
+    .await?;
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::ForkAgentsOverviewThreadReady { thread_id: foreign },
+    )
+    .await?;
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .all(|event| !matches!(event, AppEvent::ForkAgentsOverviewThreadReady { .. }))
+    );
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
