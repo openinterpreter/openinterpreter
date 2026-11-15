@@ -806,7 +806,7 @@ async fn startup_draft_applies_paste_burst_preferences_without_losing_buffered_i
 #[tokio::test]
 async fn startup_draft_applies_super_editor_keymap_without_inserting_pending_newline() {
     let codex_home = tempfile::tempdir().expect("create temporary Codex home");
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await

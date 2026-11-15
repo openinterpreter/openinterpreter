@@ -264,6 +264,7 @@ async fn narrow_toolbar_keeps_keyboard_focused_control_visible() {
     for action in [SessionPickerAction::Resume, SessionPickerAction::Fork] {
         for (width, height) in [(38, 12), (24, 9)] {
             let mut state = PickerState::new(
+                crate::backend_id::BackendId::new(),
                 FrameRequester::test_dummy(),
                 Arc::new(|_| {}),
                 ProviderFilter::Any,

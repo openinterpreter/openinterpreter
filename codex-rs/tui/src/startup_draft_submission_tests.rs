@@ -140,6 +140,7 @@ async fn startup_submission_thread_change_preserves_only_editable_text() {
         codex_protocol::ThreadId::new(),
     ] {
         let selection = SessionSelection::Resume(crate::resume_picker::SessionTarget {
+            backend_id: crate::backend_id::BackendId::new(),
             path: None,
             thread_id: destination,
             cwd: None,

@@ -2902,6 +2902,7 @@ requires_openai_auth = {requires_openai_auth}
                 cwd: Some(session_cwd.clone()),
                 history_mode: None,
             };
+            let target_backend_id = target_session.backend_id;
             let session_selection = match action {
                 CwdPromptAction::Resume => resume_picker::SessionSelection::Resume(target_session),
                 CwdPromptAction::Fork => resume_picker::SessionSelection::Fork(target_session),
@@ -2909,7 +2910,7 @@ requires_openai_auth = {requires_openai_auth}
             let mut tui = tui::test_support::make_test_tui()?;
 
             let fallback_cwd = match resolve_startup_resume_or_fork_cwd(
-                target_session.backend_id,
+                target_backend_id,
                 &mut tui,
                 &config,
                 /*app_server*/ None,

@@ -103,7 +103,7 @@ stream_max_retries = 0
         .await?;
     tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 30), async {
         while let Some(event) = app_server.next_event().await {
-            if let AppServerEvent::ServerNotification(notification) = event
+            if let AppServerEvent::ServerNotification(notification) = event.event
                 && let ServerNotification::TurnCompleted(completed) = *notification
             {
                 assert_eq!(

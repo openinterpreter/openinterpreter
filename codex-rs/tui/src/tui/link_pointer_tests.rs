@@ -63,7 +63,7 @@ fn capture_release_restores_pointer_even_after_moving_off_link() {
         screen.set_pointer_shape(&mut output, Link).unwrap();
         screen.set_pointer_shape(&mut output, shape).unwrap();
         output.clear();
-        screen.release_input(&mut output).unwrap();
+        screen.leave(&mut output).unwrap();
         let expected = if codex_terminal_detection::terminal_info().name == TerminalName::Kitty {
             b"\x1b]22;\x1b\\".as_slice()
         } else {

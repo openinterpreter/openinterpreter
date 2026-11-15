@@ -12,11 +12,7 @@ fn owned_startup_keeps_the_live_bottom_geometry() {
         ("Waiting for startup".into(), String::new()),
         ("esc".into(), "cancel".into()),
     ]));
-    let layout = OwnedStartupLayout::new(
-        &pump.header,
-        &pump.bottom_pane,
-        StartupDraftSessionAction::New,
-    );
+    let layout = OwnedStartupLayout::new(&pump);
     let area = Rect::new(
         /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 16,
     );
