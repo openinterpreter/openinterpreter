@@ -4,6 +4,7 @@ mod archived_thread_tests;
 use super::*;
 use crate::app::session_lifecycle::FreshSessionStart;
 use crate::app_event::TranscriptExportDestination;
+use crate::app_server_session::SideChatStorage;
 use crate::bottom_pane::BottomPaneView;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
@@ -3870,8 +3871,6 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     let exported = crate::app::transcript_export::load_export_transcript(
         &mut app_server,
         paginated_thread_id,
-        /*selected_profile*/ None,
-        SideChatStorage::Temporary,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
         vec![Arc::new(PlainHistoryCell::new(vec!["visible".into()]))],
@@ -4301,6 +4300,8 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         &crate::local_settings::LocalSettings::from(&side_config),
         side_config,
         paginated_thread_id,
+        /*selected_profile*/ None,
+        SideChatStorage::Temporary,
     ))
     .await?;
 

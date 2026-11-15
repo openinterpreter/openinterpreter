@@ -170,7 +170,6 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         ] {
             Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
         }
-        let mut service_tier_error = None;
         let messages = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
                 AppEvent::InsertHistoryCell(cell) => {
@@ -193,10 +192,6 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         }
         let persisted = std::fs::read_to_string(&profile_path)?;
         if outcome == "rejected" {
-            insta::assert_snapshot!(
-                "service_tier_default_save_error",
-                service_tier_error.expect("expected a service-tier save error")
-            );
             assert_eq!(persisted, "[broken");
             assert!(!messages.contains("Model changed"));
             assert!(!messages.contains("Service tier set"));

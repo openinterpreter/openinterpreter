@@ -12,6 +12,7 @@ use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_event_sender::AppEventSender;
+use crate::app_server_session::AppServerSessionEvent;
 use crate::app_server_session::ResumeModelSettings;
 use crate::chatwidget::tests::helpers::normalize_snapshot_paths;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
@@ -241,6 +242,7 @@ enum TitleScenario {
 }
 
 async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::Result<()> {
+    let user_message = "Fix the login timeout";
     let automatic = !matches!(scenario, TitleScenario::Suggestion);
     let cancel = matches!(
         scenario,
@@ -357,7 +359,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
 
     enum TitleDriveEvent {
         Ui(Box<AppEvent>),
-        Server(AppServerEvent),
+        Server(AppServerSessionEvent),
         RequestStarted,
     }
 
@@ -390,7 +392,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
                 app.handle_event(&mut tui, &mut app_server, *event).await?;
             }
             TitleDriveEvent::Server(event) => {
-                if let AppServerEvent::ServerNotification(notification) = &event
+                if let AppServerEvent::ServerNotification(notification) = &event.event
                     && let ServerNotification::ThreadStarted(started) = notification.as_ref()
                     && started.thread.ephemeral
                 {
@@ -399,7 +401,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
                         Some(ThreadSource::Feature("thread_title".to_string())),
                     );
                 }
-                if let AppServerEvent::ServerNotification(notification) = &event
+                if let AppServerEvent::ServerNotification(notification) = &event.event
                     && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
                     && Some(&completed.thread_id) == temporary_thread_id.as_ref()
                 {
@@ -513,10 +515,12 @@ async fn canceled_thread_title_ignores_late_start_and_completion() -> color_eyre
     app.pending_thread_titles
         .insert((thread_id, destination), replacement.clone());
     app.on_thread_title_started(
-        &app_server,
+        &mut app_server,
         thread_id,
         destination,
         "prompt".to_string(),
+        /*expected_name*/ None,
+        /*fallback_title*/ None,
         /*effort*/ None,
         Ok(temporary_thread_id.to_string()),
         cancellation.clone(),
@@ -826,6 +830,7 @@ async fn failed_thread_title_requests_are_removed() -> color_eyre::Result<()> {
         thread_id,
         ThreadTitleDestination::Automatic,
         "prompt".to_string(),
+        /*expected_name*/ None,
         /*fallback_title*/ None,
         /*effort*/ None,
         Err("startup failed".to_string()),
@@ -837,6 +842,7 @@ async fn failed_thread_title_requests_are_removed() -> color_eyre::Result<()> {
         thread_id,
         suggestion,
         "prompt".to_string(),
+        /*expected_name*/ None,
         /*fallback_title*/ None,
         /*effort*/ None,
         Ok("invalid-thread-id".to_string()),

@@ -67,13 +67,14 @@ pub(super) fn select_catalog_tip(app: &mut App, width: u16, expected: &str) {
 }
 
 pub(crate) async fn make_test_app() -> App {
-    let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let (mut chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+    let test_codex_home = chat_widget.test_codex_home.take();
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
     let model = get_model_offline_for_tests(config.model.as_deref());
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
-    Box::new(App {
+    App {
         provider_writes: HashMap::new(),
         feature_write_lock: Arc::default(),
         config_notification_test_generation: 0,
@@ -106,7 +107,9 @@ pub(crate) async fn make_test_app() -> App {
         transcript_cells: Vec::new(),
         composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
         native_history: Default::default(),
+        turn_tips: Default::default(),
         transcript_view: Default::default(),
+        conversation_frame: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,
@@ -151,6 +154,8 @@ pub(crate) async fn make_test_app() -> App {
         pending_realtime_speech_replay: HashMap::new(),
         pending_realtime_transcript_replay: HashMap::new(),
         realtime_replay_order: VecDeque::new(),
+        background_voice: None,
+        background_voice_error: None,
         temporary_structured_requests: HashMap::new(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
@@ -195,7 +200,7 @@ pub(crate) async fn make_test_app() -> App {
         pending_hook_enabled_writes: HashMap::new(),
         recap: recap::RecapState::default(),
         _test_codex_home: test_codex_home,
-    })
+    }
 }
 
 fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {

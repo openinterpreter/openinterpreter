@@ -22,7 +22,7 @@ use crossterm::event::MouseEventKind::Up;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 
-fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
+pub(crate) fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
         spoken: false,
         async_replies: None,
@@ -56,7 +56,6 @@ pub(crate) fn attach_thread(app: &mut App, thread_id: ThreadId) {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -107,9 +106,10 @@ async fn list_spacing_completion_preserves_the_scrolled_reader() -> Result<()> {
     assert!(buffer_text(&before).contains("- c"));
     app.handle_consolidate_agent_message(
         &mut tui,
-        "- First item wraps onto a second row\n- b\n- c".into(),
-        app.config.cwd.to_path_buf(),
-        /*inline_visualization_context*/ None,
+        crate::history_cell::AgentMarkdownCell::new(
+            "- First item wraps onto a second row\n- b\n- c".into(),
+            app.config.cwd.as_path(),
+        ),
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;
@@ -827,7 +827,7 @@ async fn find_owns_editor_chords_without_changing_the_composer_draft() -> Result
         )
         .await?;
         assert!(!match &app.overlay {
-            Some(Overlay::Transcript(overlay)) => overlay.is_search_active(),
+            Some(Overlay::Transcript(overlay)) => overlay.is_search_editing(),
             _ => app.transcript_view.is_search_active(),
         });
         assert_eq!(
@@ -956,7 +956,7 @@ async fn offline_backtrack_keeps_the_preview_and_draft_without_reverting() -> Re
         assert!(if owned {
             app.transcript_view.is_search_active()
         } else {
-            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_active())
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_editing())
         });
         for (key, preview_active, draft) in [
             (KeyCode::Esc, true, "offline draft"),

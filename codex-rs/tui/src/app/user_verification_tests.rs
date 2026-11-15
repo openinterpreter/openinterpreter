@@ -175,7 +175,7 @@ async fn run_verification_rpc_scenario(scenario: RpcScenario) -> color_eyre::Res
     } else {
         crate::app_server_session::ThreadParamsMode::Embedded
     };
-    let mut session = AppServerSession::new(client, mode);
+    let mut session = AppServerSession::new(crate::backend_id::BackendId::new(), client, mode);
     let approval = if scenario == RpcScenario::RemoteWorkspace {
         event_rx.recv().await.expect("approval event")
     } else {

@@ -1445,7 +1445,7 @@ mod tests {
         assert!(!app_server_requests_feedback_passcode(false, &required));
         assert!(!app_server_requests_feedback_passcode(
             true,
-            &Err("feedback endpoint rejected upload with HTTP status 403".to_string())
+            &Err::<(), _>("feedback endpoint rejected upload with HTTP status 403".to_string())
         ));
         assert!(!app_server_requests_feedback_passcode(
             true,

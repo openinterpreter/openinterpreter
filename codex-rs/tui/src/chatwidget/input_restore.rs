@@ -22,6 +22,10 @@ impl ChatWidget {
         self.bottom_pane.composer_draft_snapshot()
     }
 
+    pub(crate) fn set_composer_cursor(&mut self, cursor: usize) {
+        self.bottom_pane.set_composer_cursor(cursor);
+    }
+
     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
         self.bottom_pane.take_kill_buffer_snapshot()
     }

@@ -5,6 +5,7 @@ use crate::app::backend_sessions::InitialBackendSessions;
 use crate::app::startup::prepare_fresh_startup_config;
 use crate::app::startup::startup_model;
 use crate::app::startup_bootstrap::bootstrap_server_owned_start;
+use codex_protocol::config_types::ModeKind;
 use pretty_assertions::assert_eq;
 
 fn remote_target() -> AppServerTarget {
@@ -16,7 +17,7 @@ fn remote_target() -> AppServerTarget {
     }
 }
 
-pub(super) async fn run_startup_for_test(
+pub(in crate::app) async fn run_startup_for_test(
     tui: &mut crate::tui::Tui,
     initial_backends: InitialBackendSessions,
     config: Config,
@@ -54,7 +55,6 @@ pub(super) async fn run_startup_for_test(
         bootstrap,
         /*startup_hooks_browser*/ None,
         /*daemon_startup_warning*/ None,
-        /*managed_daemon*/ false,
         crate::startup_draft::tests::quiet_startup_test_pump(),
         /*managed_worktree*/ None,
         /*daemon_cli_executable*/ None,

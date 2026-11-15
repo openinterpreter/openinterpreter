@@ -7,6 +7,7 @@ use super::rate_limit_refresh::RateLimitReadStatus;
 use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
+use super::side_companion::SideAnswer;
 use super::*;
 use crate::app_event::CapturedSideStream;
 use crate::app_event::KimiCodeLoginOutcome;
@@ -1091,11 +1092,15 @@ impl App {
                         .sync_history_tail(&self.transcript_cells);
                     if let Some(stream) = stream {
                         let cells = &mut self.transcript_cells;
+                        let mut answer = None;
                         let (start, replacement): (_, Arc<dyn HistoryCell>) = match stream {
-                            CapturedSideStream::Answer(cell) => (
-                                trailing_run_start::<history_cell::AgentMessageCell>(cells),
-                                cell,
-                            ),
+                            CapturedSideStream::Answer { cell, item } => {
+                                answer = item;
+                                (
+                                    trailing_run_start::<history_cell::AgentMessageCell>(cells),
+                                    cell,
+                                )
+                            }
                             CapturedSideStream::Plan(cell) => (
                                 trailing_run_start::<history_cell::ProposedPlanStreamCell>(cells),
                                 cell,
@@ -1105,15 +1110,31 @@ impl App {
                         self.transcript_view
                             .replace_group(cells, range.clone(), &replacement);
                         cells.splice(range, [replacement]);
+                        let parked_tail = cells.len();
+                        let answer = answer.map(|item| SideAnswer::new(item, parked_tail - 1));
+                        self.side_companions.insert(
+                            thread_id,
+                            SideCompanion {
+                                display,
+                                cells: std::mem::take(cells),
+                                view: std::mem::take(&mut self.transcript_view),
+                                answer,
+                                parked_tail,
+                            },
+                        );
+                    } else {
+                        let parked_tail = self.transcript_cells.len();
+                        self.side_companions.insert(
+                            thread_id,
+                            SideCompanion {
+                                display,
+                                cells: std::mem::take(&mut self.transcript_cells),
+                                view: std::mem::take(&mut self.transcript_view),
+                                answer: None,
+                                parked_tail,
+                            },
+                        );
                     }
-                    self.side_companions.insert(
-                        thread_id,
-                        SideCompanion {
-                            display,
-                            cells: std::mem::take(&mut self.transcript_cells),
-                            view: std::mem::take(&mut self.transcript_view),
-                        },
-                    );
                 }
             }
             AppEvent::ResetTranscriptForThreadSwitch => {
@@ -1140,14 +1161,12 @@ impl App {
                         self.chat_widget.active_cell_transcript_key(),
                     );
                     self.scrollback_has_older_history = app_server.has_older_history(id);
-                    if self.transcript_view.history == TranscriptHistoryState::LoadingOlder
-                        && app_server.pending_older_history_cursor(id).is_none()
-                    {
-                        self.transcript_view.history = if self.scrollback_has_older_history {
-                            TranscriptHistoryState::Partial
+                    if self.transcript_view.history == TranscriptHistoryState::LoadingOlder {
+                        if self.scrollback_has_older_history {
+                            self.request_older_history_page(app_server, id);
                         } else {
-                            TranscriptHistoryState::Complete
-                        };
+                            self.transcript_view.history = TranscriptHistoryState::Complete;
+                        }
                     }
                     tui.frame_requester().schedule_frame();
                 }
@@ -2591,7 +2610,7 @@ impl App {
                 return Ok(control);
             }
             AppEvent::VoiceControl { thread_id, control } => {
-                if self.chat_widget.thread_id() == Some(thread_id)
+                if self.chat_widget.thread_id() == thread_id
                     || self.voice_owner_thread_id().is_some()
                 {
                     self.control_voice(control);
@@ -3531,12 +3550,20 @@ impl App {
                     && self.chat_widget.thread_id() == Some(thread_id)
                     && app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
                 {
-                    if !self
-                        .chat_widget
-                        .current_model_service_tier_commands()
-                        .iter()
-                        .any(|command| command.id == tier)
-                    {
+                    let tier_supported =
+                        self.model_catalog
+                            .try_list_models()
+                            .ok()
+                            .is_some_and(|models| {
+                                models.into_iter().any(|model| {
+                                    model.model == self.chat_widget.current_model()
+                                        && model.service_tiers.into_iter().any(|available| {
+                                            available.id == tier
+                                                && self.config.features.service_tier_enabled(&tier)
+                                        })
+                                })
+                            });
+                    if !tier_supported {
                         self.chat_widget.add_error_message(
                             "The selected Cloud model does not support that speed.".into(),
                         );
