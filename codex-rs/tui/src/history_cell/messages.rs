@@ -152,6 +152,11 @@ fn build_user_message_lines_with_elements(
 }
 
 impl UserHistoryCell {
+    pub(crate) fn uses_markdown(&self) -> bool {
+        // Inline text-element ranges refer to the literal prompt, not rendered Markdown.
+        !self.spoken && self.text_elements.is_empty()
+    }
+
     pub(crate) fn has_visible_content(&self) -> bool {
         !sanitize_user_text(Cow::Borrowed(&self.message))
             .trim()

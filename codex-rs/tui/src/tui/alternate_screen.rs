@@ -32,6 +32,7 @@ mod windows_tests;
 pub(super) static ALTERNATE_SCREEN: AlternateScreen = AlternateScreen {
     active: AtomicBool::new(/*v*/ false),
     mouse_active: AtomicBool::new(/*v*/ false),
+    link_pointer: super::link_pointer::LinkPointer::new(),
     input_configured: AtomicBool::new(/*v*/ false),
 };
 
@@ -39,6 +40,7 @@ pub(super) static ALTERNATE_SCREEN: AlternateScreen = AlternateScreen {
 pub(super) struct AlternateScreen {
     active: AtomicBool,
     mouse_active: AtomicBool,
+    link_pointer: super::link_pointer::LinkPointer,
     // A cleanup/setup error must not make the next identical request look already applied.
     input_configured: AtomicBool,
 }
@@ -63,6 +65,19 @@ impl Command for EnablePointerCapture {
 }
 
 impl AlternateScreen {
+    pub(super) fn set_pointer_shape(
+        &self,
+        writer: &mut impl Write,
+        shape: super::link_pointer::PointerShape,
+    ) -> Result<()> {
+        if self.mouse_active.load(Ordering::Relaxed) {
+            self.link_pointer.update(writer, shape)
+        } else {
+            self.link_pointer
+                .restore(writer, codex_terminal_detection::terminal_info().name)
+        }
+    }
+
     pub(super) fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
     }
@@ -99,6 +114,9 @@ impl AlternateScreen {
     }
 
     fn disable_mouse(&self, writer: &mut impl Write) -> Result<()> {
+        let pointer_result = self
+            .link_pointer
+            .restore(writer, codex_terminal_detection::terminal_info().name);
         if self.mouse_active.load(Ordering::Relaxed) {
             let result = execute!(writer, DisableMouseCapture);
             if result.is_err() {
@@ -119,7 +137,7 @@ impl AlternateScreen {
 
             self.mouse_active.store(/*val*/ false, Ordering::Relaxed);
         }
-        Ok(())
+        pointer_result
     }
 
     pub(super) fn leave(&self, writer: &mut impl Write) -> Result<()> {

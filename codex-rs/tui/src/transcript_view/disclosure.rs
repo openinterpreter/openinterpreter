@@ -19,6 +19,9 @@ use super::*;
 pub(super) struct Disclosure {
     pub(super) expanded: HashSet<String>,
     pub(super) focused: Option<Vec<String>>,
+    pub(super) resume_after_approval: Option<(codex_protocol::ThreadId, String)>,
+    pub(super) anchor_control: Option<EntryKey>,
+    pub(super) clamp_after_collapse: bool,
     pub(super) live_ids: Vec<String>,
     pub(super) keymap: RuntimeKeymap,
 }
@@ -28,6 +31,9 @@ impl Default for Disclosure {
         Self {
             expanded: HashSet::new(),
             focused: None,
+            resume_after_approval: None,
+            anchor_control: None,
+            clamp_after_collapse: false,
             live_ids: Vec::new(),
             keymap: RuntimeKeymap::defaults(),
         }
@@ -41,6 +47,18 @@ impl Disclosure {
 }
 
 impl TranscriptView {
+    /// Return to follow mode once the approval that pinned the patch has closed.
+    pub(crate) fn sync_patch_approval(
+        &mut self,
+        current: Option<(codex_protocol::ThreadId, &str)>,
+    ) {
+        if let Some((thread_id, id)) = &self.disclosure.resume_after_approval
+            && current != Some((*thread_id, id.as_str()))
+        {
+            self.jump_to_latest();
+        }
+    }
+
     pub(crate) fn is_activity_focused(&self) -> bool {
         self.disclosure.focused.is_some() && !self.detailed && self.mode == HistoryRenderMode::Rich
     }
@@ -317,8 +335,16 @@ impl TranscriptView {
         if ids.is_empty() {
             return;
         }
+        let key = cells.get(index).map_or(EntryKey::Live, EntryKey::cell);
+        self.disclosure.anchor_control = None;
         let previous_top = self.visible.first().map(|visible| {
             let offset = visible.layout.position_at(visible.row, /*column*/ 0);
+            if visible.key == key
+                && visible.layout.disclosure_row() == Some(visible.row)
+                && visible.activity_ids.iter().any(|id| ids.contains(id))
+            {
+                self.disclosure.anchor_control = Some(key);
+            }
             (
                 visible.key,
                 Arc::clone(&visible.activity_ids),
@@ -349,8 +375,10 @@ impl TranscriptView {
                 row_bias: 0,
             });
         if self.disclosure.is_expanded(&ids) {
+            self.disclosure.clamp_after_collapse = true;
             self.disclosure.expanded.retain(|id| !ids.contains(id));
         } else {
+            self.disclosure.clamp_after_collapse = false;
             self.disclosure.expanded.extend(ids.iter().cloned());
         }
         self.disclosure.focused = Some(ids);

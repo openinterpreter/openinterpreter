@@ -10,8 +10,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub(super) struct CopyFeedback {
-    result: Result<CopyStatus, ()>,
-    characters: usize,
+    pub(super) result: Result<CopyStatus, ()>,
+    pub(super) characters: usize,
     expires_at: Instant,
 }
 
@@ -90,6 +90,16 @@ impl CopyFeedback {
                 "Copy sent to terminal · paste to verify".into(),
                 "Copy sent · verify paste".into(),
                 "Copy unconfirmed".into(),
+            ],
+            Ok(CopyStatus::Pending(_)) => [
+                "Copy in progress…".into(),
+                "Copy pending".into(),
+                "Copying".into(),
+            ],
+            Ok(CopyStatus::Busy) => [
+                "Clipboard busy · try again".into(),
+                "Clipboard busy".into(),
+                "Busy".into(),
             ],
             Err(()) => [
                 "Copy failed · try again".into(),

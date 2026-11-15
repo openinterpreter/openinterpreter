@@ -84,9 +84,8 @@ impl Tui {
     }
 
     pub(crate) fn copy_transcript_selection(&mut self, text: &str) -> Result<CopyStatus, String> {
-        self.copy_transcript_selection_with(text, |text| {
-            crate::clipboard_copy::copy_to_clipboard(text, CopyFormat::PlainText)
-        })
+        self.copy_selection(text, CopyFormat::PlainText, SelectionCopy::EXPLICIT, text)
+            .0
     }
 
     fn copy_transcript_selection_with(

@@ -62,6 +62,10 @@ impl FinalMessageSeparator {
         self.completed_at.is_some() || self.elapsed_seconds.is_some()
     }
 
+    pub(crate) fn display_label(&self) -> Option<String> {
+        self.label(self.display_date)
+    }
+
     /// Creates completion metadata using the protocol turn duration when available.
     pub(crate) fn new(
         elapsed_seconds: Option<u64>,

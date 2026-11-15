@@ -125,6 +125,7 @@ impl Renderable for AgentsOverviewView {
             self.center_filter_hint()
         };
         let grouping = match state.grouping {
+            AgentsOverviewGrouping::Directory => "Directory",
             AgentsOverviewGrouping::Project => "Project",
             AgentsOverviewGrouping::Status => "Status",
             AgentsOverviewGrouping::Model => "Model",

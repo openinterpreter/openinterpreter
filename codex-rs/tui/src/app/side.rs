@@ -67,6 +67,7 @@ impl SideParentStatus {
             | ServerRequest::ExecCommandApproval { .. } => Some(SideParentStatus::NeedsApproval),
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
+            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
         }
     }
@@ -787,7 +788,7 @@ impl App {
             self.local_settings.clone(),
             self.side_fork_config(),
             parent_thread_id,
-            self.selected_server_profile(parent_thread_id),
+            self.confirmed_server_profile(parent_thread_id),
             if workspace && app_server.can_list_saved_side_chats(parent_thread_id) {
                 SideChatStorage::Attached
             } else {

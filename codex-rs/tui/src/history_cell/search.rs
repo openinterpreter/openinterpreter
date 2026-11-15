@@ -76,6 +76,10 @@ impl WebSearchCell {
         self.completed = true;
     }
 
+    pub(crate) fn is_completed(&self) -> bool {
+        self.completed
+    }
+
     fn summary(&self) -> Line<'static> {
         let detail = web_search_detail(self.action.as_ref(), &self.query);
         let (header, separator) = match (&self.action, self.completed) {
