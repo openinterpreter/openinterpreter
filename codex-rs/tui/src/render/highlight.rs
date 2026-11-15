@@ -342,19 +342,23 @@ pub(crate) fn diff_scope_backgrounds() -> DiffScopeBackgrounds {
 /// Pure extraction helper, separated from the global theme singleton so tests
 /// can pass arbitrary themes.
 fn diff_scope_backgrounds_for_theme(theme: &Theme) -> DiffScopeBackgrounds {
-    foreground_color_for_scopes(&Highlighter::new(theme), scope_names)
-        .map(|fg| Style::default().fg(fg))
+    let highlighter = Highlighter::new(theme);
+    let inserted = scope_background(&highlighter, "markup.inserted")
+        .or_else(|| scope_background(&highlighter, "diff.inserted"));
+    let deleted = scope_background(&highlighter, "markup.deleted")
+        .or_else(|| scope_background(&highlighter, "diff.deleted"));
+    DiffScopeBackgrounds { inserted, deleted }
 }
 
 pub(crate) fn foreground_color_for_scopes(
     highlighter: &Highlighter<'_>,
     scope_names: &[&str],
 ) -> Option<RtColor> {
-    let inserted = scope_background(&highlighter, "markup.inserted")
-        .or_else(|| scope_background(&highlighter, "diff.inserted"));
-    let deleted = scope_background(&highlighter, "markup.deleted")
-        .or_else(|| scope_background(&highlighter, "diff.deleted"));
-    DiffScopeBackgrounds { inserted, deleted }
+    scope_names.iter().find_map(|scope_name| {
+        let scope = Scope::new(scope_name).ok()?;
+        let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
+        convert_syntect_color(foreground)
+    })
 }
 
 /// Extract the background color for a single TextMate scope, if defined.
@@ -382,12 +386,8 @@ pub(crate) fn foreground_style_for_scopes_with_theme(
     theme: &Theme,
     scope_names: &[&str],
 ) -> Option<Style> {
-    let highlighter = Highlighter::new(theme);
-    scope_names.iter().find_map(|scope_name| {
-        let scope = Scope::new(scope_name).ok()?;
-        let fg = highlighter.style_mod_for_stack(&[scope]).foreground?;
-        convert_syntect_color(fg)
-    })
+    foreground_color_for_scopes(&Highlighter::new(theme), scope_names)
+        .map(|foreground| Style::default().fg(foreground))
 }
 
 /// Return the configured kebab-case theme name when it resolves; otherwise
