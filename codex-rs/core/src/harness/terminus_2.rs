@@ -1,6 +1,6 @@
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
-use crate::client_common::ResponseStream;
+use crate::client_common::SamplingStream;
 use codex_chat_wire_compat::ToolKinds;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -57,18 +57,22 @@ pub(crate) fn build_request(
 }
 
 pub(crate) fn inject_action_calls(
-    stream: ResponseStream,
+    stream: SamplingStream,
     request_kind: Terminus2RequestKind,
     pending_completion: bool,
-) -> ResponseStream {
+) -> SamplingStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
     let mut stream = stream;
     let routing_affinity = stream.routing_affinity.take();
     let interrupt = stream.interrupt.take();
+    let settlement_started = stream.settlement_started.clone();
 
     tokio::spawn(async move {
-        while let Some(event) = stream.next().await {
-            let harness_items = match &event {
+        while let Some(event) = tokio::select! {
+            _ = tx_event.closed() => return,
+            event = stream.next() => event,
+        } {
+            let harness_items = match &event.event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
                     role, content, ..
                 })) if role == "assistant" => plain_text_content(content)
@@ -86,7 +90,7 @@ pub(crate) fn inject_action_calls(
 
             for item in harness_items {
                 if tx_event
-                    .send(Ok(ResponseEvent::OutputItemDone(item)))
+                    .send(Ok(ResponseEvent::OutputItemDone(item)).into())
                     .await
                     .is_err()
                 {
@@ -96,11 +100,12 @@ pub(crate) fn inject_action_calls(
         }
     });
 
-    ResponseStream {
+    SamplingStream {
         routing_affinity,
         rx_event,
         interrupt,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
+        settlement_started,
     }
 }
 

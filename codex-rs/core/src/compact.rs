@@ -7,6 +7,7 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
+use crate::client_common::SamplingEvent;
 use crate::compact_pending_input::is_retained_pending_mail;
 use crate::compact_remote_v2::retained_client_items;
 use crate::context::BaseInstructionsFragment;
@@ -252,6 +253,8 @@ async fn run_compact_task_inner(
             CompactionAnalyticsDetails::default(),
         )
         .await;
+    // Keep an installed checkpoint and its analytics; stop before continuing the turn.
+    let result = result.and_then(|_| sess.check_rollout_budget());
     if let Err(err) = &result
         && !matches!(phase, CompactionPhase::PostTurn)
         && !matches!(
@@ -266,7 +269,7 @@ async fn run_compact_task_inner(
             sess.send_event(&turn_context, event).await;
         }
     }
-    result.map(|_| ())
+    result
 }
 
 async fn run_compact_task_inner_impl(
@@ -901,8 +904,8 @@ async fn drain_to_completed(
         .await??;
     let mut output = Vec::new();
     loop {
-        let maybe_event = stream.next_for_turn(cancellation).await;
-        let Some(event) = maybe_event else {
+        let Some(SamplingEvent { event, hook_output }) = stream.next_for_turn(cancellation).await
+        else {
             return Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
             ));
@@ -947,7 +950,10 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(
                     turn_context,
-                    token_usage.as_ref(),
+                    crate::client_common::SamplingUsage {
+                        provider: token_usage,
+                        charge: hook_output,
+                    },
                     includes_reasoning,
                 )
                 .await?;
@@ -963,6 +969,7 @@ async fn drain_to_completed(
                         turn_context,
                         &turn_context.initial_settings,
                         incomplete,
+                        hook_output,
                     )
                     .await;
                     sess.send_token_count_event(turn_context).await;

@@ -16,7 +16,6 @@ use codex_tools::Harness;
 use serde_json::Value;
 
 use crate::client_common::Prompt;
-use crate::client_common::ResponseStream;
 use crate::harness::deepseek_tui::build_request as build_deepseek_tui_request;
 use crate::harness::guidance::guidance_for_harness;
 use crate::harness::kimi_cli::build_request as build_kimi_cli_request;
@@ -212,9 +211,9 @@ pub(crate) fn build_chat_harness_request(
 }
 
 pub(crate) fn apply_chat_harness_postprocess(
-    stream: ResponseStream,
+    stream: crate::client_common::SamplingStream,
     postprocess: ChatHarnessPostprocess,
-) -> ResponseStream {
+) -> crate::client_common::SamplingStream {
     match postprocess {
         ChatHarnessPostprocess::None => stream,
         ChatHarnessPostprocess::MiniSweAgentNoToolCallFormatError => {

@@ -1,6 +1,9 @@
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+#[cfg(test)]
 use crate::client_common::ResponseStream;
+use crate::client_common::SamplingEvent;
+use crate::client_common::SamplingStream;
 use crate::event_mapping::is_contextual_dev_fragment;
 use crate::event_mapping::is_contextual_user_message_content;
 use codex_chat_wire_compat::ToolKinds;
@@ -23,16 +26,21 @@ const MINI_SWE_AGENT_SYSTEM_PROMPT: &str =
     "You are a helpful assistant that can interact with a computer.";
 const MINI_SWE_AGENT_NO_TOOL_CALL_ERROR: &str = "Tool call error:\n\n<error>\nNo tool calls found in the response. Every response MUST include at least one tool call.\n</error>\n\nHere is general guidance on how to submit correct toolcalls:\n\nEvery response needs to use the 'bash' tool at least once to execute commands.\n\nCall the bash tool with your command as the argument:\n- Tool: bash\n- Arguments: {\"command\": \"your_command_here\"}\n\nIf you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`\nwithout any other command.";
 
-pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> ResponseStream {
+pub(crate) fn inject_no_tool_call_format_error(mut stream: SamplingStream) -> SamplingStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
+    let settlement_started = stream.settlement_started.clone();
+    let routing_affinity = stream.routing_affinity.take();
+    let interrupt = stream.interrupt.take();
 
     tokio::spawn(async move {
-        let mut stream = stream;
         let mut saw_assistant_message = false;
         let mut saw_tool_call = false;
-        let mut buffered_events: Vec<codex_protocol::error::Result<ResponseEvent>> = Vec::new();
-        while let Some(event) = stream.next().await {
-            match &event {
+        let mut buffered_events: Vec<SamplingEvent> = Vec::new();
+        while let Some(event) = tokio::select! {
+            _ = tx_event.closed() => return,
+            event = stream.next() => event,
+        } {
+            match &event.event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }))
                     if role == "assistant" =>
                 {
@@ -48,17 +56,20 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                 Ok(ResponseEvent::Completed { .. }) => {
                     if saw_assistant_message && !saw_tool_call {
                         if tx_event
-                            .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-                                id: None,
-                                encrypted_content: None,
-                                status: None,
-                                role: "user".to_string(),
-                                content: vec![ContentItem::InputText {
-                                    text: MINI_SWE_AGENT_NO_TOOL_CALL_ERROR.to_string(),
-                                }],
-                                phase: None,
-                                internal_chat_message_metadata_passthrough: None,
-                            })))
+                            .send(
+                                Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                                    id: None,
+                                    encrypted_content: None,
+                                    status: None,
+                                    role: "user".to_string(),
+                                    content: vec![ContentItem::InputText {
+                                        text: MINI_SWE_AGENT_NO_TOOL_CALL_ERROR.to_string(),
+                                    }],
+                                    phase: None,
+                                    internal_chat_message_metadata_passthrough: None,
+                                }))
+                                .into(),
+                            )
                             .await
                             .is_err()
                         {
@@ -100,11 +111,11 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                 | Err(_) => {}
             }
 
-            if event.is_err() {
+            if event.event.is_err() {
                 let _ = tx_event.send(event).await;
                 return;
             }
-            let is_completed = matches!(event, Ok(ResponseEvent::Completed { .. }));
+            let is_completed = matches!(&event.event, Ok(ResponseEvent::Completed { .. }));
             if is_completed {
                 if tx_event.send(event).await.is_err() {
                     return;
@@ -116,11 +127,12 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
         }
     });
 
-    ResponseStream {
+    SamplingStream {
         rx_event,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
-        interrupt: None,
-        routing_affinity: None,
+        interrupt,
+        routing_affinity,
+        settlement_started,
     }
 }
 
@@ -838,10 +850,9 @@ mod tests {
             .expect("send completed");
         drop(tx_event);
 
-        let mut stream = inject_no_tool_call_format_error(ResponseStream {
-            rx_event,
-            consumer_dropped: tokio_util::sync::CancellationToken::new(),
-        });
+        let mut stream = ResponseStream(inject_no_tool_call_format_error(
+            ResponseStream::from_raw_parts(rx_event, None, None).0,
+        ));
         assert!(matches!(
             stream.next().await,
             Some(Ok(ResponseEvent::Created { .. }))
@@ -919,10 +930,9 @@ mod tests {
             .expect("send completed");
         drop(tx_event);
 
-        let mut stream = inject_no_tool_call_format_error(ResponseStream {
-            rx_event,
-            consumer_dropped: tokio_util::sync::CancellationToken::new(),
-        });
+        let mut stream = ResponseStream(inject_no_tool_call_format_error(
+            ResponseStream::from_raw_parts(rx_event, None, None).0,
+        ));
         assert!(matches!(
             stream.next().await,
             Some(Ok(ResponseEvent::Created { .. }))

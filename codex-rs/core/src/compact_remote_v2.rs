@@ -7,11 +7,13 @@ use crate::compact_retained_tool_outputs::is_retained_tool_output;
 use crate::session::FileAudioDurations;
 
 use crate::Prompt;
-use crate::ResponseStream;
 use crate::client::ModelClientSession;
 use crate::client::ResponsesHttpExecutor;
 use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
+use crate::client_common::SamplingEvent;
+use crate::client_common::SamplingStream;
+use crate::client_common::SamplingUsage;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
@@ -262,6 +264,7 @@ async fn run_remote_compact_task_inner(
     attempt
         .track(sess.as_ref(), status, codex_error, analytics_details)
         .await;
+    let result = result.and_then(|installed| sess.check_rollout_budget().map(|()| installed));
     match result {
         Ok(installed) => Ok(installed),
         Err(err)
@@ -412,7 +415,7 @@ async fn run_remote_compaction_request_v2(
 async fn collect_compaction_output(
     sess: &Session,
     turn_context: &TurnContext,
-    mut stream: ResponseStream,
+    mut stream: SamplingStream,
     request_kind: CompactionRequestKind<'_>,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let mut output_item_count = 0usize;
@@ -432,31 +435,40 @@ async fn collect_compaction_output(
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
             },
         };
-        let Some(event) = event else { break };
-        if let Err(err) = &event
-            && let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details()
-        {
-            match request_kind {
-                CompactionRequestKind::Background(_) => {
-                    if let Some(usage) = incomplete.token_usage.as_ref() {
-                        // Match completed background requests without replacing the terminal error.
-                        let _ = sess
-                            .record_rollout_budget_usage(&turn_context.sub_id, usage)
+        let Some(SamplingEvent { event, hook_output }) = event else {
+            break;
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => {
+                if let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details() {
+                    match request_kind {
+                        CompactionRequestKind::Background(_) => {
+                            // Match completed background requests without replacing the terminal error.
+                            let usage = SamplingUsage {
+                                provider: incomplete.token_usage.clone(),
+                                charge: hook_output,
+                            };
+                            let _ = sess
+                                .record_rollout_budget_usage(&turn_context.sub_id, &usage)
+                                .await;
+                        }
+                        CompactionRequestKind::Foreground(_) => {
+                            sess.record_incomplete_response_usage(
+                                turn_context,
+                                &turn_context.initial_settings,
+                                incomplete,
+                                hook_output,
+                            )
                             .await;
+                            sess.send_token_count_event(turn_context).await;
+                        }
                     }
                 }
-                CompactionRequestKind::Foreground(_) => {
-                    sess.record_incomplete_response_usage(
-                        turn_context,
-                        &turn_context.initial_settings,
-                        incomplete,
-                    )
-                    .await;
-                    sess.send_token_count_event(turn_context).await;
-                }
+                return Err(err);
             }
-        }
-        match event? {
+        };
+        match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
                 if let ResponseItem::Compaction { .. } = item {
@@ -472,25 +484,25 @@ async fn collect_compaction_output(
                 usage_metadata,
                 ..
             } => {
-                match request_kind {
-                    CompactionRequestKind::Background(_) => {
-                        if let Some(usage) = token_usage.as_ref() {
-                            sess.record_rollout_budget_usage(&turn_context.sub_id, usage)
-                                .await?;
-                        }
-                    }
-                    CompactionRequestKind::Foreground(_) => {
-                        sess.record_observed_response_completed(
-                            turn_context,
-                            &response_id,
-                            token_usage.as_ref(),
-                            usage_metadata.as_ref(),
-                        )
-                        .await;
-                    }
+                let usage = SamplingUsage {
+                    provider: token_usage,
+                    charge: hook_output,
+                };
+                if matches!(request_kind, CompactionRequestKind::Foreground(_)) {
+                    sess.record_observed_response_completed(
+                        turn_context,
+                        &response_id,
+                        usage.provider.as_ref(),
+                        usage_metadata.as_ref(),
+                    )
+                    .await;
                 }
+                // Both callers consumed this response. Whether it contains an
+                // installable summary is a separate decision below.
+                sess.record_rollout_budget_usage(&turn_context.sub_id, &usage)
+                    .await?;
                 completed_response_id = Some(response_id);
-                completed_token_usage = token_usage;
+                completed_token_usage = usage.provider;
                 break;
             }
             _ => {}
@@ -984,19 +996,20 @@ mod tests {
         ))
     }
 
-    fn response_stream(events: Vec<CodexResult<ResponseEvent>>) -> ResponseStream {
+    fn response_stream(events: Vec<impl Into<SamplingEvent>>) -> SamplingStream {
         let (tx_event, rx_event) = mpsc::channel(events.len().max(1));
         for event in events {
             tx_event
-                .try_send(event)
+                .try_send(event.into())
                 .expect("response stream test channel should have capacity");
         }
         drop(tx_event);
-        ResponseStream {
+        SamplingStream {
             routing_affinity: None,
             rx_event,
             interrupt: None,
             consumer_dropped: CancellationToken::new(),
+            settlement_started: Default::default(),
         }
     }
 
@@ -1422,16 +1435,26 @@ mod tests {
             total_tokens: 120,
             ..Default::default()
         };
-        let stream = response_stream(vec![Err(CodexErr::new(
-            CodexErrorDetails::ResponseIncomplete(Box::new(
-                codex_protocol::error::ResponseIncompleteError {
+        let stream = response_stream(vec![SamplingEvent {
+            event: Err(CodexErr::new(CodexErrorDetails::ResponseIncomplete(
+                Box::new(codex_protocol::error::ResponseIncompleteError {
                     partial_output: vec![],
                     reason: "max_output_tokens".to_string(),
                     response_id: Some("resp-background".to_string()),
                     token_usage: Some(usage.clone()),
+                }),
+            ))),
+            hook_output: crate::client_common::SamplingCharge {
+                hooks: codex_hooks::ModelRequestHookOutcome {
+                    charge: codex_hooks::HookCharge {
+                        units: 3.0,
+                        overflowed: false,
+                    },
+                    invalid_price: Some("negative sibling price".into()),
                 },
-            )),
-        ))]);
+                ..Default::default()
+            },
+        }]);
         let (mut sess, turn_context, rx) =
             crate::session::tests::make_session_and_context_with_rx().await;
         let accounting = Arc::new(UsageRecorder {
@@ -1460,75 +1483,102 @@ mod tests {
             assert!(
                 matches!(result, Err(ref err) if matches!(err.details(), CodexErrorDetails::TurnAborted))
             );
+            assert!(!sess.rollout_budget().tools_stopped());
             assert!(accounting.reports.lock().unwrap().is_empty());
             return;
         }
         assert!(matches!(result, Err(ref err)
             if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_))));
+        assert!(sess.rollout_budget().tools_stopped());
         assert_eq!(
             *accounting.reports.lock().unwrap(),
             vec![AgentUsageReport {
                 thread_id: sess.thread_id(),
                 turn_id: turn_context.sub_id.clone(),
-                usage,
+                usage: Some(usage),
+                additional_budget_units: 3.0,
+                additional_budget_units_overflowed: false,
             }]
         );
     }
 
-    #[test_case::test_case(true, false; "background bills a complete response even without a summary")]
-    #[test_case::test_case(false, true; "turn interrupt discards a queued complete response")]
-    #[test_case::test_case(true, true; "session shutdown bills a queued complete response even without a summary")]
+    #[test_case::test_case(false, false, false; "foreground bills a complete response even without a summary")]
+    #[test_case::test_case(true, false, false; "background bills a complete response even without a summary")]
+    #[test_case::test_case(false, true, false; "turn interrupt discards a queued complete response")]
+    #[test_case::test_case(true, true, false; "session shutdown bills a queued complete response even without a summary")]
+    #[test_case::test_case(false, false, true; "a malformed sibling is still reported when valid spending exhausts the account")]
     #[tokio::test]
-    async fn collect_queued_complete_response(background: bool, interrupted: bool) {
+    async fn collect_queued_complete_response(
+        background: bool,
+        interrupted: bool,
+        bad_sibling: bool,
+    ) {
         let (mut sess, turn, _) = crate::session::tests::make_session_and_context_with_rx().await;
         let accounting = Arc::new(UsageRecorder {
             reports: Mutex::new(Vec::new()),
-            decision: UsageAccountingDecision::Continue,
+            decision: if bad_sibling {
+                UsageAccountingDecision::Exhausted
+            } else {
+                UsageAccountingDecision::Continue
+            },
         });
         accounting.install(&mut sess);
-        let usage = TokenUsage {
+        let provider_usage = interrupted.then(|| TokenUsage {
             output_tokens: 42,
             ..Default::default()
-        };
-        let stream = response_stream(vec![Ok(ResponseEvent::Completed {
-            response_id: "resp-compact".into(),
-            token_usage: Some(usage.clone()),
-            usage_metadata: None,
-            reasoning_removals: None,
-            end_turn: Some(true),
-        })]);
+        });
+        let stream = response_stream(vec![SamplingEvent {
+            event: Ok(ResponseEvent::Completed {
+                response_id: "resp-compact".into(),
+                token_usage: provider_usage.clone(),
+                usage_metadata: None,
+                reasoning_removals: None,
+                end_turn: Some(true),
+            }),
+            hook_output: crate::client_common::SamplingCharge {
+                hooks: codex_hooks::ModelRequestHookOutcome {
+                    charge: codex_hooks::HookCharge {
+                        units: 42.0,
+                        overflowed: false,
+                    },
+                    invalid_price: bad_sibling.then(|| "negative sibling price".into()),
+                },
+                ..Default::default()
+            },
+        }]);
         let cancellation = CancellationToken::new();
         if interrupted {
             cancellation.cancel();
         }
-        let result = collect_compaction_output(
-            &sess,
-            &turn,
-            stream,
-            if background {
-                CompactionRequestKind::Background(&cancellation)
-            } else {
-                CompactionRequestKind::Foreground(&cancellation)
-            },
-        )
-        .await;
-
-        if !background {
-            assert!(
-                matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
-            );
+        let kind = if background {
+            CompactionRequestKind::Background(&cancellation)
+        } else {
+            CompactionRequestKind::Foreground(&cancellation)
+        };
+        let result = collect_compaction_output(&sess, &turn, stream, kind).await;
+        let error = result.err().expect("no installable summary");
+        if interrupted && !background {
+            assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
             assert!(accounting.reports.lock().unwrap().is_empty());
             return;
         }
-        assert!(
-            matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::Fatal(_)))
-        );
+        if bad_sibling {
+            assert!(
+                matches!(error.details(), CodexErrorDetails::UsageAccountingFailed(message) if message.contains("negative sibling price"))
+            );
+        } else {
+            assert!(
+                matches!(error.details(), CodexErrorDetails::Fatal(message) if message.contains("exactly one compaction output"))
+            );
+        }
         assert_eq!(
             *accounting.reports.lock().unwrap(),
             [AgentUsageReport {
                 thread_id: sess.thread_id(),
                 turn_id: turn.sub_id.clone(),
-                usage,
+                usage: provider_usage,
+                additional_budget_units: 42.0,
+                additional_budget_units_overflowed: false,
             }]
         );
     }
