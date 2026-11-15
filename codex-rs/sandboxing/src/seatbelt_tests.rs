@@ -72,6 +72,35 @@ fn seatbelt_policy_arg(args: &[String]) -> &str {
         .expect("seatbelt args should include policy text")
 }
 
+#[test]
+fn inherited_terminal_policy_denies_input_injection_after_grants() {
+    let workspace = TempDir::new().expect("temp workspace");
+    let filesystem = FileSystemSandboxPolicy::read_only();
+    let make_policy = |profile| {
+        create_seatbelt_command_args_with_profile(
+            CreateSeatbeltCommandArgsParams {
+                command: vec!["/usr/bin/true".to_string()],
+                file_system_sandbox_policy: &filesystem,
+                network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+                sandbox_policy_cwd: workspace.path(),
+                enforce_managed_network: false,
+                managed_network: None,
+                environment_id: None,
+                network: None,
+                extra_allow_unix_sockets: &[],
+            },
+            profile,
+            None,
+        )
+        .expect("build seatbelt policy")
+    };
+    let inherited = make_policy(MacosSeatbeltProfile::ProcessWithInheritedTerminal);
+    let normal = make_policy(MacosSeatbeltProfile::Process);
+    let deny = "(deny file-ioctl (ioctl-command TIOCSTI))";
+    assert!(seatbelt_policy_arg(&inherited).ends_with(deny));
+    assert!(!seatbelt_policy_arg(&normal).contains(deny));
+}
+
 #[cfg(unix)]
 fn restricted_write_policy(paths: &[&Path]) -> FileSystemSandboxPolicy {
     let mut entries = vec![FileSystemSandboxEntry::new(

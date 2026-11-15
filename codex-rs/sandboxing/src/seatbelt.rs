@@ -1026,6 +1026,11 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     if !file_system_sandbox_policy.has_full_disk_write_access() {
         policy_sections.push("(deny system-fcntl (fcntl-command 80 110))".to_string());
     }
+    // A child inheriting the controlling terminal must not inject input into
+    // the unsandboxed shell that resumes after it exits. Apply after all grants.
+    if profile == MacosSeatbeltProfile::ProcessWithInheritedTerminal {
+        policy_sections.push("(deny file-ioctl (ioctl-command TIOCSTI))".to_string());
+    }
 
     let full_policy = policy_sections.join("\n");
 
