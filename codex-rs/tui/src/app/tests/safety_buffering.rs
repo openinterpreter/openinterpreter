@@ -819,7 +819,7 @@ stream_max_retries = 0
 
 [features]
 goals = true
-{instant_interrupt_config}
+instant_interrupt = true
 "#,
             server.uri()
         ),
@@ -840,6 +840,10 @@ goals = true
         .features
         .enable(Feature::Goals)
         .expect("test config should allow goals");
+    app.config
+        .features
+        .enable(Feature::InstantInterrupt)
+        .expect("safety retry fixture requires instant interruption");
 
     if scenario == SafetyRetryScenario::PendingPermissions {
         app.config
