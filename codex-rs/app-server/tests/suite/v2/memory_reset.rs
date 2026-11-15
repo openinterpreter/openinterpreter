@@ -80,7 +80,7 @@ async fn memory_reset_clears_memory_files_and_rows_preserves_threads() -> Result
     Ok(())
 }
 
-async fn seed_stage1_output(
+pub(super) async fn seed_stage1_output(
     state_db: &Arc<StateRuntime>,
     codex_home: &Path,
     version: MemoryVersion,
