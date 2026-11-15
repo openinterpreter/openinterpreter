@@ -13,7 +13,7 @@ const FALLBACK_MODEL_METADATA_WARNING_SUFFIX: &str =
     "` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
 
 #[derive(Default)]
-pub(super) struct WarningDisplayState {
+pub(crate) struct WarningDisplayState {
     pub(super) count: usize,
     /// Completed resume history does not end startup; active work does.
     pub(super) startup_complete: bool,
