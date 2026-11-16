@@ -45,6 +45,41 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
+        // Extension-owned invariants that protect the mission must be checked
+        // after the task is admitted but before TurnStarted/model execution.
+        // A failed gate records the input for recovery and never hands it to
+        // the model with a narrowed or unverifiable scope.
+        let admission = sess
+            .emit_turn_start_gate(&ctx)
+            .or_cancel(&cancellation_token)
+            .await;
+        match admission {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(turn_id = %ctx.sub_id, %error, "turn admission gate rejected execution");
+                run_hooks_and_record_inputs(
+                    &sess,
+                    &ctx,
+                    &ctx.capture_current_model_info(),
+                    &input,
+                    PersistContext::Standard,
+                )
+                .await;
+                return Ok(None);
+            }
+            Err(_) => {
+                tracing::debug!(turn_id = %ctx.sub_id, "turn admission gate cancelled");
+                run_hooks_and_record_inputs(
+                    &sess,
+                    &ctx,
+                    &ctx.capture_current_model_info(),
+                    &input,
+                    PersistContext::Standard,
+                )
+                .await;
+                return Ok(None);
+            }
+        }
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
         // not wait on startup prewarm resolution.
         let prewarmed_client_session = async {

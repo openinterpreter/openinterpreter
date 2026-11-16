@@ -33,6 +33,7 @@ use tracing_subscriber::registry::LookupSpan;
 pub(crate) mod feedback_diagnostics;
 mod guardian;
 mod report_upload;
+mod signed_upload;
 mod upload;
 pub use feedback_diagnostics::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
 pub use feedback_diagnostics::FeedbackDiagnostic;
@@ -53,8 +54,46 @@ pub const CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME: &str = "codex-app-direc
 /// Filename used for the Windows sandbox log feedback attachment.
 pub const WINDOWS_SANDBOX_LOG_ATTACHMENT_FILENAME: &str = "windows-sandbox.log";
 const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-const SENTRY_DSN: &str =
+// Keep the existing destination until the replacement receiver is verified and selected.
+const FEEDBACK_ENDPOINT_DSN: &str =
     "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
+const VERIFIED_FEEDBACK_ENDPOINT_DSN: &str = "https://public@feedback.openinterpreter.com/1";
+
+#[derive(Clone, Copy)]
+enum FeedbackUploadMode {
+    Legacy,
+    Signed,
+}
+
+fn feedback_endpoint_dsn(config: Option<&str>, passcode: Option<&str>) -> Result<&'static str> {
+    match config {
+        None => Ok(FEEDBACK_ENDPOINT_DSN),
+        Some("cloud-run") => {
+            anyhow::ensure!(
+                valid_report_passcode(passcode),
+                "feedback report passcode required"
+            );
+            Ok(VERIFIED_FEEDBACK_ENDPOINT_DSN)
+        }
+        Some(_) => Err(anyhow!("invalid OIX feedback endpoint selector")),
+    }
+}
+
+fn valid_report_passcode(passcode: Option<&str>) -> bool {
+    passcode.is_some_and(|value| {
+        (12..=128).contains(&value.len()) && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    })
+}
+
+fn configured_feedback_endpoint_dsn(passcode: Option<&str>) -> Result<&'static str> {
+    match std::env::var("OIX_FEEDBACK_INGEST") {
+        Ok(config) => feedback_endpoint_dsn(Some(&config), passcode),
+        Err(std::env::VarError::NotPresent) => feedback_endpoint_dsn(None, passcode),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow!("invalid OIX feedback endpoint selector"))
+        }
+    }
+}
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 300);
 // Raw collection budgets used by the report API, not the interactive upload.
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
@@ -473,6 +512,8 @@ pub struct FeedbackAttachment {
 pub struct FeedbackUploadOptions<'a> {
     pub classification: &'a str,
     pub reason: Option<&'a str>,
+    /// Dedicated ephemeral input, never an event tag, attachment, URL or log.
+    pub report_passcode: Option<&'a str>,
     pub tags: Option<&'a BTreeMap<String, String>>,
     pub include_logs: bool,
     /// Generated attachments that are already buffered and safe to upload.
@@ -562,7 +603,7 @@ impl FeedbackSnapshot {
         self.feedback_diagnostics.attachment_text()
     }
 
-    /// Submit feedback to Sentry with whole attachments within a shared deadline.
+    /// Submit feedback to the selected endpoint with whole attachments within a shared deadline.
     /// Success means HTTP acceptance, not durable attachment storage. Callers must
     /// retain their source files; errors can occur after part of a report is accepted.
     /// https://github.com/getsentry/relay/blob/master/relay-server/src/endpoints/common.rs
@@ -571,10 +612,11 @@ impl FeedbackSnapshot {
         options: FeedbackUploadOptions<'_>,
         http_client_factory: &HttpClientFactory,
     ) -> Result<()> {
+        let dsn = configured_feedback_endpoint_dsn(options.report_passcode)?;
         self.upload_feedback_with_dsn(
             options,
             http_client_factory,
-            SENTRY_DSN,
+            dsn,
             Instant::now() + UPLOAD_TIMEOUT,
         )
         .await
@@ -586,6 +628,23 @@ impl FeedbackSnapshot {
         http_client_factory: &HttpClientFactory,
         dsn: &str,
         deadline: Instant,
+    ) -> Result<()> {
+        let mode = if dsn == FEEDBACK_ENDPOINT_DSN {
+            FeedbackUploadMode::Legacy
+        } else {
+            FeedbackUploadMode::Signed
+        };
+        self.upload_feedback_with_mode(options, http_client_factory, dsn, deadline, mode)
+            .await
+    }
+
+    async fn upload_feedback_with_mode(
+        &self,
+        options: FeedbackUploadOptions<'_>,
+        http_client_factory: &HttpClientFactory,
+        dsn: &str,
+        deadline: Instant,
+        mode: FeedbackUploadMode,
     ) -> Result<()> {
         use std::str::FromStr;
 
@@ -602,6 +661,7 @@ impl FeedbackSnapshot {
             options.tags,
             options.session_source.as_ref(),
         );
+        let report_id = event.event_id.to_string().replace('-', "");
         let mut envelope = Envelope::new();
         envelope.add_item(EnvelopeItem::Event(event));
         let (event_body, event_bytes) =
@@ -618,18 +678,23 @@ impl FeedbackSnapshot {
         );
         // Accept the report before reading diagnostics; all envelopes share one deadline.
         let mut rate_limited = false;
-        let status = upload::send_envelope(
+        let (status, upload_capability) = upload::send_envelope(
             &client_pool,
             &dsn,
             event_body,
             upload::EnvelopeKind::Event,
+            if matches!(mode, FeedbackUploadMode::Signed) {
+                options.report_passcode
+            } else {
+                None
+            },
             deadline,
             &mut rate_limited,
         )
         .await?;
         anyhow::ensure!(
             status.is_success(),
-            "Sentry rejected feedback upload with HTTP status {status}"
+            "feedback endpoint rejected upload with HTTP status {status}"
         );
 
         let mut attachments = self.feedback_attachments(
@@ -656,18 +721,41 @@ impl FeedbackSnapshot {
             }
             let mut status = None;
             let result: Result<()> = async {
-                let body = upload::encode_attachment_envelope(&headers, attachment?)?;
-                let response_status = upload::send_envelope(
+                let attachment = attachment?;
+                if matches!(mode, FeedbackUploadMode::Signed)
+                    && attachment.buffer.len() > signed_upload::DIRECT_UPLOAD_THRESHOLD
+                {
+                    let capability = upload_capability
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("large feedback requires signed uploads"))?;
+                    signed_upload::send_large_attachment(
+                        &client_pool,
+                        &dsn,
+                        &report_id,
+                        capability,
+                        attachment,
+                        deadline,
+                    )
+                    .await?;
+                    status = Some(200);
+                    return Ok(());
+                }
+                let body = upload::encode_attachment_envelope(&headers, attachment)?;
+                let (response_status, _) = upload::send_envelope(
                     &client_pool,
                     &dsn,
                     body,
                     upload::EnvelopeKind::Attachment,
+                    None,
                     deadline,
                     &mut rate_limited,
                 )
                 .await?;
                 status = Some(response_status.as_u16());
-                anyhow::ensure!(response_status.is_success(), "Sentry rejected attachment");
+                anyhow::ensure!(
+                    response_status.is_success(),
+                    "feedback endpoint rejected attachment"
+                );
                 Ok(())
             }
             .await;
@@ -684,7 +772,7 @@ impl FeedbackSnapshot {
             uploaded_attachments,
             attachments_failed,
             elapsed_ms = started_at.elapsed().as_millis(),
-            "feedback event uploaded to Sentry"
+            "feedback event uploaded to selected endpoint"
         );
         anyhow::ensure!(
             !attachments_failed,
@@ -894,6 +982,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
     use crate::FeedbackDiagnostic;
     use codex_http_client::OutboundProxyPolicy;
     use flate2::Compression;
@@ -910,6 +999,130 @@ mod tests {
     use wiremock::matchers::header_exists;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
+
+    #[test]
+    fn feedback_endpoint_requires_explicit_opt_in_without_changing_legacy_default() {
+        assert_eq!(
+            feedback_endpoint_dsn(None, None).unwrap(),
+            FEEDBACK_ENDPOINT_DSN
+        );
+        assert_eq!(
+            FEEDBACK_ENDPOINT_DSN,
+            "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458"
+        );
+        assert!(
+            feedback_endpoint_dsn(Some("cloud-run"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("report passcode required")
+        );
+        assert!(feedback_endpoint_dsn(Some("cloud-run"), Some("short")).is_err());
+        assert!(
+            feedback_endpoint_dsn(Some("cloud-run"), Some("contains newline\nsecret")).is_err()
+        );
+        assert_eq!(
+            feedback_endpoint_dsn(Some("cloud-run"), Some("valid-secret-123")).unwrap(),
+            VERIFIED_FEEDBACK_ENDPOINT_DSN
+        );
+        assert!(feedback_endpoint_dsn(Some("https://untrusted.example/1"), None).is_err());
+        assert!(feedback_endpoint_dsn(Some(""), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn signed_event_sends_passcode_only_in_header_and_rejects_wrong_passcode() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .and(header("X-Feedback-Report-Passcode", "operator-secret-123"))
+            .respond_with(ResponseTemplate::new(StatusCode::FORBIDDEN))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let secret = "operator-secret-123";
+        let dsn = format!("http://public@{}/42", server.address());
+        let result = CodexFeedback::new()
+            .snapshot(None)
+            .upload_feedback_with_dsn(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: Some("ordinary note"),
+                    report_passcode: Some(secret),
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &dsn,
+                Instant::now() + UPLOAD_TIMEOUT,
+            )
+            .await;
+        assert!(result.unwrap_err().to_string().contains("403"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let mut decoded = String::new();
+        GzDecoder::new(requests[0].body.as_slice())
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert!(decoded.contains("ordinary note"));
+        assert!(!decoded.contains(secret));
+    }
+
+    #[tokio::test]
+    async fn signed_event_delivers_passcode_and_keeps_it_off_attachment_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(ResponseTemplate::new(StatusCode::OK).insert_header(
+                "X-Feedback-Upload-Capability",
+                "12345678901234567890123456789012",
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let attachment = FeedbackAttachment {
+            filename: "small.txt".into(),
+            content_type: None,
+            buffer: b"small payload".to_vec(),
+        };
+        let dsn = format!("http://public@{}/42", server.address());
+        CodexFeedback::new()
+            .snapshot(None)
+            .upload_feedback_with_dsn(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: Some("ordinary note"),
+                    report_passcode: Some("operator-secret-123"),
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[attachment],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &dsn,
+                Instant::now() + UPLOAD_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("X-Feedback-Report-Passcode")
+                .unwrap(),
+            "operator-secret-123"
+        );
+        assert!(
+            !requests[1]
+                .headers
+                .contains_key("X-Feedback-Report-Passcode")
+        );
+    }
 
     #[test]
     fn ring_buffer_drops_front_when_full() {
@@ -997,6 +1210,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: Some("private feedback"),
+                    report_passcode: None,
                     tags: None,
                     include_logs: true,
                     extra_attachments,
@@ -1070,6 +1284,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: None,
+                    report_passcode: None,
                     tags: None,
                     include_logs: true,
                     extra_attachments: &attachments,
@@ -1154,7 +1369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feedback_upload_delivers_large_files_intact() {
+    async fn feedback_upload_delivers_small_files_intact() {
         let suffix = ThreadId::new();
         let first_path = std::env::temp_dir().join(format!("feedback-first-{suffix}.jsonl"));
         let second_path = std::env::temp_dir().join(format!("feedback-second-{suffix}.jsonl"));
@@ -1162,14 +1377,14 @@ mod tests {
         let pending_path = second_path.with_extension("pending");
         let block = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"diagnostic fixture 🍵\"}}\n"
             .repeat(1024);
-        let block_counts = [65, 80].map(|mib| mib * 1024 * 1024 / block.len() + 1);
+        let block_counts = [5, 6].map(|mib| mib * 1024 * 1024 / block.len() + 1);
         for (path, blocks) in [&first_path, &pending_path].into_iter().zip(block_counts) {
             let mut file = fs::File::create(path).unwrap();
             for _ in 0..blocks {
                 file.write_all(block.as_bytes()).unwrap();
             }
         }
-        // Repeats beyond gzip's window keep the archive above the former 38.1 MiB cap.
+        // Incompressible archive exercises binary integrity below the signed-upload threshold.
         let record_block = (0..4096)
             .flat_map(|_| sentry::types::Uuid::new_v4().into_bytes())
             .map(|byte| {
@@ -1178,7 +1393,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut file = GzEncoder::new(fs::File::create(&binary_path).unwrap(), Compression::fast());
-        for mib in [32, 30] {
+        for mib in [2, 2] {
             file.write_all(b"{\"message\":\"").unwrap();
             for _ in 0..mib * 1024 * 1024 / record_block.len() {
                 file.write_all(&record_block).unwrap();
@@ -1186,7 +1401,7 @@ mod tests {
             file.write_all(b"\"}\n").unwrap();
         }
         file.finish().unwrap();
-        assert!(fs::metadata(&binary_path).unwrap().len() > 40_000_000);
+        assert!(fs::metadata(&binary_path).unwrap().len() > 3_000_000);
 
         let server = MockServer::start().await;
         let attempt = AtomicUsize::default();
@@ -1210,6 +1425,7 @@ mod tests {
                 FeedbackUploadOptions {
                     classification: "bug",
                     reason: Some("large diagnostic upload"),
+                    report_passcode: None,
                     tags: None,
                     include_logs: false,
                     extra_attachments: &[],
@@ -1286,6 +1502,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feedback_upload_does_not_proxy_large_attachments_without_signed_capability() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(ResponseTemplate::new(StatusCode::OK))
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+        let attachment = FeedbackAttachment {
+            filename: "large.txt".to_string(),
+            content_type: None,
+            buffer: vec![b'a'; signed_upload::DIRECT_UPLOAD_THRESHOLD + 1],
+        };
+        let result = CodexFeedback::new()
+            .snapshot(/*session_id*/ None)
+            .upload_feedback_with_dsn(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: None,
+                    report_passcode: None,
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[attachment],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &format!("http://public@{}/42", server.address()),
+                Instant::now() + UPLOAD_TIMEOUT,
+            )
+            .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "feedback report was accepted, but some attachments failed to upload"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_feedback_keeps_large_attachment_envelopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/42/envelope/"))
+            .respond_with(ResponseTemplate::new(StatusCode::OK))
+            .expect(/*r*/ 2)
+            .mount(&server)
+            .await;
+        // The legacy endpoint must still accept incompressible 40–64 MiB
+        // attachments: the new public receiver's body ceiling is unrelated.
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let bytes: Vec<u8> = (0..40_000_000 + 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        let attachment = FeedbackAttachment {
+            filename: "legacy-large.log".to_string(),
+            content_type: None,
+            buffer: bytes.clone(),
+        };
+        CodexFeedback::new()
+            .snapshot(/*session_id*/ None)
+            .upload_feedback_with_mode(
+                FeedbackUploadOptions {
+                    classification: "bug",
+                    reason: None,
+                    report_passcode: None,
+                    tags: None,
+                    include_logs: false,
+                    extra_attachments: &[attachment],
+                    extra_attachment_paths: &[],
+                    session_source: Some(SessionSource::Cli),
+                    logs_override: None,
+                },
+                &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                &format!("http://public@{}/42", server.address()),
+                Instant::now() + UPLOAD_TIMEOUT,
+                FeedbackUploadMode::Legacy,
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].body.len() > 40_000_000);
+        let mut decoded = Vec::new();
+        if requests[1].headers.contains_key("Content-Encoding") {
+            GzDecoder::new(requests[1].body.as_slice())
+                .read_to_end(&mut decoded)
+                .unwrap();
+        } else {
+            decoded.extend_from_slice(&requests[1].body);
+        }
+        assert!(decoded.strip_suffix(b"\n").unwrap().ends_with(&bytes));
+    }
+
+    #[tokio::test]
     async fn feedback_upload_reports_unreadable_or_oversized_attachments() {
         let oversized_path =
             std::env::temp_dir().join(format!("feedback-oversized-{}", ThreadId::new()));
@@ -1310,6 +1626,7 @@ mod tests {
                     FeedbackUploadOptions {
                         classification: "bug",
                         reason: None,
+                        report_passcode: None,
                         tags: None,
                         include_logs: false,
                         extra_attachments: &[],

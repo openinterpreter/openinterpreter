@@ -78,6 +78,7 @@ impl FeedbackRequestProcessor {
         let FeedbackUploadParams {
             classification,
             reason,
+            report_passcode,
             thread_id,
             include_logs,
             extra_log_files,
@@ -292,6 +293,7 @@ impl FeedbackRequestProcessor {
                 FeedbackUploadOptions {
                     classification: &classification,
                     reason: reason.as_deref(),
+                    report_passcode: report_passcode.as_deref(),
                     tags,
                     include_logs,
                     extra_attachments: &extra_attachments,

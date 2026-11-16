@@ -13,6 +13,23 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) struct SecretReportPasscode(String);
+
+impl SecretReportPasscode {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for SecretReportPasscode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted report passcode>")
+    }
+}
+
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
@@ -1536,6 +1553,7 @@ pub(crate) enum AppEvent {
     SubmitFeedback {
         category: FeedbackCategory,
         reason: Option<String>,
+        report_passcode: Option<SecretReportPasscode>,
         turn_id: Option<String>,
         include_logs: bool,
     },
@@ -1546,6 +1564,16 @@ pub(crate) enum AppEvent {
         category: FeedbackCategory,
         include_logs: bool,
         result: Result<String, String>,
+    },
+
+    /// The app-server, not the TUI environment, requires a report passcode.
+    /// Only the ordinary note is retained here; the passcode is entered later.
+    FeedbackPasscodeRequired {
+        origin_thread_id: Option<ThreadId>,
+        category: FeedbackCategory,
+        reason: Option<String>,
+        turn_id: Option<String>,
+        include_logs: bool,
     },
 
     /// Launch the external editor after a normal draw has completed.

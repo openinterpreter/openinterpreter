@@ -841,6 +841,18 @@ impl From<codex_protocol::protocol::ThreadGoal> for ThreadGoal {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalRevision {
+    pub goal_id: String,
+    pub status: ThreadGoalStatus,
+    #[ts(type = "number")]
+    pub mission_revision: i64,
+    #[ts(type = "number")]
+    pub lifecycle_revision: i64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -858,6 +870,24 @@ pub struct ThreadGoalSetParams {
     )]
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<Option<i64>>,
+    /// All four expected fields are required together for an atomic Goal CAS
+    /// when an existing Goal is being changed. Objective and token-budget edits
+    /// are included in the same transaction; mission_revision advances for
+    /// those edits and lifecycle_revision advances for every successful
+    /// mutation. Omit all four only when the authoritative read found no Goal
+    /// and this request is creating the first Goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_status: Option<ThreadGoalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_mission_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_lifecycle_revision: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -865,6 +895,146 @@ pub struct ThreadGoalSetParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalSetResponse {
     pub goal: ThreadGoal,
+    pub revision: ThreadGoalRevision,
+}
+
+/// The content-free metadata for a file-backed managed Goal document.
+///
+/// `path` is relative to the Codex state home; callers must not receive the
+/// absolute state-home path.  The document bytes are addressed by the
+/// mission revision and digest so a consumer can fail closed on drift.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocument {
+    pub path: String,
+    pub sha256: String,
+    #[ts(type = "number")]
+    pub byte_length: i64,
+    #[ts(type = "number")]
+    pub mission_revision: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetParams {
+    pub thread_id: String,
+    pub document: String,
+    #[ts(optional = nullable)]
+    pub status: Option<ThreadGoalStatus>,
+    /// All four expected fields must be supplied together for an existing
+    /// managed Goal. A request without any expected fields is reserved for
+    /// first creation when `thread/goal/get` is genuinely empty; a lone
+    /// mission revision is not a supported mutation contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_mission_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_status: Option<ThreadGoalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_lifecycle_revision: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentSetResponse {
+    pub goal: ThreadGoal,
+    pub document: ThreadGoalDocument,
+    pub revision: ThreadGoalRevision,
+}
+
+/// The one canonical file-backed Goal creation precondition. `absent` is an
+/// explicit authenticated no-Goal admission state; it is never inferred from
+/// an unavailable, denied, timed-out, or unloaded read. `completed` requires
+/// the exact four-field predecessor tuple.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadGoalDocumentCreatePrecondition {
+    Absent {
+        #[serde(rename = "admissionState")]
+        admission_state: ThreadGoalDocumentCreateAdmissionState,
+    },
+    Completed {
+        #[serde(rename = "expectedGoalId")]
+        expected_goal_id: String,
+        #[serde(rename = "expectedStatus")]
+        expected_status: ThreadGoalStatus,
+        #[ts(type = "number")]
+        #[serde(rename = "expectedMissionRevision")]
+        expected_mission_revision: i64,
+        #[ts(type = "number")]
+        #[serde(rename = "expectedLifecycleRevision")]
+        expected_lifecycle_revision: i64,
+    },
+}
+
+/// The initial-create admission state is intentionally closed: the caller
+/// must say it observed a genuine absent Goal, not send null fields.
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS, ExperimentalApi,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadGoalDocumentCreateAdmissionState {
+    NoGoal,
+}
+
+/// Starts a new file-backed Goal from either the explicit absent/noGoal state
+/// or an exact completed predecessor. The `creationId` is an opaque
+/// idempotency key and must be reused for a response-loss retry, never for a
+/// different mission. A successful initial create returns `previousRevision`
+/// as null.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentCreateParams {
+    pub thread_id: String,
+    pub creation_id: String,
+    pub objective: String,
+    pub document: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub status: Option<ThreadGoalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub token_budget: Option<i64>,
+    pub precondition: ThreadGoalDocumentCreatePrecondition,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentCreateResponse {
+    pub creation_id: String,
+    pub goal: ThreadGoal,
+    pub document: ThreadGoalDocument,
+    pub previous_revision: Option<ThreadGoalRevision>,
+    pub revision: ThreadGoalRevision,
+    pub replayed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalDocumentGetResponse {
+    pub goal: Option<ThreadGoal>,
+    pub document: Option<ThreadGoalDocument>,
+    pub content: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -879,6 +1049,7 @@ pub struct ThreadGoalGetParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalGetResponse {
     pub goal: Option<ThreadGoal>,
+    pub revision: Option<ThreadGoalRevision>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -886,6 +1057,18 @@ pub struct ThreadGoalGetResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearParams {
     pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub expected_status: Option<ThreadGoalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_mission_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expected_lifecycle_revision: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -893,6 +1076,7 @@ pub struct ThreadGoalClearParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearResponse {
     pub cleared: bool,
+    pub revision: Option<ThreadGoalRevision>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -1222,6 +1406,16 @@ pub struct ThreadBackgroundTerminalsListParams {
 pub struct ThreadBackgroundTerminal {
     pub item_id: String,
     pub process_id: String,
+    /// The turn that owns this native unified-exec entry, when available.
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    /// Opaque server-issued native unified-exec custody identity. This is not
+    /// the client-supplied command/exec `processId` namespace.
+    #[ts(optional = nullable)]
+    pub native_process_id: Option<String>,
+    /// Monotonic server generation for the native entry.
+    #[ts(optional = nullable)]
+    pub terminal_generation: Option<u64>,
     pub command: String,
     pub cwd: LegacyAppPathString,
     pub os_pid: Option<u32>,
@@ -1237,6 +1431,50 @@ pub struct ThreadBackgroundTerminalsListResponse {
     /// Opaque cursor to pass to the next call to continue after the last item.
     /// If None, there are no more items to return.
     pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusParams {
+    pub thread_id: String,
+    /// Exact owning turn sub-id from the command execution item.
+    pub turn_id: String,
+    /// Exact command execution item id.
+    pub item_id: String,
+    /// Opaque native unified-exec identity returned by the list method.
+    pub native_process_id: String,
+    /// Bounded observation wait. The server caps this at 1000ms.
+    #[ts(optional = nullable)]
+    pub max_wait_ms: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadBackgroundTerminalStatusPhase {
+    Running,
+    Exited,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadBackgroundTerminalsStatusResponse {
+    pub phase: ThreadBackgroundTerminalStatusPhase,
+    /// Bytes observed by the native output collector, including capped bytes.
+    pub output_bytes: u64,
+    /// SHA-256 of the observed output bytes. Null for `unknown`.
+    pub output_sha256: Option<String>,
+    /// Whether the bounded native output retention cap was reached.
+    pub output_cap_reached: bool,
+    /// Process exit code, only when a terminal exit was observed.
+    pub exit_code: Option<i32>,
+    /// Stable server-issued lifecycle generation for this native entry.
+    pub terminal_generation: Option<u64>,
+    /// True when the bounded observation window ended before exit was seen.
+    pub observation_timed_out: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

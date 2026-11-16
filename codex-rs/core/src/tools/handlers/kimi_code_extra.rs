@@ -360,11 +360,11 @@ fn extract_page_text(html: &str) -> String {
     let without_tags = tag_regex.replace_all(&with_breaks, " ");
     let decoded = without_tags
         .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
     decoded
         .lines()
         .map(str::split_whitespace)

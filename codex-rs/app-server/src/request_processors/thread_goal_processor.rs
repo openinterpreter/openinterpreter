@@ -2,6 +2,12 @@ use super::thread_input::DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
+use crate::error_code::goal_conflict;
+use codex_goal_extension::GoalCas;
+use codex_goal_extension::GoalDocumentCreateAdmissionState;
+use codex_goal_extension::GoalDocumentCreatePrecondition;
+use codex_goal_extension::GoalDocumentCreateRequest;
+use codex_goal_extension::GoalDocumentSetRequest;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
@@ -60,6 +66,288 @@ impl ThreadGoalRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn thread_goal_document_set(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalDocumentSetParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+        let existing_goal = self
+            .goal_service
+            .get_thread_goal(&state_db, thread_id)
+            .await
+            .map_err(goal_service_error)?;
+        if existing_goal.is_none() {
+            return Err(invalid_params(
+                "thread/goal/document/set cannot create a Goal; use thread/goal/document/create with an explicit absent/noGoal precondition",
+            ));
+        }
+        let expected_goal = goal_document_cas_from_params(
+            params.expected_goal_id.clone(),
+            params.expected_status.clone(),
+            params.expected_mission_revision,
+            params.expected_lifecycle_revision,
+        )?;
+        if expected_goal.is_none() {
+            return Err(invalid_params(
+                "thread/goal/document/set requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
+        let resulting_status = params
+            .status
+            .map(ThreadGoalStatus::to_core)
+            .or_else(|| existing_goal.as_ref().map(|goal| goal.status))
+            .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
+        if resulting_status == codex_protocol::protocol::ThreadGoalStatus::Active
+            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+        {
+            self.config_manager
+                .check_thread_model_provider(thread.config().await.as_ref())
+                .await
+                .map_err(|error| config_load_error(&error))?;
+        }
+
+        let listener_command_tx = {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let thread_state = thread_state.lock().await;
+            thread_state.listener_command_tx()
+        };
+        let outcome = self
+            .goal_service
+            .set_thread_goal_document(
+                &state_db,
+                GoalDocumentSetRequest {
+                    thread_id,
+                    document: params.document.as_str(),
+                    status: params.status.map(ThreadGoalStatus::to_core),
+                    expected_goal,
+                },
+            )
+            .await
+            .map_err(goal_service_error)?;
+        let goal = ThreadGoal::from(outcome.goal());
+        let document = api_thread_goal_document_from_state(outcome.document());
+        let revision = api_goal_revision(outcome.identity());
+
+        let persist_result = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => match thread.rollout_path() {
+                Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
+                    let persisted_settings = thread.thread_settings_snapshot().await;
+                    let items = [
+                        thread_settings_applied_item(thread_id, persisted_settings.clone()),
+                        outcome.thread_goal_updated_item(),
+                    ];
+                    match thread.append_rollout_items(&items).await {
+                        Err(err) => Err(err),
+                        Ok(()) => {
+                            let current_settings = thread.thread_settings_snapshot().await;
+                            if current_settings == persisted_settings {
+                                Ok(())
+                            } else {
+                                thread
+                                    .append_rollout_items(&[thread_settings_applied_item(
+                                        thread_id,
+                                        current_settings,
+                                    )])
+                                    .await
+                            }
+                        }
+                    }
+                }
+                Some(_) | None => {
+                    thread
+                        .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                        .await
+                }
+            },
+            Err(_) => Ok(()),
+        };
+        if let Err(err) = persist_result {
+            warn!(
+                "failed to persist managed Goal document update for live thread {thread_id}: {err}"
+            );
+        }
+
+        self.outgoing
+            .send_response(
+                request_id.clone(),
+                ThreadGoalDocumentSetResponse {
+                    goal: goal.clone(),
+                    document,
+                    revision,
+                },
+            )
+            .await;
+        self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
+            .await;
+        outcome.apply_runtime_effects(&self.goal_service).await;
+        Ok(None)
+    }
+
+    pub(crate) async fn thread_goal_document_create(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalDocumentCreateParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let precondition = match &params.precondition {
+            ThreadGoalDocumentCreatePrecondition::Absent { admission_state } => {
+                match admission_state {
+                    ThreadGoalDocumentCreateAdmissionState::NoGoal => {
+                        GoalDocumentCreatePrecondition::Absent {
+                            admission_state: GoalDocumentCreateAdmissionState::NoGoal,
+                        }
+                    }
+                }
+            }
+            ThreadGoalDocumentCreatePrecondition::Completed {
+                expected_goal_id,
+                expected_status,
+                expected_mission_revision,
+                expected_lifecycle_revision,
+            } => {
+                if expected_goal_id.trim().is_empty() || expected_goal_id.len() > 256 {
+                    return Err(invalid_params("expectedGoalId is invalid"));
+                }
+                if *expected_status != ThreadGoalStatus::Complete {
+                    return Err(invalid_params(
+                        "thread/goal/document/create completed precondition requires expectedStatus=complete",
+                    ));
+                }
+                GoalDocumentCreatePrecondition::Completed(GoalCas {
+                    goal_id: expected_goal_id.clone(),
+                    status: expected_status.to_core(),
+                    mission_revision: *expected_mission_revision,
+                    lifecycle_revision: *expected_lifecycle_revision,
+                })
+            }
+        };
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+
+        let resulting_status = params
+            .status
+            .map(ThreadGoalStatus::to_core)
+            .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active);
+        if resulting_status == codex_protocol::protocol::ThreadGoalStatus::Active
+            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+        {
+            self.config_manager
+                .check_thread_model_provider(thread.config().await.as_ref())
+                .await
+                .map_err(|error| config_load_error(&error))?;
+        }
+
+        let listener_command_tx = {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let thread_state = thread_state.lock().await;
+            thread_state.listener_command_tx()
+        };
+        let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => thread.config().await.max_goal_token_budget,
+            Err(_) => self.config.max_goal_token_budget,
+        };
+        let outcome = self
+            .goal_service
+            .create_thread_goal_document(
+                &state_db,
+                GoalDocumentCreateRequest {
+                    thread_id,
+                    creation_id: params.creation_id.as_str(),
+                    document: params.document.as_str(),
+                    objective: params.objective.as_str(),
+                    status: params.status.map(ThreadGoalStatus::to_core),
+                    token_budget: params.token_budget,
+                    max_goal_token_budget,
+                    precondition,
+                },
+            )
+            .await
+            .map_err(goal_service_error)?;
+        let goal = ThreadGoal::from(outcome.goal());
+        let document = api_thread_goal_document_from_state(outcome.document());
+        let previous_revision = outcome.previous_identity().map(api_goal_revision);
+        let revision = api_goal_revision(outcome.identity());
+        let replayed = outcome.replayed();
+
+        if !replayed {
+            let persist_result = match self.thread_manager.get_thread(thread_id).await {
+                Ok(thread) => match thread.rollout_path() {
+                    Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
+                        let persisted_settings = thread.thread_settings_snapshot().await;
+                        let items = [
+                            thread_settings_applied_item(thread_id, persisted_settings.clone()),
+                            outcome.thread_goal_updated_item(),
+                        ];
+                        match thread.append_rollout_items(&items).await {
+                            Err(err) => Err(err),
+                            Ok(()) => {
+                                let current_settings = thread.thread_settings_snapshot().await;
+                                if current_settings == persisted_settings {
+                                    Ok(())
+                                } else {
+                                    thread
+                                        .append_rollout_items(&[thread_settings_applied_item(
+                                            thread_id,
+                                            current_settings,
+                                        )])
+                                        .await
+                                }
+                            }
+                        }
+                    }
+                    Some(_) | None => {
+                        thread
+                            .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                            .await
+                    }
+                },
+                Err(_) => Ok(()),
+            };
+            if let Err(err) = persist_result {
+                warn!(
+                    "failed to persist new managed Goal document for live thread {thread_id}: {err}"
+                );
+            }
+        }
+
+        self.outgoing
+            .send_response(
+                request_id.clone(),
+                ThreadGoalDocumentCreateResponse {
+                    creation_id: outcome.creation_id().to_string(),
+                    goal: goal.clone(),
+                    document,
+                    previous_revision,
+                    revision,
+                    replayed,
+                },
+            )
+            .await;
+        if !replayed {
+            self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
+                .await;
+            outcome.apply_runtime_effects(&self.goal_service).await;
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn thread_goal_get(
         &self,
         params: ThreadGoalGetParams,
@@ -67,6 +355,154 @@ impl ThreadGoalRequestProcessor {
         self.thread_goal_get_inner(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn thread_goal_document_get(
+        &self,
+        params: ThreadGoalDocumentGetParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
+            .await?;
+        let goal = self
+            .goal_service
+            .get_thread_goal(&state_db, thread_id)
+            .await
+            .map_err(goal_service_error)?
+            .map(ThreadGoal::from);
+        let document = self
+            .goal_service
+            .read_thread_goal_document(&state_db, thread_id)
+            .await
+            .map_err(goal_service_error)?
+            .map(|(_, document, content)| {
+                (api_thread_goal_document_from_state(document), Some(content))
+            });
+        let (document, content) = document
+            .map(|(document, content)| (Some(document), content))
+            .unwrap_or((None, None));
+        Ok(Some(
+            ThreadGoalDocumentGetResponse {
+                goal,
+                document,
+                content,
+            }
+            .into(),
+        ))
+    }
+
+    /// Read a goal for the content-free agent contract without applying the
+    /// legacy `Option<ThreadGoal>` projection.  In particular, an unavailable
+    /// state database and an absent goal are different results, and this read
+    /// never resumes or otherwise changes the goal runtime.
+    pub(crate) async fn agent_goal_read(
+        &self,
+        params: AgentGoalReadParams,
+    ) -> Result<AgentGoalReadResponse, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Ok(AgentGoalReadResponse {
+                availability: AgentGoalAvailability::Unavailable,
+                goal: None,
+                goal_id: None,
+                mission_revision: None,
+                lifecycle_revision: None,
+                explicit_resume_required: false,
+                unavailable_reason: Some(AgentGoalUnavailableReason::GoalsDisabled),
+            });
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = match self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
+            .await
+        {
+            Ok(state_db) => state_db,
+            Err(_) => {
+                if self
+                    .thread_manager
+                    .get_thread(thread_id)
+                    .await
+                    .is_ok_and(|thread| thread.rollout_path().is_none())
+                {
+                    return Ok(AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::Unavailable,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: Some(AgentGoalUnavailableReason::EphemeralThread),
+                    });
+                }
+
+                let persisted = codex_rollout::find_thread_path_by_id_str(
+                    &self.config.codex_home,
+                    &thread_id.to_string(),
+                    self.state_db.as_deref(),
+                )
+                .await
+                .ok()
+                .flatten();
+                return Ok(match persisted {
+                    Some(_) => AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::Unavailable,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: Some(AgentGoalUnavailableReason::StateUnavailable),
+                    },
+                    None => AgentGoalReadResponse {
+                        availability: AgentGoalAvailability::NotFound,
+                        goal: None,
+                        goal_id: None,
+                        mission_revision: None,
+                        lifecycle_revision: None,
+                        explicit_resume_required: false,
+                        unavailable_reason: None,
+                    },
+                });
+            }
+        };
+
+        let goal = match state_db.thread_goals().get_thread_goal(thread_id).await {
+            Ok(goal) => goal,
+            Err(_) => {
+                return Ok(AgentGoalReadResponse {
+                    availability: AgentGoalAvailability::Unavailable,
+                    goal: None,
+                    goal_id: None,
+                    mission_revision: None,
+                    lifecycle_revision: None,
+                    explicit_resume_required: false,
+                    unavailable_reason: Some(AgentGoalUnavailableReason::StateUnavailable),
+                });
+            }
+        };
+        let goal_id = goal.as_ref().map(|goal| goal.goal_id.clone());
+        let mission_revision = goal.as_ref().map(|goal| goal.mission_revision);
+        let lifecycle_revision = goal.as_ref().map(|goal| goal.lifecycle_revision);
+        let goal = goal.map(api_thread_goal_from_state);
+        let explicit_resume_required = goal.as_ref().is_some_and(|goal| {
+            matches!(
+                goal.status,
+                ThreadGoalStatus::Paused | ThreadGoalStatus::Blocked
+            )
+        });
+        Ok(AgentGoalReadResponse {
+            availability: AgentGoalAvailability::Available,
+            goal,
+            goal_id,
+            mission_revision,
+            lifecycle_revision,
+            explicit_resume_required,
+            unavailable_reason: None,
+        })
     }
 
     pub(crate) async fn thread_goal_clear(
@@ -133,6 +569,12 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let expected = goal_cas_from_params(
+            params.expected_goal_id.clone(),
+            params.expected_status.clone(),
+            params.expected_mission_revision,
+            params.expected_lifecycle_revision,
+        )?;
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
@@ -145,6 +587,11 @@ impl ThreadGoalRequestProcessor {
             .get_thread_goal(&state_db, thread_id)
             .await
             .map_err(goal_service_error)?;
+        if existing_goal.is_some() && expected.is_none() {
+            return Err(invalid_params(
+                "thread/goal/set requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
         let resulting_status = params
             .status
             .map(ThreadGoalStatus::to_core)
@@ -171,26 +618,33 @@ impl ThreadGoalRequestProcessor {
         let status = params.status.map(ThreadGoalStatus::to_core);
         let objective = params.objective.as_deref();
 
-        let outcome = self
-            .goal_service
-            .set_thread_goal(
-                &state_db,
-                GoalSetRequest {
-                    thread_id,
-                    objective: objective
-                        .map(GoalObjectiveUpdate::Set)
-                        .unwrap_or(GoalObjectiveUpdate::Keep),
-                    status,
-                    token_budget: match params.token_budget {
-                        Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
-                        None => GoalTokenBudgetUpdate::Keep,
-                    },
-                    max_goal_token_budget,
-                },
-            )
-            .await
-            .map_err(goal_service_error)?;
+        let goal_request = GoalSetRequest {
+            thread_id,
+            objective: objective
+                .map(GoalObjectiveUpdate::Set)
+                .unwrap_or(GoalObjectiveUpdate::Keep),
+            status,
+            token_budget: match params.token_budget {
+                Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
+                None => GoalTokenBudgetUpdate::Keep,
+            },
+            max_goal_token_budget,
+        };
+        let outcome = match expected {
+            Some(expected) => {
+                self.goal_service
+                    .set_thread_goal_cas(&state_db, goal_request, expected)
+                    .await
+            }
+            None => {
+                self.goal_service
+                    .set_thread_goal(&state_db, goal_request)
+                    .await
+            }
+        }
+        .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
+        let revision = api_goal_revision(outcome.identity());
 
         let persist_result = match self.thread_manager.get_thread(thread_id).await {
             Ok(thread) => match thread.rollout_path() {
@@ -235,7 +689,10 @@ impl ThreadGoalRequestProcessor {
         self.outgoing
             .send_response(
                 request_id.clone(),
-                ThreadGoalSetResponse { goal: goal.clone() },
+                ThreadGoalSetResponse {
+                    goal: goal.clone(),
+                    revision,
+                },
             )
             .await;
         self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
@@ -256,13 +713,16 @@ impl ThreadGoalRequestProcessor {
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
             .await?;
-        let goal = self
-            .goal_service
-            .get_thread_goal(&state_db, thread_id)
+        let state_goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
             .await
-            .map_err(goal_service_error)?
-            .map(ThreadGoal::from);
-        Ok(ThreadGoalGetResponse { goal })
+            .map_err(|err| internal_error(format!("failed to read thread goal: {err}")))?;
+        let revision = state_goal
+            .as_ref()
+            .map(|goal| api_goal_revision(goal.into()));
+        let goal = state_goal.map(api_thread_goal_from_state);
+        Ok(ThreadGoalGetResponse { goal, revision })
     }
 
     async fn thread_goal_clear_inner(
@@ -273,27 +733,56 @@ impl ThreadGoalRequestProcessor {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
-
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let expected = goal_cas_from_params(
+            params.expected_goal_id.clone(),
+            params.expected_status.clone(),
+            params.expected_mission_revision,
+            params.expected_lifecycle_revision,
+        )?;
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
             .await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
 
+        let prior = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| internal_error(format!("failed to read thread goal: {err}")))?;
+        if prior.is_some() && expected.is_none() {
+            return Err(invalid_params(
+                "thread/goal/clear requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision for an existing Goal",
+            ));
+        }
+
         let listener_command_tx = {
             let thread_state = self.thread_state_manager.thread_state(thread_id).await;
             let thread_state = thread_state.lock().await;
             thread_state.listener_command_tx()
         };
-        let cleared = self
-            .goal_service
-            .clear_thread_goal(&state_db, thread_id)
-            .await
-            .map_err(goal_service_error)?;
+        let (cleared, revision) = if let Some(expected) = expected {
+            let goal = self
+                .goal_service
+                .clear_thread_goal_cas(&state_db, thread_id, expected)
+                .await
+                .map_err(goal_service_error)?;
+            (true, Some(api_goal_revision((&goal).into())))
+        } else {
+            let cleared = self
+                .goal_service
+                .clear_thread_goal(&state_db, thread_id)
+                .await
+                .map_err(goal_service_error)?;
+            (
+                cleared,
+                prior.as_ref().map(|goal| api_goal_revision(goal.into())),
+            )
+        };
 
         self.outgoing
-            .send_response(request_id, ThreadGoalClearResponse { cleared })
+            .send_response(request_id, ThreadGoalClearResponse { cleared, revision })
             .await;
         if cleared {
             self.emit_thread_goal_cleared_ordered(thread_id, listener_command_tx)
@@ -529,6 +1018,17 @@ pub(super) fn api_thread_goal_from_state(goal: codex_state::ThreadGoal) -> Threa
     }
 }
 
+fn api_thread_goal_document_from_state(
+    document: codex_state::ThreadGoalDocument,
+) -> ThreadGoalDocument {
+    ThreadGoalDocument {
+        path: document.path,
+        sha256: document.sha256,
+        byte_length: document.byte_length,
+        mission_revision: document.mission_revision,
+    }
+}
+
 fn api_thread_goal_status_from_state(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
     match status {
         codex_state::ThreadGoalStatus::Active => ThreadGoalStatus::Active,
@@ -540,9 +1040,94 @@ fn api_thread_goal_status_from_state(status: codex_state::ThreadGoalStatus) -> T
     }
 }
 
+fn api_goal_revision(identity: codex_goal_extension::GoalIdentity) -> ThreadGoalRevision {
+    ThreadGoalRevision {
+        goal_id: identity.goal_id,
+        status: identity.status.into(),
+        mission_revision: identity.mission_revision,
+        lifecycle_revision: identity.lifecycle_revision,
+    }
+}
+
+fn goal_cas_from_params(
+    expected_goal_id: Option<String>,
+    expected_status: Option<ThreadGoalStatus>,
+    expected_mission_revision: Option<i64>,
+    expected_lifecycle_revision: Option<i64>,
+) -> Result<Option<GoalCas>, JSONRPCErrorError> {
+    let present = [
+        expected_goal_id.is_some(),
+        expected_status.is_some(),
+        expected_mission_revision.is_some(),
+        expected_lifecycle_revision.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present != 4 {
+        return Err(invalid_params(
+            "expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision must be supplied together",
+        ));
+    }
+    let goal_id = expected_goal_id.expect("Goal CAS field count checked");
+    if goal_id.trim().is_empty() || goal_id.len() > 256 {
+        return Err(invalid_params("expectedGoalId is invalid"));
+    }
+    Ok(Some(GoalCas {
+        goal_id,
+        status: expected_status
+            .expect("Goal CAS field count checked")
+            .to_core(),
+        mission_revision: expected_mission_revision.expect("Goal CAS field count checked"),
+        lifecycle_revision: expected_lifecycle_revision.expect("Goal CAS field count checked"),
+    }))
+}
+
+fn goal_document_cas_from_params(
+    expected_goal_id: Option<String>,
+    expected_status: Option<ThreadGoalStatus>,
+    expected_mission_revision: Option<i64>,
+    expected_lifecycle_revision: Option<i64>,
+) -> Result<Option<GoalCas>, JSONRPCErrorError> {
+    let present = [
+        expected_goal_id.is_some(),
+        expected_status.is_some(),
+        expected_mission_revision.is_some(),
+        expected_lifecycle_revision.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present != 4 {
+        return Err(invalid_params(
+            "document Goal CAS requires expectedGoalId, expectedStatus, expectedMissionRevision, and expectedLifecycleRevision together",
+        ));
+    }
+    let goal_id = expected_goal_id.expect("document Goal CAS field count checked");
+    if goal_id.trim().is_empty() || goal_id.len() > 256 {
+        return Err(invalid_params("expectedGoalId is invalid"));
+    }
+    Ok(Some(GoalCas {
+        goal_id,
+        status: expected_status
+            .expect("document Goal CAS field count checked")
+            .to_core(),
+        mission_revision: expected_mission_revision.expect("document Goal CAS field checked"),
+        lifecycle_revision: expected_lifecycle_revision
+            .expect("document Goal CAS field count checked"),
+    }))
+}
+
 fn goal_service_error(err: GoalServiceError) -> JSONRPCErrorError {
     match err {
         GoalServiceError::InvalidRequest(message) => invalid_request(message),
+        GoalServiceError::Conflict(message) => goal_conflict(message),
         GoalServiceError::Internal(message) => internal_error(message),
     }
 }

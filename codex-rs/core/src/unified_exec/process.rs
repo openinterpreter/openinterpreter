@@ -28,6 +28,8 @@ use codex_utils_output_truncation::formatted_truncate_text;
 use codex_utils_pty::ExecCommandSession;
 use codex_utils_pty::ProcessSignal as PtyProcessSignal;
 use codex_utils_pty::SpawnedPty;
+use sha2::Digest;
+use sha2::Sha256;
 
 use super::UNIFIED_EXEC_OUTPUT_MAX_BYTES;
 use super::UNIFIED_EXEC_OUTPUT_MAX_TOKENS;
@@ -62,10 +64,63 @@ impl SpawnLifecycle for NoopSpawnLifecycle {}
 #[derive(Clone)]
 pub(crate) struct OutputHandles<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     pub(crate) output_buffer: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    pub(crate) output_metrics: Arc<Mutex<OutputMetrics>>,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) output_closed: Arc<AtomicBool>,
     pub(crate) output_closed_notify: Arc<Notify>,
     pub(crate) cancellation_token: CancellationToken,
+}
+
+#[derive(Clone)]
+pub(crate) struct OutputMetrics {
+    total_bytes: u64,
+    digest: Sha256,
+    cap_reached: bool,
+}
+
+impl Default for OutputMetrics {
+    fn default() -> Self {
+        Self {
+            total_bytes: 0,
+            digest: Sha256::new(),
+            cap_reached: false,
+        }
+    }
+}
+
+pub(crate) struct OutputSnapshot {
+    pub(crate) total_bytes: u64,
+    pub(crate) sha256: String,
+    pub(crate) cap_reached: bool,
+}
+
+async fn append_output<const MAX_BYTES: usize>(
+    output_buffer: &Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    output_metrics: &Arc<Mutex<OutputMetrics>>,
+    chunk: &[u8],
+) {
+    let cap_reached = {
+        let mut guard = output_buffer.lock().await;
+        guard.push_chunk(chunk);
+        guard.omitted_bytes() > 0
+    };
+    let mut metrics = output_metrics.lock().await;
+    metrics.total_bytes = metrics
+        .total_bytes
+        .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+    metrics.digest.update(chunk);
+    metrics.cap_reached |= cap_reached;
+}
+
+impl<const MAX_BYTES: usize> OutputHandles<MAX_BYTES> {
+    pub(crate) async fn snapshot(&self) -> OutputSnapshot {
+        let metrics = self.output_metrics.lock().await;
+        OutputSnapshot {
+            total_bytes: metrics.total_bytes,
+            sha256: format!("{:x}", metrics.digest.clone().finalize()),
+            cap_reached: metrics.cap_reached,
+        }
+    }
 }
 
 struct OutputTaskGuard {
@@ -122,6 +177,7 @@ impl UnifiedExecProcess {
     ) -> Self {
         let output = OutputHandles {
             output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
+            output_metrics: Arc::new(Mutex::new(OutputMetrics::default())),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
@@ -279,6 +335,30 @@ impl UnifiedExecProcess {
     async fn snapshot_output(&self) -> Vec<u8> {
         let guard = self.output.output_buffer.lock().await;
         guard.to_bytes()
+    }
+
+    pub(super) async fn output_snapshot(&self) -> OutputSnapshot {
+        self.output.snapshot().await
+    }
+
+    pub(super) async fn wait_for_exit(&self, wait: Duration) -> bool {
+        if self.has_exited() {
+            return true;
+        }
+
+        let mut state_rx = self.state_rx.clone();
+        tokio::time::timeout(wait, async {
+            loop {
+                if state_rx.borrow().has_exited {
+                    return true;
+                }
+                if state_rx.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub(crate) fn sandbox_type(&self) -> SandboxType {
@@ -442,6 +522,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            output_metrics,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -517,9 +598,7 @@ impl UnifiedExecProcess {
                     } = response;
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        append_output(&output_buffer, &output_metrics, &bytes).await;
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -560,9 +639,7 @@ impl UnifiedExecProcess {
                         }
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        append_output(&output_buffer, &output_metrics, &bytes).await;
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -608,6 +685,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            output_metrics,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -621,9 +699,7 @@ impl UnifiedExecProcess {
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&chunk);
-                        drop(guard);
+                        append_output(&output_buffer, &output_metrics, &chunk).await;
                         let _ = output_tx.send(chunk);
                         output_notify.notify_waiters();
                     }

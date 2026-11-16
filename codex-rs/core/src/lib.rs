@@ -44,6 +44,8 @@ pub use codex_network_proxy::NetworkUnixSocketPermissions;
 pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
 pub use codex_protocol::protocol::EnvironmentConfig;
 pub use codex_thread::BackgroundTerminalInfo;
+pub use codex_thread::BackgroundTerminalStatus;
+pub use codex_thread::BackgroundTerminalStatusPhase;
 pub use codex_thread::CodexThread;
 pub use codex_thread::CodexThreadSettingsOverrides;
 pub use codex_thread::GuardianAuthorizationVersion;

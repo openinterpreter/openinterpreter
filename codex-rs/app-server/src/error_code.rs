@@ -5,6 +5,9 @@ pub(crate) const METHOD_NOT_FOUND_ERROR_CODE: i64 = -32601;
 pub const INVALID_PARAMS_ERROR_CODE: i64 = -32602;
 pub(crate) const INTERNAL_ERROR_CODE: i64 = -32603;
 pub(crate) const OVERLOADED_ERROR_CODE: i64 = -32001;
+/// A conditional native Goal mutation observed a different identity or revision.
+/// Callers must refresh `thread/goal/get`; they must not retry the stale write.
+pub(crate) const GOAL_CONFLICT_ERROR_CODE: i64 = -32009;
 pub const INPUT_TOO_LARGE_ERROR_CODE: &str = "input_too_large";
 
 pub(crate) fn server_draining_error() -> JSONRPCErrorError {
@@ -25,6 +28,10 @@ pub(crate) fn invalid_params(message: impl Into<String>) -> JSONRPCErrorError {
 
 pub(crate) fn internal_error(message: impl Into<String>) -> JSONRPCErrorError {
     error(INTERNAL_ERROR_CODE, message)
+}
+
+pub(crate) fn goal_conflict(message: impl Into<String>) -> JSONRPCErrorError {
+    error(GOAL_CONFLICT_ERROR_CODE, message)
 }
 
 fn error(code: i64, message: impl Into<String>) -> JSONRPCErrorError {

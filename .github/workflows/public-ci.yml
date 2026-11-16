@@ -47,6 +47,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
           python3 -m unittest discover -s scripts/install -p 'test_*.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_oix_release_provenance.py'
 
       - name: Validate release workflow shape
         run: |

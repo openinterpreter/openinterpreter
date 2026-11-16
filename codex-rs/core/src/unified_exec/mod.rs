@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::AtomicU64;
 
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -36,6 +37,7 @@ use codex_utils_path_uri::PathUri;
 use rand::Rng;
 use rand::rng;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::sandboxing::SandboxPermissions;
@@ -156,6 +158,21 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
 pub(crate) struct ProcessStore {
     processes: HashMap<i32, ProcessEntry>,
     reserved_process_ids: HashSet<i32>,
+    completed: HashMap<String, CompletedProcessEntry>,
+}
+
+const MAX_COMPLETED_PROCESS_RECORDS: usize = 64;
+
+struct CompletedProcessEntry {
+    turn_id: String,
+    call_id: String,
+    native_process_id: String,
+    terminal_generation: u64,
+    output_bytes: u64,
+    output_sha256: String,
+    output_cap_reached: bool,
+    exit_code: Option<i32>,
+    completed_at: Instant,
 }
 
 impl ProcessStore {
@@ -165,11 +182,28 @@ impl ProcessStore {
         }
         self.processes.remove(&process_id)
     }
+
+    fn insert_completed(&mut self, entry: CompletedProcessEntry) {
+        self.completed
+            .insert(entry.native_process_id.clone(), entry);
+        while self.completed.len() > MAX_COMPLETED_PROCESS_RECORDS {
+            let oldest = self
+                .completed
+                .iter()
+                .min_by_key(|(_, entry)| entry.completed_at)
+                .map(|(native_process_id, _)| native_process_id.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.completed.remove(&oldest);
+        }
+    }
 }
 
 pub(crate) struct UnifiedExecProcessManager {
     process_store: Mutex<ProcessStore>,
     max_write_stdin_yield_time_ms: u64,
+    next_terminal_generation: AtomicU64,
 }
 
 impl UnifiedExecProcessManager {
@@ -178,6 +212,7 @@ impl UnifiedExecProcessManager {
             process_store: Mutex::new(ProcessStore::default()),
             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
                 .max(MIN_EMPTY_YIELD_TIME_MS),
+            next_terminal_generation: AtomicU64::new(1),
         }
     }
 }
@@ -191,8 +226,11 @@ impl Default for UnifiedExecProcessManager {
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
+    turn_id: String,
     call_id: String,
     process_id: i32,
+    native_process_id: String,
+    terminal_generation: u64,
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
     hook_command: String,

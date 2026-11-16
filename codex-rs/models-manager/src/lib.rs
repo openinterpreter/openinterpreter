@@ -63,10 +63,10 @@ mod tests {
     }
 
     #[test]
-    fn open_interpreter_advertises_embedded_codex_compatibility_version() {
+    fn open_interpreter_advertises_validated_codex_compatibility_profile() {
         assert_eq!(
             client_version_to_whole_for_product(codex_product_info::Product::OpenInterpreter),
-            "0.156.1"
+            "0.159.0"
         );
     }
 }

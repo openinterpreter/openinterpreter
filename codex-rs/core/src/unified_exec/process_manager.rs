@@ -15,6 +15,8 @@ use uuid::Uuid;
 use super::oneshot::Completion;
 
 use crate::codex_thread::BackgroundTerminalInfo;
+use crate::codex_thread::BackgroundTerminalStatus;
+use crate::codex_thread::BackgroundTerminalStatusPhase;
 use crate::exec_env::CODEX_PERMISSION_PROFILE_ENV_VAR;
 use crate::exec_env::CODEX_THREAD_ID_ENV_VAR;
 use crate::exec_env::CODEX_VERSION_ENV_VAR;
@@ -1128,29 +1130,52 @@ impl UnifiedExecProcessManager {
     }
 
     async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
-        let mut store = self.process_store.lock().await;
-        let Some(entry) = store.processes.get_mut(&process_id) else {
-            return ProcessStatus::Unknown;
-        };
-
-        let exit_code = entry.process.exit_code();
-        let process_id = entry.process_id;
-
-        if entry.process.has_exited() {
-            let Some(entry) = store.remove(process_id) else {
+        let status = {
+            let mut store = self.process_store.lock().await;
+            let Some(entry) = store.processes.get_mut(&process_id) else {
                 return ProcessStatus::Unknown;
             };
-            ProcessStatus::Exited {
-                exit_code,
-                entry: Box::new(entry),
+
+            let exit_code = entry.process.exit_code();
+            let process_id = entry.process_id;
+
+            if entry.process.has_exited() {
+                let Some(entry) = store.remove(process_id) else {
+                    return ProcessStatus::Unknown;
+                };
+                ProcessStatus::Exited {
+                    exit_code,
+                    entry: Box::new(entry),
+                }
+            } else {
+                ProcessStatus::Alive {
+                    exit_code,
+                    call_id: entry.call_id.clone(),
+                    process_id,
+                }
             }
-        } else {
-            ProcessStatus::Alive {
-                exit_code,
-                call_id: entry.call_id.clone(),
-                process_id,
-            }
+        };
+
+        if let ProcessStatus::Exited { entry, .. } = &status {
+            self.remember_completed_entry(entry).await;
         }
+        status
+    }
+
+    async fn remember_completed_entry(&self, entry: &ProcessEntry) {
+        let output = entry.process.output_snapshot().await;
+        let completed = super::CompletedProcessEntry {
+            turn_id: entry.turn_id.clone(),
+            call_id: entry.call_id.clone(),
+            native_process_id: entry.native_process_id.clone(),
+            terminal_generation: entry.terminal_generation,
+            output_bytes: output.total_bytes,
+            output_sha256: output.sha256,
+            output_cap_reached: output.cap_reached,
+            exit_code: entry.process.exit_code(),
+            completed_at: Instant::now(),
+        };
+        self.process_store.lock().await.insert_completed(completed);
     }
 
     async fn prepare_process_handles(
@@ -1209,11 +1234,22 @@ impl UnifiedExecProcessManager {
     ) {
         let plugin_metrics_sidecar =
             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+        let terminal_generation = self
+            .next_terminal_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let native_process_id = if should_use_deterministic_process_ids() {
+            format!("native-{process_id}")
+        } else {
+            Uuid::new_v4().to_string()
+        };
         let entry = ProcessEntry {
             process: Arc::clone(&process),
             plugin_metrics_sidecar: plugin_metrics_sidecar.clone(),
+            turn_id: context.step_context.turn.sub_id.clone(),
             call_id: context.call_id.clone(),
             process_id,
+            native_process_id,
+            terminal_generation,
             cwd: cwd.clone(),
             initial_exec_command_active,
             hook_command,
@@ -1233,6 +1269,9 @@ impl UnifiedExecProcessManager {
         // prune_processes_if_needed runs while holding process_store; do async
         // network-approval cleanup only after dropping that lock.
         if let Some(pruned_entry) = pruned_entry {
+            if pruned_entry.process.has_exited() {
+                self.remember_completed_entry(&pruned_entry).await;
+            }
             unregister_network_approval_for_entry(&pruned_entry).await;
             pruned_entry.process.terminate();
         }
@@ -1592,6 +1631,7 @@ impl UnifiedExecProcessManager {
             output_closed,
             output_closed_notify,
             cancellation_token,
+            ..
         } = output;
         let mut collected = HeadTailBuffer::default();
         let mut exit_signal_received = cancellation_token.is_cancelled();
@@ -1825,11 +1865,139 @@ impl UnifiedExecProcessManager {
             .into_iter()
             .map(|entry| BackgroundTerminalInfo {
                 item_id: entry.call_id.clone(),
+                turn_id: entry.turn_id.clone(),
                 process_id: entry.process_id.to_string(),
+                native_process_id: entry.native_process_id.clone(),
+                terminal_generation: entry.terminal_generation,
                 command: entry.hook_command.clone(),
                 cwd: entry.cwd.clone(),
             })
             .collect()
+    }
+
+    pub(crate) async fn read_background_terminal_status(
+        &self,
+        turn_id: &str,
+        item_id: &str,
+        native_process_id: &str,
+        max_wait_ms: Option<u32>,
+    ) -> BackgroundTerminalStatus {
+        const MAX_WAIT_MS: u64 = 1_000;
+
+        enum Lookup {
+            Active {
+                process: Arc<UnifiedExecProcess>,
+                process_id: i32,
+                terminal_generation: u64,
+            },
+            Completed {
+                output_bytes: u64,
+                output_sha256: String,
+                output_cap_reached: bool,
+                exit_code: Option<i32>,
+                terminal_generation: u64,
+            },
+            Unknown,
+        }
+
+        let lookup = {
+            let store = self.process_store.lock().await;
+            if let Some(entry) = store.processes.values().find(|entry| {
+                entry.native_process_id == native_process_id
+                    && entry.turn_id == turn_id
+                    && entry.call_id == item_id
+            }) {
+                Lookup::Active {
+                    process: Arc::clone(&entry.process),
+                    process_id: entry.process_id,
+                    terminal_generation: entry.terminal_generation,
+                }
+            } else if let Some(entry) = store.completed.get(native_process_id)
+                && entry.turn_id == turn_id
+                && entry.call_id == item_id
+            {
+                Lookup::Completed {
+                    output_bytes: entry.output_bytes,
+                    output_sha256: entry.output_sha256.clone(),
+                    output_cap_reached: entry.output_cap_reached,
+                    exit_code: entry.exit_code,
+                    terminal_generation: entry.terminal_generation,
+                }
+            } else {
+                Lookup::Unknown
+            }
+        };
+
+        match lookup {
+            Lookup::Unknown => BackgroundTerminalStatus::unknown(),
+            Lookup::Completed {
+                output_bytes,
+                output_sha256,
+                output_cap_reached,
+                exit_code,
+                terminal_generation,
+            } => BackgroundTerminalStatus {
+                phase: BackgroundTerminalStatusPhase::Exited,
+                output_bytes,
+                output_sha256: Some(output_sha256),
+                output_cap_reached,
+                exit_code,
+                terminal_generation: Some(terminal_generation),
+                observation_timed_out: false,
+            },
+            Lookup::Active {
+                process,
+                process_id,
+                terminal_generation,
+            } => {
+                let wait_ms = u64::from(max_wait_ms.unwrap_or_default()).min(MAX_WAIT_MS);
+                let exited_during_wait =
+                    wait_ms > 0 && process.wait_for_exit(Duration::from_millis(wait_ms)).await;
+                let exited = process.has_exited();
+
+                // Move an observed terminal process into the bounded completed
+                // history before returning it. This makes a read that races the
+                // process exit durable and keeps subsequent reads identical,
+                // without issuing any process action or admitting a new turn.
+                if exited {
+                    let _ = self.refresh_process_state(process_id).await;
+                    let completed = {
+                        let store = self.process_store.lock().await;
+                        store.completed.get(native_process_id).and_then(|entry| {
+                            (entry.turn_id == turn_id && entry.call_id == item_id).then(|| {
+                                BackgroundTerminalStatus {
+                                    phase: BackgroundTerminalStatusPhase::Exited,
+                                    output_bytes: entry.output_bytes,
+                                    output_sha256: Some(entry.output_sha256.clone()),
+                                    output_cap_reached: entry.output_cap_reached,
+                                    exit_code: entry.exit_code,
+                                    terminal_generation: Some(entry.terminal_generation),
+                                    observation_timed_out: false,
+                                }
+                            })
+                        })
+                    };
+                    if let Some(completed) = completed {
+                        return completed;
+                    }
+                }
+
+                let output = process.output_snapshot().await;
+                BackgroundTerminalStatus {
+                    phase: if exited {
+                        BackgroundTerminalStatusPhase::Exited
+                    } else {
+                        BackgroundTerminalStatusPhase::Running
+                    },
+                    output_bytes: output.total_bytes,
+                    output_sha256: Some(output.sha256),
+                    output_cap_reached: output.cap_reached,
+                    exit_code: exited.then(|| process.exit_code()).flatten(),
+                    terminal_generation: Some(terminal_generation),
+                    observation_timed_out: wait_ms > 0 && !exited_during_wait && !exited,
+                }
+            }
+        }
     }
 
     pub(crate) async fn terminate_process(&self, process_id: i32) -> bool {
@@ -1862,6 +2030,7 @@ impl UnifiedExecProcessManager {
             entry
         };
 
+        self.remember_completed_entry(&entry).await;
         unregister_network_approval_for_entry(&entry).await;
         true
     }

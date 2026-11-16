@@ -39,6 +39,74 @@ impl codex_extension_api::TurnLifecycleContributor for Recorder {
     }
 }
 
+struct RejectingTurnGate(std::sync::Arc<tokio::sync::Notify>);
+
+impl codex_extension_api::TurnLifecycleContributor for RejectingTurnGate {
+    fn turn_start_gate<'a>(
+        &'a self,
+        _input: codex_extension_api::TurnStartInput<'a>,
+    ) -> codex_extension_api::ExtensionFuture<'a, Result<(), String>> {
+        let called = std::sync::Arc::clone(&self.0);
+        Box::pin(async move {
+            called.notify_one();
+            Err("managed mission document is unavailable".to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn regular_task_rejects_failed_turn_gate_before_turn_started() {
+    let (mut session, turn_context, events) = make_session_and_context_with_rx().await;
+    let called = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::new();
+    builder.turn_lifecycle_contributor(std::sync::Arc::new(RejectingTurnGate(Arc::clone(&called))));
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned before spawning")
+        .services
+        .extensions = Arc::new(builder.build());
+
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            crate::tasks::RegularTask::new(),
+        )
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), called.notified())
+        .await
+        .expect("regular task should invoke the turn admission gate");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+    let mut saw_turn_started = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(
+            std::cmp::min(remaining, std::time::Duration::from_millis(25)),
+            events.recv(),
+        )
+        .await
+        {
+            Ok(Ok(event)) => {
+                if matches!(
+                    event.msg,
+                    codex_protocol::protocol::EventMsg::TurnStarted(_)
+                ) {
+                    saw_turn_started = true;
+                    break;
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(
+        !saw_turn_started,
+        "a rejected admission must not emit TurnStarted or enter model execution"
+    );
+    session
+        .abort_all_tasks(codex_protocol::protocol::TurnAbortReason::Interrupted)
+        .await;
+}
+
 #[tokio::test]
 async fn turn_start_refreshes_dirty_mcp_reuses_clean_runtime_and_cancels_discovery() {
     let (mut session, turn_context) = make_session_and_context().await;

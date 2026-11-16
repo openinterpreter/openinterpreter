@@ -1041,6 +1041,26 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn open_feedback_passcode_retry(
+        &mut self,
+        category: crate::app_event::FeedbackCategory,
+        reason: Option<String>,
+        turn_id: Option<String>,
+        include_logs: bool,
+        feedback_audience: crate::bottom_pane::FeedbackAudience,
+    ) {
+        let view = crate::bottom_pane::FeedbackNoteView::passcode_retry(
+            category,
+            turn_id,
+            self.app_event_tx.clone(),
+            include_logs,
+            feedback_audience,
+            reason,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
     pub(crate) fn open_app_link_view(&mut self, params: crate::bottom_pane::AppLinkViewParams) {
         let view = crate::bottom_pane::AppLinkView::new_with_keymap(
             params,

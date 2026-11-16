@@ -801,6 +801,15 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn thread_background_terminals_status(
+        &self,
+        params: ThreadBackgroundTerminalsStatusParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_background_terminals_status_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn thread_background_terminals_terminate(
         &self,
         params: ThreadBackgroundTerminalsTerminateParams,
@@ -2389,6 +2398,9 @@ impl ThreadRequestProcessor {
             .map(|terminal| ThreadBackgroundTerminal {
                 item_id: terminal.item_id,
                 process_id: terminal.process_id,
+                turn_id: Some(terminal.turn_id),
+                native_process_id: Some(terminal.native_process_id),
+                terminal_generation: Some(terminal.terminal_generation),
                 command: terminal.command,
                 cwd: terminal.cwd.into(),
                 os_pid: None,
@@ -2400,6 +2412,43 @@ impl ThreadRequestProcessor {
         let (data, next_cursor) = paginate_background_terminals(&terminals, cursor, limit)?;
 
         Ok(ThreadBackgroundTerminalsListResponse { data, next_cursor })
+    }
+
+    async fn thread_background_terminals_status_inner(
+        &self,
+        params: ThreadBackgroundTerminalsStatusParams,
+    ) -> Result<ThreadBackgroundTerminalsStatusResponse, JSONRPCErrorError> {
+        let ThreadBackgroundTerminalsStatusParams {
+            thread_id,
+            turn_id,
+            item_id,
+            native_process_id,
+            max_wait_ms,
+        } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let status = thread
+            .read_background_terminal_status(&turn_id, &item_id, &native_process_id, max_wait_ms)
+            .await;
+        let phase = match status.phase {
+            BackgroundTerminalStatusPhase::Running => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Running
+            }
+            BackgroundTerminalStatusPhase::Exited => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Exited
+            }
+            BackgroundTerminalStatusPhase::Unknown => {
+                codex_app_server_protocol::ThreadBackgroundTerminalStatusPhase::Unknown
+            }
+        };
+        Ok(ThreadBackgroundTerminalsStatusResponse {
+            phase,
+            output_bytes: status.output_bytes,
+            output_sha256: status.output_sha256,
+            output_cap_reached: status.output_cap_reached,
+            exit_code: status.exit_code,
+            terminal_generation: status.terminal_generation,
+            observation_timed_out: status.observation_timed_out,
+        })
     }
 
     async fn thread_background_terminals_terminate_inner(

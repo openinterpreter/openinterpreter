@@ -46,6 +46,9 @@ struct Delta {
     content: Option<Value>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    // Ollama, OpenRouter and Groq stream reasoning as `reasoning`.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -233,7 +236,10 @@ async fn process_chat_sse(
 
         for choice in chunk.choices {
             if let Some(delta) = choice.delta {
-                if let Some(reasoning_content) = delta.reasoning_content
+                if let Some(reasoning_content) = delta
+                    .reasoning_content
+                    .filter(|text| !text.is_empty())
+                    .or(delta.reasoning)
                     && !reasoning_content.is_empty()
                 {
                     if !state.reasoning_item_started {
@@ -853,5 +859,121 @@ mod tests {
                 text: "think again".to_string(),
             }]
         )));
+    }
+
+    #[tokio::test]
+    async fn spawn_chat_stream_preserves_reasoning_field() {
+        // Ollama streams thinking as `reasoning`, not `reasoning_content`.
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-42\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"gpt-oss:20b\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"\",\"reasoning\":\"think \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-42\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"gpt-oss:20b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",",
+            "\"reasoning\":\"again\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-42\",\"object\":\"chat.completion.chunk\",\"created\":0,",
+            "\"model\":\"gpt-oss:20b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},",
+            "\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let mut stream = spawn_chat_stream(
+            Box::pin(futures::stream::once(async move { Ok(sse.into()) })),
+            Duration::from_secs(1),
+            /*telemetry*/ None,
+            HashMap::new(),
+        );
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("chat stream event"));
+        }
+
+        let reasoning_deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseEvent::ReasoningContentDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning_deltas, vec!["think ", "again"]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                content: Some(content),
+                ..
+            }) if content == &vec![ReasoningItemContent::ReasoningText {
+                text: "think again".to_string(),
+            }]
+        )));
+    }
+
+    #[tokio::test]
+    async fn spawn_chat_stream_accepts_reasoning_fields_without_duplicates() {
+        // `reasoning_content` wins when it has text; null or empty falls back to `reasoning`.
+        for (delta, expected) in [
+            (serde_json::json!({"reasoning": "think"}), "think"),
+            (serde_json::json!({"reasoning_content": "think"}), "think"),
+            (
+                serde_json::json!({"reasoning_content": "preferred", "reasoning": "fallback"}),
+                "preferred",
+            ),
+            (
+                serde_json::json!({"reasoning_content": null, "reasoning": "fallback"}),
+                "fallback",
+            ),
+            (
+                serde_json::json!({"reasoning_content": "", "reasoning": "fallback"}),
+                "fallback",
+            ),
+            (
+                serde_json::json!({"reasoning_content": "", "reasoning": ""}),
+                "",
+            ),
+        ] {
+            let chunk = serde_json::json!({
+                "id": "chatcmpl-reasoning",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]
+            });
+            let sse = format!(
+                "data: {chunk}
+
+data: [DONE]
+
+"
+            );
+            let mut stream = spawn_chat_stream(
+                Box::pin(futures::stream::once(async move { Ok(sse.into()) })),
+                Duration::from_secs(1),
+                /*telemetry*/ None,
+                HashMap::new(),
+            );
+            let mut deltas = Vec::new();
+            let mut completed = Vec::new();
+            while let Some(event) = stream.next().await {
+                match event.expect("chat stream event") {
+                    ResponseEvent::ReasoningContentDelta { delta, .. } => deltas.push(delta),
+                    ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                        content: Some(content),
+                        ..
+                    }) => completed.extend(content),
+                    _ => {}
+                }
+            }
+            let expected_deltas = if expected.is_empty() {
+                vec![]
+            } else {
+                vec![expected.to_string()]
+            };
+            assert_eq!(deltas, expected_deltas);
+            let expected_content = if expected.is_empty() {
+                vec![]
+            } else {
+                vec![ReasoningItemContent::ReasoningText {
+                    text: expected.to_string(),
+                }]
+            };
+            assert_eq!(completed, expected_content);
+        }
     }
 }
