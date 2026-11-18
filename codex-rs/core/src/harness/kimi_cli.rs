@@ -18,6 +18,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
+use codex_utils_string::take_bytes_at_char_boundary;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashSet;
@@ -982,8 +983,9 @@ fn load_kimi_agents_md(work_dir: &Path) -> String {
         }
         let mut content = content.clone();
         if content.len() > remaining {
-            content.truncate(remaining);
-            content = content.trim().to_string();
+            content = take_bytes_at_char_boundary(&content, remaining)
+                .trim()
+                .to_string();
         }
         remaining = remaining.saturating_sub(content.len());
         budgeted.push((path, content));
@@ -1873,6 +1875,35 @@ mod tests {
                 child.join(".kimi").join("AGENTS.md").display()
             )
         );
+    }
+
+    #[test]
+    fn kimi_agents_md_over_budget_is_cut_on_a_char_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::create_dir(root.join(".git")).expect("git dir");
+        let agents_path = root.join("AGENTS.md");
+        let remaining = 32 * 1024 - format!("<!-- From: {} -->\n", agents_path.display()).len();
+        let prefix = "x".repeat((remaining + 1) % 3);
+        fs::write(
+            &agents_path,
+            format!("{prefix}{}", "\u{65e5}".repeat(12_000)),
+        )
+        .expect("root agents");
+        let prompt = Prompt {
+            cwd: Some(root.to_path_buf()),
+            ..Prompt::default()
+        };
+
+        let system_prompt =
+            build_system_prompt(&prompt, /*session_source*/ None, "conversation-id");
+
+        let kept = format!(
+            "{prefix}{}",
+            "\u{65e5}".repeat((remaining - prefix.len()) / 3)
+        );
+        assert!(system_prompt.contains(&format!("{kept}\n")));
+        assert!(!system_prompt.contains(&format!("{kept}\u{65e5}")));
     }
 
     #[test]
