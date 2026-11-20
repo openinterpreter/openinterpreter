@@ -10,10 +10,16 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: public-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   repository-smoke:
     name: Repository smoke
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
@@ -130,33 +136,90 @@ jobs:
           bash -n .github/scripts/resolve-release-signing-mode.sh
           python3 .github/scripts/test_release_signing_mode.py
 
-      - name: Confirm inherited heavyweight workflows are manual-only
+      - name: Confirm only listed workflows start automatically
         run: |
           set -euo pipefail
           ruby <<'RUBY'
           require "yaml"
 
-          manual_only = %w[
-            bazel.yml
-            blob-size-policy.yml
-            cargo-deny.yml
-            ci.yml
-            codespell.yml
-            python-sdk-release.yml
-            rust-ci.yml
-            rust-ci-full.yml
-            rusty-v8-release.yml
-            sdk.yml
-            v8-canary.yml
-          ]
+          # Every workflow starts only by hand or as a called workflow unless
+          # it is listed here with the exact events it may respond to. A new
+          # workflow file is therefore manual-only until it is reviewed and
+          # added, whatever its name.
+          automatic = {
+            "cargo-ci.yml" => %w[pull_request push],
+            "public-ci.yml" => %w[pull_request push],
+            "readme-translations.yml" => %w[pull_request push],
+            "website-docs-sync.yml" => %w[push],
+            "rust-release.yml" => %w[push],
+            # These two run their jobs only in the upstream repository.
+            "issue-translator.yml" => %w[issues],
+            "python-sdk-cli-release.yml" => %w[workflow_run],
+          }
+          manual = %w[workflow_dispatch workflow_call]
+          # Runner labels that are billed at a larger-runner rate.
+          larger_runner = /x?large\b|\d+-?cores?\b/i
 
-          manual_only.each do |file|
+          # Runner selections of a workflow and of the local workflows it
+          # calls: every `runs-on` value plus the matrix values that feed one.
+          runner_values = lambda do |path, seen|
+            next [] if seen.include?(path) || !File.exist?(path)
+            seen << path
+            found = []
+            walk = lambda do |node, key|
+              case node
+              when Hash
+                found << node["uses"] if node["uses"].is_a?(String) && node["uses"].start_with?("./.github/workflows/")
+                node.each { |name, value| walk.call(value, name.to_s) }
+              when Array
+                node.each { |value| walk.call(value, key) }
+              when String
+                found << node if %w[runs-on runner os labels group].include?(key)
+              end
+            end
+            walk.call(YAML.load_file(path).fetch("jobs", {}), nil)
+            found.flat_map do |value|
+              value.start_with?("./.github/workflows/") ? runner_values.call(value.delete_prefix("./"), seen) : [value]
+            end
+          end
+
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+            file = File.basename(path)
+            workflow = YAML.load_file(path)
+            # YAML reads an unquoted `on` key as the boolean true.
+            declared = workflow.key?(true) ? workflow[true] : workflow.fetch("on")
+            events = case declared
+                     when Hash then declared.keys
+                     when Array then declared
+                     else [declared]
+                     end.map(&:to_s)
+            unexpected = events - manual - automatic.fetch(file, [])
+            unless unexpected.empty?
+              raise "#{file} may not start on #{unexpected.inspect}; " \
+                    "keep it manual-only or list it in public-ci.yml"
+            end
+
+            # A workflow that starts on a pull request or a branch push must
+            # use standard runners only.
+            push = declared.is_a?(Hash) ? declared["push"] : nil
+            branch_push = events.include?("push") && !(push.is_a?(Hash) && push.key?("tags") && !push.key?("branches"))
+            next unless events.include?("pull_request") || branch_push
+
+            billed = runner_values.call(path, []).select do |value|
+              value.match?(larger_runner) || value.end_with?("-runners")
+            end
+            unless billed.empty?
+              raise "#{file} starts on pull requests or branch pushes and must use " \
+                    "standard runners, found #{billed.uniq.inspect}"
+            end
+          end
+
+          %w[issue-translator.yml python-sdk-cli-release.yml].each do |file|
             path = File.join(".github/workflows", file)
             next unless File.exist?(path)
-            workflow = YAML.load_file(path)
-            triggers = workflow.fetch(true)
-            unexpected = triggers.keys - ["workflow_dispatch"]
-            raise "#{file} should stay manual-only, found #{unexpected.inspect}" unless unexpected.empty?
+            unless File.read(path).include?("github.repository == 'openai/codex'")
+              raise "#{file} must keep its jobs limited to the upstream repository"
+            end
           end
           RUBY
 
@@ -171,6 +234,7 @@ jobs:
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
