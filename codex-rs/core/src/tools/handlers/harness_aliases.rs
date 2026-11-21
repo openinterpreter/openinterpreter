@@ -3905,22 +3905,80 @@ fn count_searchable_files(root: &Path) -> usize {
 }
 
 fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
-    if let Some(extension) = pattern.strip_prefix("*.") {
-        return relative_path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.ends_with(&format!(".{extension}")));
+    let path = relative_path.chars().collect::<Vec<_>>();
+    let name_start = path
+        .iter()
+        .rposition(|ch| *ch == '/')
+        .map_or(0, |index| index + 1);
+    expand_glob_braces(pattern).iter().any(|pattern| {
+        let pattern = pattern.chars().collect::<Vec<_>>();
+        if pattern.contains(&'/') {
+            glob_wildcard_matches(&pattern, &path)
+        } else {
+            glob_wildcard_matches(&pattern, &path[name_start..])
+        }
+    })
+}
+
+fn expand_glob_braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let mut depth = 0;
+    let mut close = None;
+    let mut alternatives = Vec::new();
+    let mut start = open + 1;
+    for (index, ch) in pattern[open..].char_indices().map(|(i, ch)| (open + i, ch)) {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    alternatives.push(&pattern[start..index]);
+                    close = Some(index);
+                    break;
+                }
+            }
+            ',' if depth == 1 => {
+                alternatives.push(&pattern[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
     }
-    if let Some((prefix, suffix)) = pattern.split_once("**/*") {
-        return relative_path.starts_with(prefix) && relative_path.ends_with(suffix);
+    let Some(close) = close else {
+        return vec![pattern.to_string()];
+    };
+    let (prefix, suffix) = (&pattern[..open], &pattern[close + 1..]);
+    alternatives
+        .into_iter()
+        .flat_map(|alternative| expand_glob_braces(&format!("{prefix}{alternative}{suffix}")))
+        .collect()
+}
+
+fn glob_wildcard_matches(pattern: &[char], path: &[char]) -> bool {
+    match pattern {
+        [] => path.is_empty(),
+        ['*', '*', '/', rest @ ..] => {
+            glob_wildcard_matches(rest, path)
+                || path.iter().enumerate().any(|(index, ch)| {
+                    *ch == '/' && glob_wildcard_matches(rest, &path[index + 1..])
+                })
+        }
+        ['*', '*', rest @ ..] => {
+            (0..=path.len()).any(|index| glob_wildcard_matches(rest, &path[index..]))
+        }
+        ['*', rest @ ..] => {
+            let segment_len = path.iter().position(|ch| *ch == '/').unwrap_or(path.len());
+            (0..=segment_len).any(|index| glob_wildcard_matches(rest, &path[index..]))
+        }
+        ['?', rest @ ..] => {
+            path.first().is_some_and(|ch| *ch != '/') && glob_wildcard_matches(rest, &path[1..])
+        }
+        [literal, rest @ ..] => {
+            path.first() == Some(literal) && glob_wildcard_matches(rest, &path[1..])
+        }
     }
-    if let Some(suffix) = pattern.strip_prefix("**/") {
-        return relative_path == suffix || relative_path.ends_with(&format!("/{suffix}"));
-    }
-    if let Some((prefix, suffix)) = pattern.split_once('*') {
-        return relative_path.starts_with(prefix) && relative_path.ends_with(suffix);
-    }
-    relative_path == pattern || relative_path.ends_with(&format!("/{pattern}"))
 }
 
 fn harness_alias_spec(name: &str) -> ToolSpec {
@@ -4601,6 +4659,70 @@ mod tests {
         .expect("grep succeeds");
 
         assert_eq!(output, "real.txt");
+    }
+
+    fn write_glob_workspace() -> TempDir {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        for path in [
+            "src/app.ts",
+            "src/view.tsx",
+            "src/lib/util.ts",
+            "tests/test_api.py",
+            "tests/helper.py",
+        ] {
+            let path = workspace.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+            std::fs::write(path, "NEEDLE\n").expect("write file");
+        }
+        workspace
+    }
+
+    #[tokio::test]
+    async fn glob_alias_matches_wildcards_after_double_star() {
+        let workspace = write_glob_workspace();
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Glob,
+            "Glob",
+            json!({ "pattern": "**/test_*.py" }),
+        )
+        .await
+        .expect("glob succeeds");
+
+        assert_eq!(output, "tests/test_api.py");
+    }
+
+    #[tokio::test]
+    async fn glob_alias_single_star_stays_in_one_directory() {
+        let workspace = write_glob_workspace();
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Glob,
+            "Glob",
+            json!({ "pattern": "src/*.ts" }),
+        )
+        .await
+        .expect("glob succeeds");
+
+        assert_eq!(output, "src/app.ts");
+    }
+
+    #[tokio::test]
+    async fn grep_alias_glob_filter_expands_braces() {
+        let workspace = write_glob_workspace();
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Grep,
+            "Grep",
+            json!({ "pattern": "NEEDLE", "glob": "*.{ts,tsx}" }),
+        )
+        .await
+        .expect("grep succeeds");
+
+        assert_eq!(output, "src/app.ts\nsrc/lib/util.ts\nsrc/view.tsx");
     }
 
     #[tokio::test]
