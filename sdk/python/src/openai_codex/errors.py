@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+# The app-server reserves this code for overload backpressure and emits it without
+# a data payload (codex-rs/app-server/src/error_code.rs).
+OVERLOADED_ERROR_CODE = -32001
+
 
 class CodexError(Exception):
     """Base exception for SDK errors."""
@@ -58,24 +62,30 @@ def _contains_retry_limit_text(message: str) -> bool:
     return "retry limit" in lowered or "too many failed attempts" in lowered
 
 
+def _is_overloaded_info(value: Any) -> bool:
+    """Match the overloaded ``CodexErrorInfo`` value in either wire spelling.
+
+    The runtime serializes the enum as camelCase (``serverOverloaded``) because
+    ``CodexErrorInfo`` derives ``#[serde(rename_all = "camelCase")]``, while older
+    payloads used snake_case.
+    """
+
+    if not isinstance(value, str):
+        return False
+    return value.replace("_", "").lower() == "serveroverloaded"
+
+
 def _is_server_overloaded(data: Any) -> bool:
     if data is None:
         return False
 
-    if isinstance(data, str):
-        return data.lower() == "server_overloaded"
+    if _is_overloaded_info(data):
+        return True
 
     if isinstance(data, dict):
-        direct = data.get("codex_error_info") or data.get("codexErrorInfo") or data.get("errorInfo")
-        if isinstance(direct, str) and direct.lower() == "server_overloaded":
-            return True
-        if isinstance(direct, dict):
-            for value in direct.values():
-                if isinstance(value, str) and value.lower() == "server_overloaded":
-                    return True
-        for value in data.values():
-            if _is_server_overloaded(value):
-                return True
+        return any(
+            _is_overloaded_info(key) or _is_server_overloaded(value) for key, value in data.items()
+        )
 
     if isinstance(data, list):
         return any(_is_server_overloaded(value) for value in data)
@@ -98,7 +108,7 @@ def map_jsonrpc_error(code: int, message: str, data: Any = None) -> JsonRpcError
         return InternalRpcError(code, message, data)
 
     if -32099 <= code <= -32000:
-        if _is_server_overloaded(data):
+        if code == OVERLOADED_ERROR_CODE or _is_server_overloaded(data):
             if _contains_retry_limit_text(message):
                 return RetryLimitExceededError(code, message, data)
             return ServerBusyError(code, message, data)
@@ -116,6 +126,6 @@ def is_retryable_error(exc: BaseException) -> bool:
         return True
 
     if isinstance(exc, JsonRpcError):
-        return _is_server_overloaded(exc.data)
+        return exc.code == OVERLOADED_ERROR_CODE or _is_server_overloaded(exc.data)
 
     return False
