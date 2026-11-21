@@ -647,12 +647,15 @@ async fn handle_plain_bash(
     let arguments = function_arguments(&invocation.payload)?;
     let args: BashArgs = parse_arguments(arguments)?;
     let command = harness_fs::normalize_model_path_text(&args.command);
+    let mut translated = json!({
+        "cmd": command,
+        "yield_time_ms": args.timeout.unwrap_or(10_000).min(30_000),
+    });
+    if is_local(&invocation) {
+        translated["max_output_tokens"] = json!(4096);
+    }
     let payload = ToolPayload::Function {
-        arguments: json!({
-            "cmd": command,
-            "yield_time_ms": args.timeout.unwrap_or(10_000).min(30_000),
-        })
-        .to_string(),
+        arguments: translated.to_string(),
     };
     let payload_for_result = payload.clone();
     let result = execute_harness_command(&invocation, payload, &payload_for_result).await?;
@@ -709,6 +712,10 @@ fn is_claude_code(invocation: &ToolInvocation) -> bool {
         .harness
         .as_deref()
         .is_some_and(|harness| matches!(harness, "claude-code" | "claude-code-bare"))
+}
+
+fn is_local(invocation: &ToolInvocation) -> bool {
+    invocation.turn.config.harness.as_deref() == Some("local")
 }
 
 fn is_kimi_code(invocation: &ToolInvocation) -> bool {

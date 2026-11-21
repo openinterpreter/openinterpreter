@@ -6,6 +6,71 @@
     "https://api.groq.com/openai/v1/models"
   ],
   "providers": [
+  {
+    "id": "local",
+    "name": "Local",
+    "env_key": null,
+    "base_url": "http://127.0.0.1:17654/v1",
+    "wire_api": "chat",
+    "sort_priority": 1,
+    "models": [
+      {
+        "id": "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M",
+        "display_name": "Gemma 4 12B Agentic Fable5 Composer",
+        "description": "Best quality Local default \u2022 Public HF download \u2022 llama.cpp tool calling",
+        "reasoning": false,
+        "input_modalities": [
+          "text"
+        ],
+        "context_window": 32768,
+        "priority": 0
+      },
+      {
+        "id": "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:Q4_K_M",
+        "display_name": "Qwen2.5 Coder 0.5B",
+        "description": "Tiny coding baseline \u2022 Public HF download \u2022 experimental",
+        "reasoning": false,
+        "input_modalities": [
+          "text"
+        ],
+        "context_window": 32768,
+        "priority": 1
+      },
+      {
+        "id": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M",
+        "display_name": "Qwen2.5 Coder 1.5B",
+        "description": "Small coding model \u2022 Public HF download \u2022 experimental",
+        "reasoning": false,
+        "input_modalities": [
+          "text"
+        ],
+        "context_window": 32768,
+        "priority": 2
+      },
+      {
+        "id": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF:Q4_K_M",
+        "display_name": "Qwen2.5 Coder 3B",
+        "description": "Small coding model \u2022 Public HF download \u2022 experimental",
+        "reasoning": false,
+        "input_modalities": [
+          "text"
+        ],
+        "context_window": 32768,
+        "priority": 3
+      },
+      {
+        "id": "unsloth/Qwen3-1.7B-GGUF:Q4_K_M",
+        "display_name": "Qwen3 1.7B",
+        "description": "Small reasoning/tool model \u2022 Public HF download \u2022 experimental",
+        "reasoning": false,
+        "input_modalities": [
+          "text"
+        ],
+        "context_window": 40960,
+        "priority": 4
+      }
+    ]
+    },
     {
       "id": "anthropic",
       "name": "Anthropic",
