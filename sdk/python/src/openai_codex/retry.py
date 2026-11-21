@@ -34,8 +34,9 @@ def retry_on_overload(
             if not is_retryable_error(exc):
                 raise
 
-            jitter = delay * jitter_ratio
-            sleep_for = min(max_delay_s, delay) + random.uniform(-jitter, jitter)
+            capped_delay = min(max_delay_s, delay)
+            jitter = capped_delay * jitter_ratio
+            sleep_for = min(max_delay_s, max(0.0, capped_delay + random.uniform(-jitter, jitter)))
             if sleep_for > 0:
                 time.sleep(sleep_for)
             delay = min(max_delay_s, delay * 2)
