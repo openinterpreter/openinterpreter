@@ -53,6 +53,10 @@ use crate::motion::MotionMode;
 use crate::motion::shimmer_text;
 use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::keys;
+use crate::onboarding::local_provider::LocalProviderAction;
+use crate::onboarding::local_provider::LocalProviderConfig;
+use crate::onboarding::local_provider::LocalProviderState;
+use crate::onboarding::local_provider::local_provider_edits;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -92,6 +96,8 @@ pub(crate) enum SignInState {
     ApiKeyConfigured,
     Bedrock(BedrockState),
     BedrockConfigured,
+    LocalProvider(LocalProviderState),
+    LocalProviderConfigured,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +106,7 @@ pub(crate) enum SignInOption {
     DeviceCode,
     ApiKey,
     Bedrock,
+    LocalProvider,
 }
 
 const API_KEY_DISABLED_MESSAGE: &str = "API key login is disabled.";
@@ -183,6 +190,9 @@ impl ContinueWithDeviceCodeState {
 
 impl KeyboardHandler for AuthModeWidget {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.handle_local_provider_key_event(&key_event) {
+            return;
+        }
         if self.handle_bedrock_key_event(&key_event) {
             return;
         }
@@ -214,6 +224,10 @@ impl KeyboardHandler for AuthModeWidget {
             self.select_option_by_index(/*index*/ 3);
             return;
         }
+        if keys::SELECT_FIFTH.is_pressed(key_event) {
+            self.select_option_by_index(/*index*/ 4);
+            return;
+        }
         if keys::CONFIRM.is_pressed(key_event) {
             let sign_in_state = { (*self.sign_in_state.read().unwrap()).clone() };
             match sign_in_state {
@@ -243,6 +257,10 @@ impl KeyboardHandler for AuthModeWidget {
             SignInState::ApiKeyEntry(_) => {
                 drop(sign_in_state);
                 let _ = self.handle_api_key_entry_paste(pasted);
+            }
+            SignInState::LocalProvider(_) => {
+                drop(sign_in_state);
+                self.handle_local_provider_paste(&pasted);
             }
             _ => {}
         }
@@ -315,6 +333,7 @@ impl AuthModeWidget {
         self.sign_in_state.read().is_ok_and(|guard| match &*guard {
             SignInState::ApiKeyEntry(_) => true,
             SignInState::Bedrock(state) => state.is_text_entry_active(),
+            SignInState::LocalProvider(state) => state.is_text_entry_active(),
             _ => false,
         })
     }
@@ -327,6 +346,7 @@ impl AuthModeWidget {
         self.sign_in_state.read().is_ok_and(|guard| match &*guard {
             SignInState::ApiKeyEntry(state) => !state.value.is_empty(),
             SignInState::Bedrock(state) => state.is_text_entry_active(),
+            SignInState::LocalProvider(state) => state.is_text_entry_active(),
             _ => false,
         })
     }
@@ -360,6 +380,9 @@ impl AuthModeWidget {
                 options.push(SignInOption::Bedrock);
             }
         }
+        if self.local_provider_setup_enabled() {
+            options.push(SignInOption::LocalProvider);
+        }
         options
     }
 
@@ -375,7 +398,17 @@ impl AuthModeWidget {
                 options.push(SignInOption::Bedrock);
             }
         }
+        if self.local_provider_setup_enabled() {
+            options.push(SignInOption::LocalProvider);
+        }
         options
+    }
+
+    /// The local/custom provider onboarding path is an Open Interpreter-owned
+    /// surface (provider/model support); upstream Codex keeps its existing
+    /// choices untouched.
+    fn local_provider_setup_enabled(&self) -> bool {
+        Product::current() == Product::OpenInterpreter
     }
 
     fn move_highlight(&mut self, delta: isize) {
@@ -424,6 +457,11 @@ impl AuthModeWidget {
                     self.start_bedrock_discovery();
                 } else if !self.is_api_login_allowed() {
                     self.disallow_api_login();
+                }
+            }
+            SignInOption::LocalProvider => {
+                if self.local_provider_setup_enabled() {
+                    self.start_local_provider_entry();
                 }
             }
         }
@@ -532,6 +570,14 @@ impl AuthModeWidget {
                         option,
                         "Use Amazon Bedrock",
                         "Connect using your AWS credentials",
+                    ));
+                }
+                SignInOption::LocalProvider => {
+                    lines.extend(create_mode_item(
+                        idx,
+                        option,
+                        "Use a local / custom provider",
+                        "Ollama, LM Studio, KCPP, or another OpenAI-compatible endpoint",
                     ));
                 }
             }
@@ -915,6 +961,79 @@ impl AuthModeWidget {
         self.request_frame.schedule_frame();
     }
 
+    fn handle_local_provider_key_event(&mut self, key_event: &KeyEvent) -> bool {
+        let mut guard = self.sign_in_state.write().unwrap();
+        let SignInState::LocalProvider(state) = &mut *guard else {
+            return false;
+        };
+        match state.handle_key_event(key_event) {
+            Some(LocalProviderAction::BackToAuth) => {
+                *guard = SignInState::PickMode;
+                drop(guard);
+                self.set_error(/*message*/ None);
+                self.request_frame.schedule_frame();
+            }
+            Some(LocalProviderAction::Invalid(message)) => {
+                drop(guard);
+                self.set_error(Some(message));
+                self.request_frame.schedule_frame();
+            }
+            Some(LocalProviderAction::Configure(config)) => {
+                drop(guard);
+                self.set_error(/*message*/ None);
+                self.save_local_provider(*config);
+            }
+            None => {
+                drop(guard);
+                self.request_frame.schedule_frame();
+            }
+        }
+        true
+    }
+
+    fn handle_local_provider_paste(&mut self, pasted: &str) {
+        let mut guard = self.sign_in_state.write().unwrap();
+        if let SignInState::LocalProvider(state) = &mut *guard {
+            state.handle_paste(pasted);
+        }
+        drop(guard);
+        self.set_error(/*message*/ None);
+        self.request_frame.schedule_frame();
+    }
+
+    fn start_local_provider_entry(&mut self) {
+        self.set_error(/*message*/ None);
+        *self.sign_in_state.write().unwrap() = SignInState::LocalProvider(LocalProviderState::new());
+        self.request_frame.schedule_frame();
+    }
+
+    /// Persist the provider through `config/batchWrite` — the same source of
+    /// truth as every other provider configuration, not a second one.
+    fn save_local_provider(&mut self, config: LocalProviderConfig) {
+        let request_handle = self.app_server_request_handle.clone();
+        let sign_in_state = self.sign_in_state.clone();
+        let error = self.error.clone();
+        let request_frame = self.request_frame.clone();
+        let edits = local_provider_edits(&config);
+        tokio::spawn(async move {
+            match crate::config_update::write_config_batch(request_handle, edits).await {
+                Ok(_) => {
+                    *error.write().unwrap() = None;
+                    *sign_in_state.write().unwrap() = SignInState::LocalProviderConfigured;
+                }
+                Err(err) => {
+                    *error.write().unwrap() = Some(format!(
+                        "Failed to save local provider configuration: {err}"
+                    ));
+                    *sign_in_state.write().unwrap() =
+                        SignInState::LocalProvider(LocalProviderState::new());
+                }
+            }
+            request_frame.schedule_frame();
+        });
+        self.request_frame.schedule_frame();
+    }
+
     fn handle_existing_chatgpt_login(&mut self) -> bool {
         if matches!(
             self.login_status,
@@ -1044,10 +1163,12 @@ impl StepStateProvider for AuthModeWidget {
             | SignInState::ChatGptContinueInBrowser(_)
             | SignInState::ChatGptDeviceCode(_)
             | SignInState::ChatGptSuccessMessage
-            | SignInState::Bedrock(_) => StepState::InProgress,
+            | SignInState::Bedrock(_)
+            | SignInState::LocalProvider(_) => StepState::InProgress,
             SignInState::ChatGptSuccess
             | SignInState::ApiKeyConfigured
-            | SignInState::BedrockConfigured => StepState::Complete,
+            | SignInState::BedrockConfigured
+            | SignInState::LocalProviderConfigured => StepState::Complete,
         }
     }
 }
@@ -1116,6 +1237,14 @@ impl WidgetRef for AuthModeWidget {
             }
             SignInState::BedrockConfigured => {
                 Paragraph::new("✓ Amazon Bedrock configured".green())
+                    .wrap(Wrap { trim: false })
+                    .render(area, buf);
+            }
+            SignInState::LocalProvider(state) => {
+                state.render(area, buf, self.error_message());
+            }
+            SignInState::LocalProviderConfigured => {
+                Paragraph::new("✓ Local provider configured".green())
                     .wrap(Wrap { trim: false })
                     .render(area, buf);
             }
