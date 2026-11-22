@@ -819,7 +819,7 @@ async fn executor_profile_roots_survive_settings_restore_and_turn_recording() ->
             context.permission_profile,
             context.active_permission_profile
         ),
-        (Some(expected_profile), Some(active_profile))
+        (expected_profile, Some(active_profile))
     );
     Ok(())
 }
