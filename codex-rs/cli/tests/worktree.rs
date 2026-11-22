@@ -8,7 +8,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 #[cfg(not(unix))]
 use tempfile::TempDir;
 use wiremock::Mock;
