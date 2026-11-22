@@ -5,6 +5,7 @@ use codex_config::config_toml::CircuitBreakAction;
 use codex_core::AgentTurnOutcome;
 use codex_core::AgentTurnOutcomeReporter;
 use codex_core::TurnInputSubmission;
+use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -30,6 +31,28 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use test_case::test_case;
 use tokio::sync::oneshot;
+use wiremock::Mock;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+
+fn decoded_body(request: &wiremock::Request) -> Option<Vec<u8>> {
+    let is_zstd = request
+        .headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|entry| entry.trim().eq_ignore_ascii_case("zstd"))
+        });
+    if is_zstd {
+        zstd::stream::decode_all(std::io::Cursor::new(&request.body)).ok()
+    } else {
+        Some(request.body.clone())
+    }
+}
 
 type ReportedOutcome = (ThreadId, String, AgentStatus, Option<CodexErrorInfo>);
 

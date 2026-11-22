@@ -2546,8 +2546,10 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
     Ok(())
 }
 
-#[test_case(true; "uses refreshed executor root")]
-#[test_case(false; "preserves persisted root when executor reports none")]
+#[test_case(true, false; "uses refreshed executor root")]
+#[test_case(false, false; "preserves persisted root when executor reports none")]
+#[test_case(true, true; "owner root overrides refreshed executor root")]
+#[test_case(false, true; "owner root overrides persisted root")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wait(
     reports_refreshed_root: bool,

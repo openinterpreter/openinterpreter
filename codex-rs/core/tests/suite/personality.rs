@@ -85,7 +85,7 @@ fn read_only_text_turn_with_personality(
 #[test_case(Some("none"), Some(true); "none with removed feature enabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_personality_none_sends_no_personality(
-    personality: Option<&str>,
+    personality: Option<&'static str>,
     legacy_feature_setting: Option<bool>,
 ) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));

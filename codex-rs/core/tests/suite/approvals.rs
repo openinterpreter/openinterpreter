@@ -58,6 +58,14 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
+#[cfg(unix)]
+use core_test_support::zsh_fork::build_zsh_fork_test;
+#[cfg(unix)]
+use core_test_support::zsh_fork::restrictive_workspace_write_profile;
+#[cfg(unix)]
+use core_test_support::zsh_fork::zsh_fork_runtime;
+#[cfg(unix)]
+use core_test_support::zsh_fork::zsh_fork_test_builder;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 use serde_json::Value;
@@ -3619,7 +3627,7 @@ async fn env_zsh_script_spawned_by_python_can_request_escalation_under_zsh_fork(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(approval_policy),
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: Some(sandbox_policy),
@@ -3673,16 +3681,17 @@ async fn env_zsh_script_spawned_by_python_can_request_escalation_under_zsh_fork(
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert_eq!(
-        &values[1..],
-        &[
-            "1",
-            if credential_startup {
-                "unset"
-            } else {
-                startup.to_str().unwrap()
-            },
-            "west"
-        ]
+        result.exit_code,
+        Some(0),
+        "nested script failed: {result:?}"
+    );
+    assert!(
+        result.stdout.contains("nested-env-zsh-complete"),
+        "nested script did not complete: {result:?}"
+    );
+    assert!(
+        outside_path.exists(),
+        "approved command did not write its marker"
     );
     Ok(())
 }

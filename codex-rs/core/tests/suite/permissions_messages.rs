@@ -3,6 +3,7 @@ use codex_config::ConfigLayerStack;
 use codex_core::ForkSnapshot;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -1033,7 +1034,7 @@ async fn permissions_message_includes_writable_roots(
     let root_sentence = expected_root_sentence.replace("{roots}", &roots);
     let request = req.single_request();
     let expected = format!(
-        "{WORKSPACE_PERMISSIONS_PREFIX}{root_sentence}{denied_reads}\n</permissions instructions>"
+        "{WORKSPACE_PERMISSIONS_PREFIX}{root_sentence}{expected_denied_read_section}\n</permissions instructions>"
     );
     assert_eq!(permissions_texts(&request), vec![expected]);
     assert_eq!(
