@@ -135,7 +135,6 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use tracing::Span;
 
-use crate::compact::collect_user_messages;
 use crate::connectors::AppInfo;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -5810,13 +5809,8 @@ async fn session_configuration_apply_permission_profile_accepts_direct_write_roo
         file_system_sandbox_policy
     );
     assert_eq!(
-        updated.sandbox_policy(&[]),
-        SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![external_write_path],
-            network_access: false,
-            exclude_tmpdir_env_var: true,
-            exclude_slash_tmp: true,
-        }
+        updated.network_sandbox_policy(),
+        NetworkSandboxPolicy::Restricted
     );
 }
 
@@ -6896,6 +6890,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         ),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -6926,12 +6921,13 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        root_capabilities_restricted: false,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
         originator: "test_originator".to_string(),
-        dynamic_tools: Vec::new(),
+        dynamic_tools: Arc::default(),
         user_shell_override: None,
     };
 
@@ -6950,11 +6946,14 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
     let result = Session::new(
         /*startup*/ None,
         session_configuration,
+        /*attached_thread*/ false,
+        PromptCacheKey::default(),
         /*environment_selections*/ &[],
         Arc::clone(&config),
         SessionInstructions::default(),
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
+        /*runtime_auth*/ Default::default(),
         models_manager,
         Arc::default(),
         model_info,
@@ -6962,6 +6961,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         tx_event,
         agent_status_tx,
         InitialHistory::New,
+        HistoryInitialization::New,
         ForkPersistence::Copied,
         SessionSource::Exec,
         skills_service,
@@ -6971,7 +6971,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         ClientMcpExtensions::default(),
-        LocalAgentControl::default(),
+        LocalAgentControl::default().into(),
         /*reserved_thread_id*/ None,
         environment_manager,
         /*inherited_environments*/ None,
@@ -6981,6 +6981,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
             /*state_db*/ None,
         )),
+        /*resume_preparation*/ None,
         codex_rollout_trace::ThreadTraceContext::disabled(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
@@ -9179,7 +9180,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() -> anyhow::Re
             model: turn_context.model_info().slug.clone(),
             provider_name: config.model_provider_id.clone(),
             approval_policy: "never".to_string(),
-            sandbox_policy: "danger-full-access".to_string(),
+            permissions_profile: "danger-full-access".to_string(),
         },
     )?;
     let live_thread = LiveThread::create(
@@ -10852,7 +10853,7 @@ async fn record_context_updates_emits_environment_item_for_cwd_changes() {
         .clone();
     let environment_config = environment.config().clone();
     current_context.initial_environments.environments[0] =
-        TurnEnvironmentState::Ready(TurnEnvironment::new(
+        TurnEnvironmentState::Ready(TurnEnvironment::from_attachment(
             TurnEnvironmentSelection {
                 selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
@@ -10919,7 +10920,7 @@ async fn record_context_updates_use_environment_permission_profile_and_workspace
     environment_config.permission_profile =
         PermissionProfileSnapshot::legacy(PermissionProfile::workspace_write());
     current_context.initial_environments.environments[0] =
-        TurnEnvironmentState::Ready(TurnEnvironment::new(
+        TurnEnvironmentState::Ready(TurnEnvironment::from_attachment(
             TurnEnvironmentSelection {
                 selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
@@ -10999,7 +11000,7 @@ async fn record_context_updates_omits_environment_item_when_disabled() {
         .clone();
     let environment_config = environment.config().clone();
     current_context.initial_environments.environments[0] =
-        TurnEnvironmentState::Ready(TurnEnvironment::new(
+        TurnEnvironmentState::Ready(TurnEnvironment::from_attachment(
             TurnEnvironmentSelection {
                 selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
@@ -11573,7 +11574,7 @@ async fn turn_context_item_stores_local_cwd() {
                 config: EnvironmentConfigState::Ready(environment_config),
             },
             environment.config_origin,
-            environment.environment,
+            Arc::clone(environment.environment()),
             environment.shell,
         ));
 
@@ -11594,14 +11595,14 @@ async fn turn_context_item_stores_permission_profile() {
 #[tokio::test]
 async fn step_context_item_persists_captured_realtime_and_summary() {
     let (_session, turn_context) = make_session_and_context().await;
-    let mut step_context = StepContext::for_test(turn_context);
+    let mut step_context = StepContext::for_test(Arc::new(turn_context));
     let captured = Arc::make_mut(&mut step_context);
     captured.realtime.active = true;
     Arc::make_mut(&mut captured.settings).reasoning_summary = ReasoningSummaryConfig::None;
 
     let item = step_context.to_turn_context_item();
     assert_eq!(item.realtime_active, Some(true));
-    assert_eq!(item.summary, ReasoningSummaryConfig::None);
+    assert_eq!(item.summary, Some(ReasoningSummaryConfig::None));
 }
 
 #[tokio::test]
@@ -13757,9 +13758,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant1.clone().into()));
 
     let summary1 = "summary one";
-    let snapshot1 = raw_history_items(&live_history);
-    let user_messages1 = collect_user_messages(&snapshot1);
-    let rebuilt1 = compact::build_compacted_history(Vec::new(), &user_messages1, summary1);
+    let rebuilt1 = compact::build_compacted_history(&live_history, summary1);
     live_history.replace_annotated(rebuilt1);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(Box::new(CompactedItem {
@@ -13792,9 +13791,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant2.clone().into()));
 
     let summary2 = "summary two";
-    let snapshot2 = raw_history_items(&live_history);
-    let user_messages2 = collect_user_messages(&snapshot2);
-    let rebuilt2 = compact::build_compacted_history(Vec::new(), &user_messages2, summary2);
+    let rebuilt2 = compact::build_compacted_history(&live_history, summary2);
     live_history.replace_annotated(rebuilt2);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(Box::new(CompactedItem {
