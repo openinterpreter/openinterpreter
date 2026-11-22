@@ -11902,6 +11902,7 @@ async fn local_mxc_preference_preserves_configured_backend(
             loaded.cwd.to_path_buf(),
             &loaded.config_layer_stack,
             loaded.codex_home.clone(),
+            None,
         )
         .await?;
         let mut caller_config = config.clone();

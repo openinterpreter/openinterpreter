@@ -41,7 +41,6 @@ async fn execute(
                     max_output_tokens: Some(/*value*/ 1_000),
                 },
                 Arc::new(NoopCodeModeSessionDelegate),
-                /*preempt*/ None,
             )
             .await?
             .initial_response()

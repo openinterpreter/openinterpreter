@@ -1099,13 +1099,16 @@ async fn future_environment_mcp_policy_applies_on_the_next_turn() -> anyhow::Res
         selected_capability_roots: Vec::new(),
     };
     let settings = |config| ThreadSettingsOverrides {
-        environments: Some(TurnEnvironmentSelections::new(
-            fixture.config.cwd.clone(),
-            vec![TurnEnvironmentSelection {
-                config: EnvironmentConfigState::Ready(config),
-                ..selection.clone()
-            }],
-        )),
+        environments: Some(
+            TurnEnvironmentSelections::new(
+                fixture.config.cwd.clone(),
+                vec![TurnEnvironmentSelection {
+                    config: EnvironmentConfigState::Ready(config),
+                    ..selection.clone()
+                }],
+            )
+            .into_requests(),
+        ),
         ..Default::default()
     };
     submit_thread_settings(&fixture.codex, settings(config.clone())).await?;
