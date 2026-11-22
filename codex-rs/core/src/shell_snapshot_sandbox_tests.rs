@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::sandbox::SandboxOverride;
 use core_test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;

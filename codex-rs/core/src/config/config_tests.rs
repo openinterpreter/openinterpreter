@@ -6022,6 +6022,7 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         thread_config.cwd.to_path_buf(),
         &refreshed_layer_stack,
         codex_home.abs(),
+        None,
     )
     .await?;
     assert_eq!(
@@ -6157,6 +6158,7 @@ async fn rebuild_with_session_layers_refreshes_plugin_derived_mcp_config() -> an
         thread_config.cwd.to_path_buf(),
         &refreshed_layer_stack,
         codex_home.abs(),
+        None,
     )
     .await?;
     let plugins_manager =

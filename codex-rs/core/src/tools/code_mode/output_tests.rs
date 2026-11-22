@@ -1,6 +1,7 @@
 //! Checks code-mode timing headers, including absent and zero host measurements.
 
 use super::*;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ImageReference;
 use pretty_assertions::assert_eq;
 
@@ -17,7 +18,9 @@ fn completed_timing_preserves_content_and_distinguishes_zero_from_unavailable() 
             detail: None,
         },
         FunctionCallOutputContentItem::InputAudio {
-            audio: "data:audio/wav;base64,audio".to_string(),
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/wav;base64,audio".to_string(),
+            },
         },
     ];
     for (host_duration, expected_timing) in [

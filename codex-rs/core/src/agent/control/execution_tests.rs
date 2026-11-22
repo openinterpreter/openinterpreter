@@ -7,7 +7,10 @@ use pretty_assertions::assert_eq;
 
 fn control_with_limit(max_threads: usize) -> LocalAgentControl {
     let control = LocalAgentControl::default();
-    control.agent_execution_limiter.initialize(max_threads);
+    control
+        .runtime
+        .agent_execution_limiter
+        .initialize(max_threads);
     control
 }
 
