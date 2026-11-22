@@ -3083,6 +3083,7 @@ async fn websocket_harness_with_provider_factory(
         /*attestation_provider*/ None,
         http_client_factory,
         config.workspace_routing_context(),
+        Vec::new(),
     );
 
     WebsocketTestHarness {
@@ -3122,7 +3123,7 @@ async fn responses_websocket_restored_history_metric(fork: bool) -> anyhow::Resu
     options.thread_extension_init.insert(metrics);
     let restored = if fork {
         manager
-            .fork_thread(codex_core::ForkSnapshot::Interrupted, options, rollout_path)
+            .fork_legacy_thread(codex_core::ForkSnapshot::Interrupted, options, rollout_path)
             .await?
     } else {
         options.initial_history =

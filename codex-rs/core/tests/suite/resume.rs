@@ -4,10 +4,13 @@ use codex_core::TurnInputRequest;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::user_input::ByteRange;
+use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
@@ -230,7 +233,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
     resumed.codex.flush_rollout().await?;
     let mut rejoined = resumed
         .thread_manager
-        .resume_thread_from_rollout(
+        .resume_legacy_thread_from_rollout(
             resumed.config.clone(),
             resumed.codex.rollout_path().expect("resumed rollout path"),
             resumed.thread_manager.auth_manager(),
