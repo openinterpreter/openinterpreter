@@ -10,6 +10,7 @@ mod app_read;
 mod attestation;
 mod auto_env;
 mod bedrock_setup;
+mod client_message_id;
 mod client_metadata;
 mod code_mode_host;
 mod collaboration_mode_list;
