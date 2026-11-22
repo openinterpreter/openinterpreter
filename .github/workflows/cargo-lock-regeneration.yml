@@ -158,6 +158,15 @@ jobs:
           [[ -z "$(git diff --name-only -- . ':!codex-rs/Cargo.lock')" ]]
           [[ -z "$(git ls-files --others --exclude-standard)" ]]
 
+      # The candidate/policy step continues so its reviewed artifact can be
+      # retained; rerun a failed policy check as a failing step so the ordinary
+      # failed-step log contains its exact diagnostic instead of only the guard.
+      - name: Diagnose failed dependency policy
+        if: steps.policy.outcome == 'failure'
+        shell: bash
+        working-directory: codex-rs
+        run: cargo deny check
+
       - name: Reject a candidate that fails dependency policy
         if: always() && !cancelled()
         shell: bash
