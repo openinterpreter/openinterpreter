@@ -233,7 +233,7 @@ async fn recorded_questions_share_queued_input_order_in_thread_owned_context() {
                 ResponseItemEnvelope {
                     item: user_message("Yes."),
                     metadata: Some(codex_history::CodexHarnessMetadata {
-                        user_input_order: reply_order,
+                        user_input_order: Some(reply_order),
                         ..Default::default()
                     }),
                 },
