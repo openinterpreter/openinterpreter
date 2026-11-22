@@ -166,9 +166,12 @@ jobs:
         shell: bash
         working-directory: codex-rs
         run: |
-          set -uo pipefail
+          # GitHub's bash runner starts with -e; explicitly suspend it only while
+          # capturing the policy result so the bounded diagnostic actually runs.
+          set +e
           cargo deny check > "$RUNNER_TEMP/cargo-deny-diagnostic.log" 2>&1
           result=$?
+          set -e
           python3 - <<'PY'
           import os, pathlib, re
           log = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'cargo-deny-diagnostic.log').read_text(errors='replace')
