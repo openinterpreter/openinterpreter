@@ -1060,10 +1060,10 @@ async fn intercepted_apply_patch_updates_absolute_target_after_turn_cwd_is_remov
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(
-                    test.config.cwd.clone(),
-                    vec![selection],
-                )),
+                environments: Some(
+                    TurnEnvironmentSelections::new(test.config.cwd.clone(), vec![selection])
+                        .into_requests(),
+                ),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,

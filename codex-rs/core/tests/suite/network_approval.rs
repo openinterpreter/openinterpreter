@@ -3302,7 +3302,7 @@ fn network_probe_args(command: &str, environment_id: &str) -> Value {
 }
 
 async fn start_concurrent_network_requests(
-    builder: TestCodexBuilder,
+    mut builder: TestCodexBuilder,
     server: &wiremock::MockServer,
     requests: &[(&str, u16)],
     queued: &mut NamedTraceEvents,

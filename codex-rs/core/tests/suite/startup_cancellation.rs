@@ -78,7 +78,13 @@ async fn cancelled_resume_releases_writer_while_mcp_startup_is_pending() -> Resu
         .context("local thread store")?;
     let resume_options = || StartThreadOptions {
         initial_history: history.clone(),
-        environments: Some(environments.clone().into_requests()),
+        environments: Some(
+            environments
+                .clone()
+                .into_iter()
+                .map(codex_protocol::protocol::TurnEnvironmentSelection::into_request)
+                .collect(),
+        ),
         ..StartThreadOptions::new(test.config.clone())
     };
 

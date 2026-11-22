@@ -4605,6 +4605,7 @@ dependencies = [
  "codex-exec-server-test-support",
  "codex-extension-api",
  "codex-features",
+ "codex-history",
  "codex-login",
  "codex-mcp",
  "codex-plugin",

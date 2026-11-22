@@ -162,7 +162,11 @@ impl ModelsEndpointClient for TestModelsEndpoint {
         Box::pin(async move {
             self.fetch_count.fetch_add(1, Ordering::SeqCst);
             Ok(ModelsEndpointResponse {
-                models: self.models.clone(),
+                models: self
+                    .models
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 etag: None,
                 identity: self.identity().expect("test endpoint identity"),
             })

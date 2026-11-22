@@ -111,7 +111,10 @@ async fn direct_call_metadata_during_compaction_respects_provider_support(
     if !metadata_enabled {
         let mut config = test.config.clone();
         config.features.disable(Feature::ExecutedToolCallMetadata)?;
-        test.codex.refresh_runtime_config(config).await;
+        let current_config = test.codex.config().await;
+        test.codex
+            .refresh_runtime_config(current_config, config)
+            .await;
     }
     test.codex.submit(Op::Compact).await?;
     wait_for_event(&test.codex, |event| {

@@ -250,10 +250,17 @@ async fn ephemeral_fork_shares_cache_routing_but_keeps_session_identity() -> Res
     config.ephemeral = true;
     let fork = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::TruncateBeforeNthUserMessage(usize::MAX),
             StartThreadOptions {
-                environments: Some(test.codex.environment_selections().await),
+                environments: Some(
+                    test.codex
+                        .environment_selections()
+                        .await
+                        .into_iter()
+                        .map(TurnEnvironmentSelection::into_request)
+                        .collect(),
+                ),
                 ..StartThreadOptions::new(config)
             },
             test.codex.rollout_path().expect("parent rollout"),

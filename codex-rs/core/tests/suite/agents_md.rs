@@ -1339,7 +1339,14 @@ async fn isolated_guardian_keeps_applied_thread_instructions() -> Result<()> {
     let parent = test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(test.codex.environment_selections().await.into_requests()),
+            environments: Some(
+                test.codex
+                    .environment_selections()
+                    .await
+                    .into_iter()
+                    .map(TurnEnvironmentSelection::into_request)
+                    .collect(),
+            ),
             thread_instructions_provider: Some(provider.clone()),
             ..StartThreadOptions::new(test.config.clone())
         })

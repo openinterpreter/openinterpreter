@@ -1379,12 +1379,13 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
     let _ = fixture
         .test
         .codex
-        .refresh_mcp_config(current_config, mismatched_config)
+        .refresh_mcp_config(current_config, mismatched_config.clone())
         .await;
+    let current_config = fixture.test.codex.config().await;
     fixture
         .test
         .codex
-        .refresh_mcp_config(mismatched_config)
+        .refresh_mcp_config(current_config, mismatched_config)
         .await;
     fixture
         .test

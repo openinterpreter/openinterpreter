@@ -357,7 +357,7 @@ async fn worker_reasoning_overrides_follow_effective_client_policy(
     options.thread_source = Some(thread_source);
     let forked = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::Interrupted,
             options,
             parent.rollout_path().expect("parent rollout path"),
@@ -524,6 +524,7 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
             turn_id: turn_id.clone(),
             thread_settings: Default::default(),
             trace: None,
+            prompt_cache_ttl: None,
             cyber_access_program: None,
         })
         .await?;
@@ -833,7 +834,7 @@ async fn reasoning_effort_override_websocket_prewarm_preserves_baseline(
             configure_prewarm(&mut config);
             let forked = previous
                 .thread_manager
-                .fork_thread(
+                .fork_legacy_thread(
                     ForkSnapshot::Interrupted,
                     codex_core::StartThreadOptions::new(config.clone()),
                     previous.codex.rollout_path().expect("rollout path"),

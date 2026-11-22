@@ -1004,7 +1004,7 @@ async fn permissions_message_includes_writable_roots(
     assert_eq!(permissions.len(), 1);
     let mut writable_roots = [
         AbsolutePathBuf::try_from(test.config.cwd.as_path().canonicalize()?)?,
-        writable_root,
+        writable_root.clone(),
     ];
     writable_roots.sort();
     let writable_roots = writable_roots

@@ -812,14 +812,14 @@ async fn executor_profile_roots_survive_settings_restore_and_turn_recording() ->
             _ => None,
         })
         .context("recorded turn context")?;
-    // The rollout retains compiled permissions, not the unprojectable root list.
+    // The rollout retains the compiled permission profiles; capability roots
+    // are carried by the environment selection rather than this turn context.
     assert_eq!(
         (
             context.permission_profile,
-            context.active_permission_profile,
-            context.workspace_roots
+            context.active_permission_profile
         ),
-        (Some(expected_profile), Some(active_profile), None)
+        (Some(expected_profile), Some(active_profile))
     );
     Ok(())
 }
@@ -956,7 +956,7 @@ async fn settings_update_does_not_retarget_active_turn_environment() -> Result<(
     let preview = test
         .codex
         .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-            environments: Some(next_environments.clone().into_requests()),
+            environments: Some(next_environments.clone()),
             ..Default::default()
         })
         .await?;
@@ -1724,9 +1724,9 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
         let preview = test
             .codex
             .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentRequests::new(
+                environments: Some(TurnEnvironmentSelections::new(
                     test.config.cwd.clone(),
-                    vec![selection_override.into_request()],
+                    vec![selection_override],
                 )),
                 ..Default::default()
             })
@@ -1914,11 +1914,11 @@ async fn owner_network_policy_rejects_unsupported_environment_authority() -> Res
     let preview_error = test
         .codex
         .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentRequests::new(
+            environments: Some(TurnEnvironmentSelections::new(
                 test.config.cwd.clone(),
-                vec![TurnEnvironmentRequest {
+                vec![TurnEnvironmentSelection {
                     config: EnvironmentConfigState::Ready(owner_config.clone()),
-                    ..selection.clone().into_request()
+                    ..selection.clone()
                 }],
             )),
             ..Default::default()
@@ -2220,7 +2220,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     for thread in [&waiting.thread, &independent.thread, &failed.thread] {
         let error = thread
             .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
-                environments: Some(downgraded_environments.clone().into_requests()),
+                environments: Some(downgraded_environments.clone()),
                 ..Default::default()
             })
             .await
@@ -2440,6 +2440,7 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
         ..active.clone()
     };
     let owner_config = |selection: &TurnEnvironmentSelection, id: &str| EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: test.config.permissions.allow_login_shell,
         workspace_roots: selection.workspace_roots.clone(),
         permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
@@ -2461,7 +2462,7 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
     let thread = test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(vec![active.clone()]),
+            environments: Some(vec![active.clone().into_request()]),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?
@@ -2495,10 +2496,13 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
             .start_or_steer_turn(
                 request("use the other environment next turn").with_thread_settings(
                     ThreadSettingsOverrides {
-                        environments: Some(TurnEnvironmentSelections::new(
-                            test.config.cwd.clone(),
-                            vec![future.clone()],
-                        )),
+                        environments: Some(
+                            TurnEnvironmentSelections::new(
+                                test.config.cwd.clone(),
+                                vec![future.clone()],
+                            )
+                            .into_requests()
+                        ),
                         ..Default::default()
                     },
                 )

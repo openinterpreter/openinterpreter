@@ -33,6 +33,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+codex-history = { workspace = true }
 core_test_support = { workspace = true }
 axum = { workspace = true }
 codex-exec-server-test-support = { workspace = true }

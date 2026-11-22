@@ -60,16 +60,19 @@ async fn provisioning_failure_reaches_model_and_turn_continues(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(
-                    test.config.cwd.clone(),
-                    vec![TurnEnvironmentSelection {
-                        selected_capability_roots: Default::default(),
-                        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-                        cwd: PathUri::from_abs_path(&test.config.cwd),
-                        workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
-                        config: EnvironmentConfigState::FromThread,
-                    }],
-                )),
+                environments: Some(
+                    TurnEnvironmentSelections::new(
+                        test.config.cwd.clone(),
+                        vec![TurnEnvironmentSelection {
+                            selected_capability_roots: Default::default(),
+                            environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                            cwd: PathUri::from_abs_path(&test.config.cwd),
+                            workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
+                            config: EnvironmentConfigState::FromThread,
+                        }],
+                    )
+                    .into_requests(),
+                ),
                 ..Default::default()
             }),
         )

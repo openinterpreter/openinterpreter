@@ -64,10 +64,13 @@ async fn model_update_preserves_active_environment_and_next_turn_uses_new_select
     submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {
-            environments: Some(TurnEnvironmentSelections::new(
-                test.config.cwd.join("future-environment"),
-                vec![next_environment],
-            )),
+            environments: Some(
+                TurnEnvironmentSelections::new(
+                    test.config.cwd.join("future-environment"),
+                    vec![next_environment],
+                )
+                .into_requests(),
+            ),
             ..Default::default()
         },
     )

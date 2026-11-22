@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 // SessionConfigured no longer carries a synthesized replay list. Inspect the
 // persisted rollout events instead, which are the source for resumed history.
-async fn persisted_turn_events(thread: &CodexThread) -> Result<Vec<EventMsg>> {
+pub(super) async fn persisted_turn_events(thread: &CodexThread) -> Result<Vec<EventMsg>> {
     thread.flush_rollout().await?;
     let path = thread.rollout_path().context("persisted rollout path")?;
     let history = codex_rollout::RolloutRecorder::get_rollout_history(&path).await?;

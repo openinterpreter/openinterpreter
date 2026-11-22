@@ -31,6 +31,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
@@ -200,10 +201,8 @@ async fn mcp_app_ui_survives_tool_events_and_resume(
     assert_eq!(responses.requests().len(), 2);
 
     let resumed = builder.restart(&server, &test).await?;
-    let completed_history = resumed
-        .session_configured
-        .initial_messages
-        .expect("resumed history")
+    let completed_history = super::resume::persisted_turn_events(&resumed.codex)
+        .await?
         .into_iter()
         .filter(|event| matches!(event, EventMsg::McpToolCallEnd(end) if end.call_id == call_id))
         .collect::<Vec<_>>();
