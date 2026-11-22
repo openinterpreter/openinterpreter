@@ -463,7 +463,7 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
         /*yield_time_ms*/ 250,
     )
     .await?;
-    assert!(!output.raw_output.is_empty());
+    assert!(!output.raw_output.text.is_empty());
 
     let exited = session
         .services
@@ -1005,7 +1005,12 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
     else {
         panic!("expected ready primary environment");
     };
-    environment.environment = Arc::new(remote_test_env.environment().clone());
+    *environment = crate::session::turn_context::TurnEnvironment::new(
+        environment.selection.clone(),
+        environment.config_origin,
+        Arc::new(remote_test_env.environment().clone()),
+        environment.shell.clone(),
+    );
 
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
@@ -1031,7 +1036,7 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
             turn.initial_environments
                 .primary()
                 .expect("turn environment")
-                .environment
+                .environment()
                 .as_ref(),
         )
         .await

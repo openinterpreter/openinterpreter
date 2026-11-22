@@ -297,6 +297,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
         /*prefer_executor_snapshots*/ false,
     );
     let mut config = EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: false,
         workspace_roots: Vec::new(),
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
@@ -318,16 +319,13 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
         TurnEnvironmentSnapshot::default(),
         /*non_blocking_snapshots*/ false,
     );
-    environments.update_selections(
-        &[TurnEnvironmentSelection {
-            selected_capability_roots: Default::default(),
-            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-            cwd: PathUri::from_abs_path(&dir.path().abs()),
-            workspace_roots: Vec::new(),
-            config: EnvironmentConfigState::FromThread,
-        }],
-        &config,
-    );
+    environments.update_selections(&[TurnEnvironmentSelection {
+        selected_capability_roots: Default::default(),
+        environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&dir.path().abs()),
+        workspace_roots: Vec::new(),
+        config: EnvironmentConfigState::FromThread,
+    }]);
     for (state, expect_snapshot) in [
         (SnapshotCredentialBrokerState::Starting, false),
         (SnapshotCredentialBrokerState::Inactive, true),
@@ -355,7 +353,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
                 .shell_environment_policy
                 .r#set
                 .insert("CORP_REGION".into(), "west".into());
-            environments.update_thread_config(&config);
+            environments.set_active_thread_defaults(config.clone());
             let updated = environments.snapshot().await;
             assert!(!Arc::ptr_eq(
                 &environment.shell_snapshot_cache,
@@ -394,7 +392,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     environments.set_snapshot_credential_broker(SnapshotCredentialBrokerState::Ready(
         started_proxy.proxy(),
     ));
-    environments.update_thread_config(&config);
+    environments.set_active_thread_defaults(config.clone());
     let turn = environments.snapshot().await;
     let environment = turn.primary().expect("brokered environment");
     let mut tool_config = crate::config::ConfigBuilder::without_managed_config_for_tests()
@@ -411,6 +409,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     let permissions = PermissionProfile::Disabled;
     let cancellation = CancellationToken::new();
     let mut attempt = SandboxAttempt {
+        sandbox_override: Default::default(),
         sandbox: SandboxType::None,
         sandbox_requested: false,
         permissions: &permissions,
