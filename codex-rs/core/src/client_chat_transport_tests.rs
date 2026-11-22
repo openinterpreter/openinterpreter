@@ -22,6 +22,7 @@ use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::Harness;
 use futures::StreamExt;
+use std::sync::Arc;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -250,7 +251,7 @@ async fn collect_stream_events(
     let mut session = client.new_session();
     let mut stream = session
         .stream(
-            &prompt,
+            &Arc::new(prompt),
             &test_model_info(model_slug),
             &test_session_telemetry(),
             /*effort*/ None,

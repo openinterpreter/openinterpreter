@@ -747,7 +747,7 @@ async fn responses_http_omits_raw_tool_metadata_for_openai_named_custom_endpoint
     let mut session = client.new_session();
     let mut stream = session
         .stream(
-            &prompt,
+            &Arc::new(prompt),
             &test_model_info(),
             &test_session_telemetry(),
             /*effort*/ None,

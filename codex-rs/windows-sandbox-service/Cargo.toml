@@ -28,6 +28,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
