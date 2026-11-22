@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/bazel-lock-regeneration.yml
+      - codex-rs/Cargo.lock
   workflow_dispatch:
     inputs:
       source_sha:
