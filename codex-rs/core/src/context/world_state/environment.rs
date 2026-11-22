@@ -111,6 +111,36 @@ impl EnvironmentsState {
         })
     }
 
+    fn snapshot(&self) -> EnvironmentsSnapshot {
+        EnvironmentsSnapshot {
+            per_environment: self.per_environment,
+            environments: self
+                .environments
+                .iter()
+                .map(|(id, environment)| {
+                    (
+                        id.clone(),
+                        EnvironmentSnapshot {
+                            cwd: environment.cwd.inferred_native_path_string(),
+                            status: environment.status,
+                            error: environment.error.clone(),
+                            shell: environment.shell.clone(),
+                            is_primary: self.environments.len() > 1 && environment.is_primary,
+                            filesystem: environment.filesystem.clone(),
+                            network_access: environment.network_access,
+                        },
+                    )
+                })
+                .collect(),
+            shell_version: self.shell_version.clone(),
+            current_date: self.current_date.clone(),
+            timezone: self.timezone.clone(),
+            network: self.rendered_network(),
+            filesystem: self.filesystem.as_ref().map(FileSystemContext::render),
+            subagents: self.subagents.clone(),
+        }
+    }
+
     fn rendered_full(&self) -> RenderedEnvironments {
         RenderedEnvironments {
             updates: self
@@ -142,33 +172,7 @@ impl WorldStateSection for EnvironmentsState {
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
     ) -> SectionTransition<Self::Snapshot> {
-        let current = EnvironmentsSnapshot {
-            per_environment: self.per_environment,
-            environments: self
-                .environments
-                .iter()
-                .map(|(id, environment)| {
-                    (
-                        id.clone(),
-                        EnvironmentSnapshot {
-                            cwd: environment.cwd.inferred_native_path_string(),
-                            status: environment.status,
-                            error: environment.error.clone(),
-                            shell: environment.shell.clone(),
-                            is_primary: self.environments.len() > 1 && environment.is_primary,
-                            filesystem: environment.filesystem.clone(),
-                            network_access: environment.network_access,
-                        },
-                    )
-                })
-                .collect(),
-            shell_version: self.shell_version.clone(),
-            current_date: self.current_date.clone(),
-            timezone: self.timezone.clone(),
-            network: self.rendered_network(),
-            filesystem: self.filesystem.as_ref().map(FileSystemContext::render),
-            subagents: self.subagents.clone(),
-        };
+        let current = self.snapshot();
         let empty = EnvironmentsSnapshot::default();
         let previous = match previous {
             PreviousSectionState::Known(previous) => previous,
