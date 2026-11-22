@@ -1809,6 +1809,19 @@ async fn dispatch_cli(
                 arg0_paths.clone(),
             )));
         }
+        Some(Subcommand::GitCredential(mut args)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "git-credential",
+            )?;
+            prepend_config_flags(&mut args.config_overrides, root_config_overrides.clone());
+            // Git falls back to prompting after helper errors; quitting must be explicit.
+            if let Err(error) = codex_cli::run_git_credential(args).await {
+                eprintln!("{error}");
+                println!("quit=true\n");
+            }
+        }
         Some(Subcommand::Login(mut login_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
