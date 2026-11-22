@@ -6,6 +6,7 @@ use codex_config::NetworkDomainPermissionsToml;
 use codex_execpolicy::Decision::Allow;
 use codex_execpolicy::NetworkRuleProtocol::Https;
 use codex_network_proxy::LocalBindingPolicy::DefaultFalse;
+use codex_network_proxy::LocalBindingPolicy::RequireTrue;
 use codex_network_proxy::NetworkDomainPermission;
 use codex_network_proxy::NetworkUnixSocketPermission;
 use codex_network_proxy::NetworkUnixSocketPermissions;

@@ -8,6 +8,8 @@ use pretty_assertions::assert_eq;
 fn persistent_instructions_follow_mode_and_catalog_updates_without_duplicates() {
     let mut history = Vec::new();
     let mut previous = None;
+    let persistent = Some(ReasoningEffort::Persistent);
+    let medium = Some(ReasoningEffort::Medium);
     let replacement = format!("{REPLACEMENT_NOTICE}\n\nupdated instructions");
 
     for (effort, instructions, expected) in [
@@ -27,7 +29,7 @@ fn persistent_instructions_follow_mode_and_catalog_updates_without_duplicates() 
     ] {
         let mut world_state = WorldState::default();
         world_state.add_section(PersistentModeState::new(
-            enabled,
+            effort.as_ref(),
             instructions,
             /*send_user_message_async_available*/ false,
         ));
@@ -58,12 +60,12 @@ fn retained_persistent_instructions_are_replaced_or_retired_without_a_snapshot()
     let retained = ContextualUserFragment::into(PersistentModeState {
         instructions: "previous instructions".to_string(),
     });
-    for (enabled, expected) in [
+    for (effort, expected) in [
         (
-            true,
+            ReasoningEffort::Persistent,
             format!("{REPLACEMENT_NOTICE}\n\ncurrent instructions"),
         ),
-        (false, REMOVAL_NOTICE.to_string()),
+        (ReasoningEffort::Medium, REMOVAL_NOTICE.to_string()),
     ] {
         let mut world_state = WorldState::default();
         world_state.add_section(PersistentModeState::new(
