@@ -907,6 +907,7 @@ mod tests {
                 call_id: invocation.call_id.clone(),
                 payload: invocation.payload.clone(),
                 encrypted_function_args: None,
+                native_call: None,
             },
             &invocation.source,
             &invocation.step_context,

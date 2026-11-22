@@ -417,7 +417,7 @@ mod tests {
             Default::default(),
             /*non_blocking_snapshots*/ true,
         );
-        environments.update_selections(std::slice::from_ref(&selection), &environment_config);
+        environments.update_selections(std::slice::from_ref(&selection));
         turn_context.initial_environments = environments.snapshot().await;
         turn_context
             .initial_environments

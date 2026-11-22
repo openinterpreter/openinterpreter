@@ -857,6 +857,7 @@ mod tests {
                 token_usage: None,
                 usage_metadata: None,
                 end_turn: None,
+                reasoning_removals: None,
             }))
             .await
             .expect("send completed");
@@ -941,6 +942,7 @@ mod tests {
                 token_usage: None,
                 usage_metadata: None,
                 end_turn: None,
+                reasoning_removals: None,
             }))
             .await
             .expect("send completed");

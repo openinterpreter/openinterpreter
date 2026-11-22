@@ -4240,13 +4240,10 @@ mod tests {
         selection.workspace_roots = vec![workspace_root_uri];
         selection.config =
             codex_protocol::protocol::EnvironmentConfigState::Ready(environment_config);
-        turn.initial_environments.environments[0] =
-            TurnEnvironmentState::Ready(TurnEnvironment::new(
-                selection,
-                current.config_origin,
-                current.environment,
-                current.shell,
-            ));
+        let environment = Arc::clone(current.environment());
+        turn.initial_environments.environments[0] = TurnEnvironmentState::Ready(
+            TurnEnvironment::new(selection, current.config_origin, environment, current.shell),
+        );
         let turn = Arc::new(turn);
         (
             ToolInvocation {
@@ -4263,6 +4260,8 @@ mod tests {
                 payload: ToolPayload::Function {
                     arguments: args.to_string(),
                 },
+                native_call: None,
+                environments: Default::default(),
             },
             events,
         )
@@ -5447,6 +5446,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TurnComplete(
                 codex_protocol::protocol::TurnCompleteEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     last_agent_message: Some("done".to_string()),
                     started_at: None,
                     completed_at: None,

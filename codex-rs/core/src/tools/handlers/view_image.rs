@@ -321,16 +321,13 @@ mod tests {
             .cloned()
             .expect("default local turn environment");
         current.config_mut().workspace_roots.clear();
+        let environment = Arc::clone(current.environment());
         let mut selection = current.selection;
         selection.cwd = PathUri::from_abs_path(&cwd);
         selection.workspace_roots.clear();
-        turn.initial_environments.environments[0] =
-            TurnEnvironmentState::Ready(TurnEnvironment::new(
-                selection,
-                current.config_origin,
-                current.environment,
-                current.shell,
-            ));
+        turn.initial_environments.environments[0] = TurnEnvironmentState::Ready(
+            TurnEnvironment::new(selection, current.config_origin, environment, current.shell),
+        );
     }
 
     fn tiny_png() -> Vec<u8> {
