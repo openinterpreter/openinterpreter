@@ -6293,6 +6293,7 @@ dependencies = [
  "codex-windows-sandbox",
  "pretty_assertions",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "windows 0.58.0",
