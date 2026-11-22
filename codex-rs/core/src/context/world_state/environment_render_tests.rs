@@ -437,7 +437,8 @@ fn current_date_diff_clears_once_and_recovers() {
             .render_fragment_diff(PreviousSectionState::Known(&available.snapshot()))
             .1
             .expect("removed current date")
-            .render(),
+            .render()
+            .expect_text(),
         "<environment_context>\n  <current_date status=\"unavailable\" />\n</environment_context>"
     );
     assert!(
@@ -451,7 +452,8 @@ fn current_date_diff_clears_once_and_recovers() {
             .render_fragment_diff(PreviousSectionState::Known(&unavailable.snapshot()))
             .1
             .expect("restored current date")
-            .render(),
+            .render()
+            .expect_text(),
         "<environment_context>\n  <current_date>2026-06-17</current_date>\n</environment_context>"
     );
 }

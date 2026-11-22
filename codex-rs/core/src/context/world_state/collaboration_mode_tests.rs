@@ -12,6 +12,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ModelMessages;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 #[test]

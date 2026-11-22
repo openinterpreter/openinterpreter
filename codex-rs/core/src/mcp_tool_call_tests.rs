@@ -2446,7 +2446,15 @@ async fn dispatched_mcp_approval_with_closed_response_is_classified_as_approval(
 
     let action = ApprovalAction::McpToolCall {
         id: call_id.to_string(),
+        environment_id: turn_context
+            .initial_environments
+            .primary()
+            .expect("primary environment")
+            .selection
+            .environment_id
+            .clone(),
         server: "calendar".to_string(),
+        server_key: McpServerKey::unscoped("calendar"),
         tool_name: "send".to_string(),
         arguments: None,
         connector_id: Some("calendar".to_string()),
@@ -2462,6 +2470,7 @@ async fn dispatched_mcp_approval_with_closed_response_is_classified_as_approval(
         approval_mode: AppToolApproval::Auto,
         allow_session_remember: true,
         allow_persistent_approval: true,
+        prompt_permissions: None,
     };
     let approval = tokio::spawn({
         let session = Arc::clone(&session);
@@ -2474,9 +2483,12 @@ async fn dispatched_mcp_approval_with_closed_response_is_classified_as_approval(
         .expect("approval request should be received");
     assert!(matches!(event.msg, EventMsg::ElicitationRequest(_)));
     *session.active_turn.lock().await = None;
+    let resolution = approval.await.expect("approval task should complete");
+    assert_eq!(resolution.decision, ReviewDecision::Abort);
+    assert_eq!(resolution.source, ApprovalResolutionSource::User);
     assert_eq!(
-        approval.await.expect("approval task should complete"),
-        ReviewDecision::Abort
+        resolution.cancellation_reason,
+        Some(McpApprovalCancellationReason::Interrupted)
     );
 
     item["status"] = serde_json::json!("failed");

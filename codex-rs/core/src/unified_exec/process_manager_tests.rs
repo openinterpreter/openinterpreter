@@ -624,10 +624,11 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         panic!("expected CommandExecution item");
     };
     assert_eq!(item.id, "call-unified-denied");
-    assert_eq!(
-        item.sandbox_type,
-        Some(codex_protocol::sandbox::SandboxType::WindowsMxc)
-    );
+    // Sandbox type is no longer exposed in the command execution item. The
+    // failure event must not accidentally reintroduce it in the wire schema.
+    let wire_item = serde_json::to_value(&item).expect("command item should serialize");
+    assert!(wire_item.get("sandbox_type").is_none());
+    assert!(wire_item.get("sandboxType").is_none());
     assert_eq!(
         item.status,
         codex_protocol::items::CommandExecutionStatus::Failed
