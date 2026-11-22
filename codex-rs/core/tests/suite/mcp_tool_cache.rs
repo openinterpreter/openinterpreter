@@ -636,7 +636,10 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         "requires a Windows test_stdio_server in the Wine-exec environment"
     );
     skip_if_no_network!(Ok(()));
+    cached_stdio_first_use_scenario().await.map(|_| ())
+}
 
+pub(super) async fn cached_stdio_first_use_scenario() -> anyhow::Result<Vec<Value>> {
     let binding_captures = Arc::new(AtomicUsize::new(0));
     let _tracing = tracing_subscriber::registry()
         .with(McpBindingCaptureCounter(Arc::clone(&binding_captures)))

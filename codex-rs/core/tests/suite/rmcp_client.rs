@@ -1161,6 +1161,128 @@ async fn future_environment_mcp_policy_applies_on_the_next_turn() -> anyhow::Res
     Ok(())
 }
 
+/// Drives the catalog notification and the newly discovered tool through one
+/// model turn. Keep this reusable for the model-visible scenario snapshot.
+pub(super) async fn mcp_tool_discovery_scenario(
+    tool_mode: ToolMode,
+    invalidation: Option<&'static str>,
+    enabled: bool,
+) -> anyhow::Result<Vec<responses::ResponsesRequest>> {
+    let server = responses::start_mock_server().await;
+    let command = remote_aware_stdio_server_bin()?;
+    let test = test_codex()
+        .with_config(move |config| {
+            config.code_mode.disable_in_process_fallback = true;
+            config
+                .features
+                .enable(Feature::CodeModeHost)
+                .expect("enable Code Mode host");
+            if enabled {
+                config
+                    .features
+                    .enable(Feature::McpToolListChanged)
+                    .expect("enable tool-list refresh");
+            }
+            let mut env = HashMap::from([
+                ("MCP_TEST_DISCOVER_TOOLS".to_string(), "1".to_string()),
+                ("MCP_TEST_VALUE".to_string(), "discovered".to_string()),
+            ]);
+            if let Some(phase) = invalidation {
+                env.insert("MCP_TEST_INVALIDATE_LISTING".to_string(), phase.to_string());
+            }
+            insert_mcp_server(
+                config,
+                "discovery",
+                stdio_transport(command, Some(env), Vec::new()),
+                TestMcpServerOptions {
+                    environment_id: remote_aware_environment_id(),
+                    ..Default::default()
+                },
+            );
+        })
+        .with_model_info_override("gpt-5.5", move |model| {
+            model.tool_mode = Some(tool_mode);
+            model.supports_search_tool = false;
+            model.use_responses_lite = false;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&test.codex, "discovery").await?;
+    let mut mocks = Vec::new();
+    for (call_id, tool, arguments) in [
+        ("discover", "search_tools", r#"{"message":"find echo"}"#),
+        ("invoke", "echo", r#"{"message":"hello"}"#),
+    ] {
+        if !enabled && tool == "echo" {
+            break;
+        }
+        let call = if tool_mode == ToolMode::CodeModeOnly {
+            responses::ev_custom_tool_call(
+                call_id,
+                "exec",
+                &format!("text(await tools.mcp__discovery__{tool}({arguments}));"),
+            )
+        } else {
+            responses::ev_function_call_with_namespace(call_id, "mcp__discovery", tool, arguments)
+        };
+        mocks.push(
+            responses::mount_sse_once(
+                &server,
+                responses::sse(vec![
+                    responses::ev_response_created(call_id),
+                    call,
+                    responses::ev_completed(call_id),
+                ]),
+            )
+            .await,
+        );
+    }
+    mocks.push(responses::mount_sse_once(&server, responses::sse_completed("done")).await);
+    test.submit_turn("Discover the echo tool, then call it with hello.")
+        .await?;
+    let requests = mocks
+        .iter()
+        .map(responses::ResponseMock::single_request)
+        .collect::<Vec<_>>();
+    if tool_mode == ToolMode::Direct {
+        assert!(
+            requests[0]
+                .tool_by_name("mcp__discovery", "search_tools")
+                .is_some()
+        );
+        assert_eq!(
+            requests[0].tool_by_name("mcp__discovery", "echo").is_some(),
+            invalidation == Some("startup")
+        );
+        if !enabled {
+            assert_eq!(
+                requests[1].body_json()["tools"],
+                requests[0].body_json()["tools"]
+            );
+            return Ok(requests);
+        }
+        assert!(requests[1].tool_by_name("mcp__discovery", "echo").is_some());
+        let output = requests[2]
+            .function_call_output_text("invoke")
+            .expect("echo output");
+        let (_, payload) = output
+            .split_once("\nOutput:\n")
+            .expect("wrapped MCP output");
+        assert_eq!(
+            serde_json::from_str::<Value>(payload)?,
+            json!({"echo": "ECHOING: hello", "env": "discovered"})
+        );
+    } else {
+        assert!(
+            requests[2]
+                .custom_tool_call_output("invoke")
+                .to_string()
+                .contains("ECHOING: hello")
+        );
+    }
+    Ok(requests)
+}
+
 #[test_case("rmcp", "mcp__rmcp"; "simple name")]
 #[test_case("npm:@scope/package.name", "mcp__npm__scope_package_name"; "npm name")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
