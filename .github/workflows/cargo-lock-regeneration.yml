@@ -82,6 +82,7 @@ jobs:
           update_affected tokio 1.53.1 1.53.3
           update_affected webpki-root-certs 1.0.9 1.0.10
           update_affected webpki-roots 1.0.9 1.0.10
+          update_affected zip 9.0.0 9.0.5
           update_affected async-executor 1.14.0 1.13.3
           update_affected clipboard-win 5.4.1 5.4.0
           cargo metadata --locked --format-version 1 > /dev/null
