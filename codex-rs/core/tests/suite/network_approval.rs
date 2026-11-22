@@ -47,6 +47,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
+use codex_protocol::protocol::GuardianAssessmentAction;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
@@ -964,10 +965,13 @@ async fn background_network_approval_uses_current_review_settings_and_original_e
                     text_elements: Vec::new(),
                 }])
                 .with_thread_settings(ThreadSettingsOverrides {
-                    environments: Some(TurnEnvironmentSelections::new(
-                        current_cwd.abs(),
-                        vec![local(current_cwd.abs())],
-                    )),
+                    environments: Some(
+                        TurnEnvironmentSelections::new(
+                            current_cwd.abs(),
+                            vec![local(current_cwd.abs())],
+                        )
+                        .into_requests(),
+                    ),
                     collaboration_mode: Some(CollaborationMode {
                         mode: ModeKind::Default,
                         settings: Settings {
@@ -2952,6 +2956,7 @@ PYTHON"#;
     Ok(())
 }
 
+#[test_case(FileSystemSandboxPolicy::read_only(); "read_only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalated_owner_network_terminal_requires_stdin_approval(
     filesystem: FileSystemSandboxPolicy,
