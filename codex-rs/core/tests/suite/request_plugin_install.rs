@@ -5,6 +5,8 @@ use anyhow::Result;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverable;
 use codex_config::types::ToolSuggestDiscoverableType;
+use codex_connectors::ConnectorDirectoryCacheContext;
+use codex_connectors::ConnectorDirectoryCacheKey;
 use codex_core::NewThread;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;

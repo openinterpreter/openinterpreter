@@ -108,11 +108,11 @@ async fn runtime_harness(
                 },
                 registration_url,
             ));
-            codex_model_provider::test_support::runtime_model_provider(
-                provider,
+            codex_model_provider::ProviderAuthContext {
                 credentials,
-                (runtime, mode),
-            )
+                runtime_auth: Some((runtime, mode)),
+            }
+            .model_provider(provider)
         },
     )
     .await;

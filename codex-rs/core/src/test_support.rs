@@ -72,6 +72,26 @@ pub async fn observe_turn_timing(
     })
 }
 
+/// Inspect the resolved environment configurations used to construct sampling steps.
+pub async fn environment_windows_sandbox_types(
+    thread: &CodexThread,
+) -> Vec<(String, codex_protocol::sandbox::SandboxType)> {
+    thread
+        .session
+        .services
+        .turn_environments
+        .snapshot()
+        .await
+        .turn_environments()
+        .map(|environment| {
+            (
+                environment.selection.environment_id.clone(),
+                environment.config().windows_sandbox_type,
+            )
+        })
+        .collect()
+}
+
 /// Supply fixed model metadata to tests without implementing a provider.
 pub fn fixed_model_catalog(
     manager: SharedModelsManager,

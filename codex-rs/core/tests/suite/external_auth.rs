@@ -23,6 +23,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use http::HeaderMap;
@@ -36,6 +37,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::process::Command;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
@@ -810,7 +812,7 @@ async fn command_gateway_retry_then_recovers_refreshable_primary_auth() -> anyho
     let source = tempfile::TempDir::new()?;
     let token_path = source.path().join("gateway-token");
     std::fs::write(&token_path, "gateway-token")?;
-    let test = super::gateway_auth::command_gateway(&server, &token_path).await?;
+    let test = command_gateway(&server, &token_path).await?;
     install_scripted_external_auth(&test).await?;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
@@ -841,4 +843,32 @@ async fn command_gateway_retry_then_recovers_refreshable_primary_auth() -> anyho
     test.submit_turn("hello").await?;
     server.verify().await;
     Ok(())
+}
+
+/// Exercise the same command-backed cookie delivery as the gateway auth suite,
+/// while supplying refreshable primary credentials in this suite.
+async fn command_gateway(server: &MockServer, token_path: &Path) -> anyhow::Result<TestCodex> {
+    let path_arg = serde_json::to_string(token_path)?;
+    let command = if cfg!(windows) {
+        format!("command = 'cmd.exe'\nargs = ['/D', '/C', 'type', {path_arg}]")
+    } else {
+        format!("command = 'cat'\nargs = [{path_arg}]")
+    };
+    let provider: ModelProviderInfo = toml::from_str(&format!(
+        r#"
+name = "gateway"
+base_url = "{base}/v1"
+requires_openai_auth = true
+[gateway_oauth]
+delivery = {{ kind = 'cookie', name = 'gateway' }}
+[gateway_oauth.credential_export]
+{command}
+"#,
+        base = server.uri(),
+    ))?;
+    test_codex()
+        .with_auth(CodexAuth::from_api_key("primary"))
+        .with_config(move |config| config.model_provider = provider)
+        .build_with_auto_env(server)
+        .await
 }
