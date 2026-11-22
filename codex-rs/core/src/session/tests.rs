@@ -5166,7 +5166,7 @@ fn get_service_tier_drops_unsupported_configured_tier_when_fast_mode_enabled() {
     assert_eq!(
         get_service_tier(
             Some("unsupported".to_string()),
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         None
@@ -5188,7 +5188,11 @@ fn get_service_tier_preserves_flex_without_catalog_support_or_fast_mode() {
         assert_eq!(
             get_service_tier(
                 Some(ServiceTier::Flex.request_value().to_string()),
-                fast_mode_enabled,
+                &if fast_mode_enabled {
+                    codex_features::Features::with_defaults()
+                } else {
+                    codex_features::Features::default()
+                },
                 &model_info,
             ),
             Some(ServiceTier::Flex.request_value().to_string())
@@ -6338,7 +6342,7 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
     let (reply, mut accepted) = tokio::sync::oneshot::channel();
     let (tx_sub, rx_sub) = async_channel::bounded(1);
     tx_sub
-        .send(Submission {
+        .send(Box::new(Submission {
             id: "settings".into(),
             turn_extension_init: None,
             op: Op::ThreadSettings {
@@ -6350,7 +6354,7 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
             root_turn_id: None,
             residency_guard: None,
             message_delivery: None,
-        })
+        }))
         .await
         .expect("submit settings");
     let mut submissions = Box::pin(tokio::task::unconstrained(submission_loop(
