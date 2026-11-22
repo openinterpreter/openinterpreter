@@ -3624,6 +3624,10 @@ async fn record_token_usage_info_notifies_extension_contributors(
             &turn_context,
             &turn_context.initial_settings,
             first_usage.clone().into(),
+            crate::session::TokenUsageContext::Sampling {
+                includes_reasoning: true,
+                input_item_count: 0,
+            },
         )
         .await
         .expect("first usage should be recorded");
@@ -3632,6 +3636,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
             &turn_context,
             &turn_context.initial_settings,
             second_usage.clone().into(),
+            context,
         )
         .await
         .expect("second usage should be recorded");
@@ -7317,6 +7322,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             /*attestation_provider*/ None,
             config.http_client_factory(),
             config.workspace_routing_context(),
+            Vec::new(),
         ),
         executed_tool_calls: executed_tool_calls.clone(),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
@@ -7555,7 +7561,7 @@ async fn make_session_with_config_and_rx(
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         ClientMcpExtensions::default(),
-        LocalAgentControl::default(),
+        LocalAgentControl::default().into(),
         /*reserved_thread_id*/ None,
         environment_manager,
         /*inherited_environments*/ None,
@@ -9679,6 +9685,7 @@ where
             /*attestation_provider*/ None,
             config.http_client_factory(),
             config.workspace_routing_context(),
+            Vec::new(),
         ),
         executed_tool_calls: executed_tool_calls.clone(),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
