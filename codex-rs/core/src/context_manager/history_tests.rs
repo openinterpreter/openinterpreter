@@ -382,9 +382,9 @@ fn checkpoint_retained_evidence_survives_legacy_review(saved_context: serde_json
     for (checkpoint, expected_mode) in [
         (None, GuardianContextMode::ThreadOwned),
         (
-            Some(GuardianHistoryCheckpoint(vec![assistant_msg(
-                "Original transcript",
-            )])),
+            Some(GuardianHistoryCheckpoint(vec![
+                assistant_msg("Original transcript").into(),
+            ])),
             GuardianContextMode::Legacy,
         ),
     ] {

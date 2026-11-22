@@ -1,3 +1,4 @@
+use super::super::test_support::FragmentSectionTestExt as _;
 use super::super::test_support::render_section_cases;
 use super::*;
 use crate::context::MultiAgentRoleInstructions;

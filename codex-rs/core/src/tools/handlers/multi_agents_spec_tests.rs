@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::openai_models::ModelServiceTier;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_tools::JsonSchemaPrimitiveType;
 use codex_tools::JsonSchemaType;

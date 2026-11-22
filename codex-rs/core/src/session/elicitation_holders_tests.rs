@@ -94,10 +94,11 @@ async fn command_approval_holds_an_elicitation_until_response(capture: bool, pro
                     crate::guardian::GuardianReviewContext::from(turn_context.clone())
                         .model_context(),
                     "call-1".to_string(),
+                    /*timing_call_id*/ None,
                     /*approval_id*/ None,
                     /*environment_id*/ None,
                     vec!["echo".to_string()],
-                    cwd.into(),
+                    codex_utils_path_uri::PathUri::from_abs_path(&cwd),
                     /*reason*/ None,
                     /*network_approval*/ None,
                     /*proposed_execpolicy_amendment*/ None,

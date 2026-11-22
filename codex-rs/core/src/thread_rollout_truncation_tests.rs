@@ -344,9 +344,16 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
     let turn_context = Arc::new(turn_context);
     let world_state = build_world_state_from_turn_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(turn_context);
-    let mut items = session
+    let (updates, _) = session
         .build_initial_context_with_world_state(&step_context, &world_state)
         .await;
+    let mut items: Vec<ResponseItem> = updates
+        .into_iter()
+        .map(|update| match update.content.into_fragment() {
+            Ok(fragment) => fragment.into_boxed_response_item(),
+            Err(item) => *item,
+        })
+        .collect();
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));
     items.push(user_msg("second question"));

@@ -9821,7 +9821,7 @@ pub(super) async fn make_thread_for_session(
     turn_context: &TurnContext,
     rx_event: async_channel::Receiver<Event>,
     session_source: SessionSource,
-) -> (crate::CodexThread, async_channel::Receiver<Submission>) {
+) -> (crate::CodexThread, async_channel::Receiver<Box<Submission>>) {
     let rollout_path = session.current_rollout_path().await.expect("rollout path");
     let event = SessionConfiguredEvent {
         session_id: session.session_id(),

@@ -385,7 +385,7 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
         .collect(),
         ..Default::default()
     };
-    insta::assert_snapshot!(failed.body(), @r#"
+    insta::assert_snapshot!(failed.body().expect_text(), @r#"
 
       <environments>
         <environment id="remote">
@@ -397,7 +397,8 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
     "#);
     assert!(
         failed
-            .render_diff(PreviousSectionState::Known(&failed.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(&failed.snapshot()))
+            .1
             .is_none()
     );
     let recovered = EnvironmentsState {
@@ -410,10 +411,11 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
         ..Default::default()
     };
     let update = recovered
-        .render_diff(PreviousSectionState::Known(&failed.snapshot()))
+        .render_fragment_diff(PreviousSectionState::Known(&failed.snapshot()))
+        .1
         .expect("recovery must be visible to the model");
-    assert!(!update.body().contains("<error>"));
-    assert!(update.body().contains("<shell>bash</shell>"));
+    assert!(!update.body().expect_text().contains("<error>"));
+    assert!(update.body().expect_text().contains("<shell>bash</shell>"));
     Ok(())
 }
 
@@ -431,6 +433,7 @@ fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
                     workspace_roots: Vec::new(),
                     config: EnvironmentConfigState::FromThread,
                 },
+                required_skills: Vec::new(),
                 error: "界".repeat(300),
             })
             .collect(),

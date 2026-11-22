@@ -434,19 +434,22 @@ fn current_date_diff_clears_once_and_recovers() {
     let unavailable = EnvironmentsState::default();
     assert_eq!(
         unavailable
-            .render_diff(PreviousSectionState::Known(&available.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(&available.snapshot()))
+            .1
             .expect("removed current date")
             .render(),
         "<environment_context>\n  <current_date status=\"unavailable\" />\n</environment_context>"
     );
     assert!(
         unavailable
-            .render_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .1
             .is_none()
     );
     assert_eq!(
         available
-            .render_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .render_fragment_diff(PreviousSectionState::Known(&unavailable.snapshot()))
+            .1
             .expect("restored current date")
             .render(),
         "<environment_context>\n  <current_date>2026-06-17</current_date>\n</environment_context>"

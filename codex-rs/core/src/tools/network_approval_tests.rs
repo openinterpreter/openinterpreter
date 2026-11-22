@@ -23,6 +23,19 @@ use test_case::test_case;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Default)]
+struct WakeCount(AtomicUsize);
+
+impl Wake for WakeCount {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 enum ExecutionCancellationTiming {
     PendingReview,
     AcceptedReview,
@@ -156,7 +169,10 @@ async fn execution_cancellation_respects_network_approval_boundary(
         service.take_call_outcome("execution-1").await,
         Some("original execution denial".to_string())
     );
-    assert!(service.pending_host_approvals.lock().unwrap().is_empty());
+    let pending = service.pending_host_approvals.lock().unwrap();
+    assert!(pending.executions.is_empty());
+    assert!(pending.manual_prompts.is_empty());
+    drop(pending);
     while let Ok(event) = events.try_recv() {
         assert!(!matches!(
             event.msg,

@@ -354,6 +354,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
             windows_sandbox_selection: codex_file_system::WindowsSandboxSelection::RestrictedToken,
             windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: false,
+            sandbox_override: SandboxOverride::NoOverride,
         })
     );
 }
