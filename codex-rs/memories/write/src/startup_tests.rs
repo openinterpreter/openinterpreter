@@ -1119,9 +1119,15 @@ async fn build_test_codex(
     server: &wiremock::MockServer,
     home: Arc<TempDir>,
 ) -> anyhow::Result<TestCodex> {
-    memory_test_codex(home, startup_test_memories_config())
-        .build(server)
-        .await
+    build_test_codex_with_memories_config(server, home, startup_test_memories_config()).await
+}
+
+async fn build_test_codex_with_memories_config(
+    server: &wiremock::MockServer,
+    home: Arc<TempDir>,
+    memories: MemoriesConfig,
+) -> anyhow::Result<TestCodex> {
+    memory_test_codex(home, memories).build(server).await
 }
 
 fn memory_test_codex(home: Arc<TempDir>, memories: MemoriesConfig) -> TestCodexBuilder {
