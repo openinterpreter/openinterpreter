@@ -1,9 +1,9 @@
 //! Verifies hosted Apps discovery and prepared-call authority across sessions.
 
-use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;

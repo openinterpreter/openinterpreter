@@ -429,8 +429,8 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
         .expect("expected background terminal");
 
     let running = session
-        .services.unified_exec_manager
-
+        .services
+        .unified_exec_manager
         .read_background_terminal_status(
             &turn.sub_id,
             &terminal.item_id,
@@ -444,8 +444,8 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
     assert!(running.observation_timed_out);
 
     let wrong_owner = session
-        .services.unified_exec_manager
-
+        .services
+        .unified_exec_manager
         .read_background_terminal_status(
             "different-turn",
             &terminal.item_id,
@@ -466,8 +466,8 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
     assert!(!output.raw_output.is_empty());
 
     let exited = session
-        .services.unified_exec_manager
-
+        .services
+        .unified_exec_manager
         .read_background_terminal_status(
             &turn.sub_id,
             &terminal.item_id,
@@ -481,8 +481,8 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
     assert_eq!(exited.terminal_generation, running.terminal_generation);
 
     let repeated = session
-        .services.unified_exec_manager
-
+        .services
+        .unified_exec_manager
         .read_background_terminal_status(
             &turn.sub_id,
             &terminal.item_id,
@@ -493,8 +493,8 @@ async fn native_status_is_owner_bound_and_retains_terminal_metrics() -> anyhow::
     assert_eq!(repeated, exited);
 
     let unknown = session
-        .services.unified_exec_manager
-
+        .services
+        .unified_exec_manager
         .read_background_terminal_status(
             &turn.sub_id,
             &terminal.item_id,
