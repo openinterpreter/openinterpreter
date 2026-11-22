@@ -188,6 +188,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     use crate::config::PermissionProfileSnapshot;
     use crate::environment_selection::ThreadEnvironments;
     use crate::environment_selection::TurnEnvironmentSnapshot;
+    use crate::session::ThreadEnvironmentDefaults;
     use crate::tools::sandboxing::SandboxAttempt;
     use codex_exec_server::EnvironmentManager;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -314,7 +315,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     let environments = ThreadEnvironments::new(
         Arc::clone(&manager),
         shell.clone(),
-        config.clone(),
+        ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
         snapshot_builder.clone(),
         TurnEnvironmentSnapshot::default(),
         /*non_blocking_snapshots*/ false,
@@ -365,7 +366,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
             let child = ThreadEnvironments::new(
                 Arc::clone(&manager),
                 shell.clone(),
-                config.clone(),
+                ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
                 snapshot_builder.clone(),
                 updated.clone(),
                 /*non_blocking_snapshots*/ false,
