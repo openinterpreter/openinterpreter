@@ -13,7 +13,10 @@ use codex_core::config::Constrained;
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::TurnLifecycleContributor;
 use codex_extension_api::TurnStartAdmission;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
@@ -35,6 +38,7 @@ use codex_protocol::turn_input::ResponseItemAnnotations;
 use codex_protocol::turn_input::TurnAttribution;
 use codex_protocol::user_input::UserInput;
 use core_test_support::ThreadIdle;
+use core_test_support::exec_server::ExecServerProcess;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -61,6 +65,32 @@ use tokio::time::timeout;
 
 #[derive(Debug)]
 struct TestAdmission(AtomicBool);
+
+struct CompletedInputRecorder(mpsc::UnboundedSender<(String, String, Option<Value>)>);
+
+impl TurnLifecycleContributor for CompletedInputRecorder {
+    fn on_item_completed_with_metadata<'a>(
+        &'a self,
+        _thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        item: &'a TurnItem,
+        metadata: Option<&'a BTreeMap<String, Value>>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if let TurnItem::UserMessage(message) = item {
+                for content in &message.content {
+                    if let UserInput::Text { text, .. } = content {
+                        let _ = self.0.send((
+                            turn_store.level_id().to_string(),
+                            text.clone(),
+                            metadata.and_then(|data| data.get("test").cloned()),
+                        ));
+                    }
+                }
+            }
+        })
+    }
+}
 
 impl TurnStartAdmission for TestAdmission {
     fn admit_turn_start(&self) -> Option<Box<dyn Send>> {
@@ -142,7 +172,14 @@ async fn host_drain_allows_spawned_agent_input_but_not_automatic_work() -> anyho
                 agent_nickname: None,
                 agent_role: None,
             })),
-            environments: Some(test.codex.environment_selections().await),
+            environments: Some(
+                test.codex
+                    .environment_selections()
+                    .await
+                    .into_iter()
+                    .map(|selection| selection.into_request())
+                    .collect(),
+            ),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?
@@ -281,6 +318,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()> 
             codex_response_item_prefix: None,
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             model: None,
             output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
@@ -290,6 +328,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()> 
             realtime_end_instructions: None,
             prompt: Some(Some("backend prompt".to_string())),
             realtime_session_id: None,
+            voice_session_id: None,
             transport: None,
             version: None,
             voice: None,
@@ -1054,7 +1093,7 @@ async fn sampling_is_ready_for_daemon_recovery(
     .await;
     #[cfg(unix)]
     let remote = if executor == "remote" {
-        Some(super::multi_exec_server_sandbox::ExecServerProcess::start().await?)
+        Some(ExecServerProcess::start().await?)
     } else {
         None
     };
@@ -1127,10 +1166,10 @@ async fn daemon_recovery_includes_local_environment_that_finished_starting() -> 
         .start_turn_if_idle(
             user_message_request("wait for the environment").with_thread_settings(
                 ThreadSettingsOverrides {
-                    environments: Some(TurnEnvironmentSelections::new(
-                        cwd,
-                        vec![selection.clone()],
-                    )),
+                    environments: Some(
+                        TurnEnvironmentSelections::new(cwd, vec![selection.clone()])
+                            .into_requests(),
+                    ),
                     ..Default::default()
                 },
             ),
