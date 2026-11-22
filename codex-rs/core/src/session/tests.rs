@@ -37,6 +37,7 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
+use crate::config::RuntimeConfigRefresh;
 use crate::context::ContextualUserFragment;
 use crate::context::DeveloperInstructions;
 use crate::context::TurnAborted;
@@ -129,6 +130,7 @@ use codex_rollout_trace::ThreadTraceContext;
 use codex_rollout_trace::replay_bundle;
 use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use tracing::Span;
 
@@ -1861,8 +1863,6 @@ async fn reload_user_config_layer_updates_effective_apps_config() {
     assert_eq!(app.destructive_enabled, Some(false));
 }
 
-#[test_case("[shell_environment_policy]\nexclude = [\"SECRET_*\", 17]"; "shell policy")]
-#[test_case("[plugins._default]\nenabled = false\n[plugins.\"sample@openai-curated-remote\"]\nenabled = \"false\""; "plugin policy")]
 #[tokio::test]
 async fn loaded_session_shell_policy_update_applies_to_future_turns_only() {
     let (session, current_turn) = make_session_and_context().await;
@@ -1923,8 +1923,12 @@ async fn loaded_session_shell_policy_update_applies_to_future_turns_only() {
     );
 }
 
+#[test_case("[shell_environment_policy]\nexclude = [\"SECRET_*\", 17]"; "shell policy")]
+#[test_case("[plugins._default]\nenabled = false\n[plugins.\"sample@openai-curated-remote\"]\nenabled = \"false\""; "plugin policy")]
 #[tokio::test]
-async fn reload_user_config_layer_keeps_previous_config_for_malformed_shell_policy() {
+async fn reload_user_config_layer_keeps_previous_config_for_malformed_shell_policy(
+    malformed_policy: &str,
+) {
     let (session, _turn_context) = make_session_and_context().await;
     let codex_home = session.codex_home().await;
     std::fs::create_dir_all(&codex_home).expect("create codex home");
