@@ -6096,7 +6096,7 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
 
 #[tokio::test]
 async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
-    let (mut session, _turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
+    let (mut session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
@@ -7090,6 +7090,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
+    let item_id_generator = Session::new_item_id_generator();
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -9455,6 +9456,7 @@ where
     let state_db = None;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
+    let item_id_generator = Session::new_item_id_generator();
     let auth_manager = AuthManager::from_auth_for_testing_with_home(auth, codex_home.to_path_buf());
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),

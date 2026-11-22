@@ -294,6 +294,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         mut context,
         rx_event,
     } = streaming_output_harness().await?;
+    let output_buffer = Arc::clone(&process.output_handles().output_buffer);
     start_streaming_output(&process, &context);
 
     tokio::time::pause();

@@ -109,7 +109,7 @@ async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
-        ImagePreparationMode::DetailBased,
+        ImagePreparationMode::default(),
         ImageResizeNoticeMode::Disabled,
         &InlineAttachmentStore,
     )
@@ -201,7 +201,7 @@ async fn detail_policies_apply_the_expected_budgets() {
             "image-preparation-thread",
             /*ephemeral*/ false,
             &mut items,
-            ImagePreparationMode::DetailBased,
+            ImagePreparationMode::default(),
             ImageResizeNoticeMode::Disabled,
             &InlineAttachmentStore,
         )
@@ -256,7 +256,7 @@ async fn preparation_reports_tool_output_item_id() {
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
-        ImagePreparationMode::DetailBased,
+        ImagePreparationMode::default(),
         ImageResizeNoticeMode::Disabled,
         &InlineAttachmentStore,
     )
@@ -294,7 +294,7 @@ async fn upload_failure_keeps_resized_image_inline() {
 
     prepare_response_items(
         &mut items,
-        ImagePreparationMode::DetailBased,
+        ImagePreparationMode::default(),
         ImageResizeNoticeMode::Disabled,
         &FailingAttachmentStore,
     )
@@ -398,7 +398,7 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
-        ImagePreparationMode::DetailBased,
+        ImagePreparationMode::default(),
         ImageResizeNoticeMode::Enabled,
         &InlineAttachmentStore,
     )
@@ -595,7 +595,7 @@ async fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
-        ImagePreparationMode::DetailBased,
+        ImagePreparationMode::default(),
         ImageResizeNoticeMode::Disabled,
         &InlineAttachmentStore,
     )

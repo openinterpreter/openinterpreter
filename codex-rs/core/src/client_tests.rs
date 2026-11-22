@@ -2224,7 +2224,7 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses(
         TestCodexResponsesRequestKind::WebsocketConnection,
     );
 
-    model_client.prompt_cache_key_override = cache_key.map(str::to_string);
+    model_client.session_id_override = cache_key.map(str::to_string);
     let headers = model_client
         .build_websocket_headers(&responses_metadata)
         .await;
