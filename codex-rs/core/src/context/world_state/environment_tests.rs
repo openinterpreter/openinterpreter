@@ -425,6 +425,7 @@ fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
         environments: (0..4)
             .map(|index| TurnEnvironmentState::Failed {
                 selection: TurnEnvironmentSelection {
+                    selected_capability_roots: Default::default(),
                     environment_id: format!("remote-{index}"),
                     cwd: PathUri::parse("file:///workspace").unwrap(),
                     workspace_roots: Vec::new(),

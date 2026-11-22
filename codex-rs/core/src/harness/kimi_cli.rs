@@ -1496,6 +1496,8 @@ mod tests {
     #[test]
     fn kimi_user_messages_trim_trailing_newline() {
         let items = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(codex_protocol::ResponseItemId::from_server(
                 "user".to_string(),
             )),
@@ -1524,6 +1526,8 @@ mod tests {
     #[test]
     fn kimi_code_user_messages_preserve_trailing_newline() {
         let items = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(codex_protocol::ResponseItemId::from_server(
                 "user".to_string(),
             )),
@@ -1554,6 +1558,8 @@ mod tests {
     fn kimi_code_preserves_empty_reasoning_content_on_assistant_messages() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -1609,6 +1615,8 @@ mod tests {
     #[test]
     fn kimi_user_messages_preserve_image_content() {
         let items = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(codex_protocol::ResponseItemId::from_server(
                 "user".to_string(),
             )),
@@ -1697,6 +1705,8 @@ mod tests {
     fn kimi_contextual_developer_messages_do_not_add_extra_user_messages() {
         let items = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "developer".to_string(),
                 )),
@@ -1709,6 +1719,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1748,6 +1760,8 @@ mod tests {
     fn kimi_contextual_user_blocks_do_not_add_extra_user_messages() {
         let items = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "permissions".to_string(),
                 )),
@@ -1761,6 +1775,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "skills".to_string(),
                 )),
@@ -1773,6 +1789,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1803,6 +1821,8 @@ mod tests {
     fn kimi_session_skills_render_in_system_prompt_skills_section() {
         let items = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "developer".to_string(),
                 )),
@@ -1815,6 +1835,8 @@ mod tests {
 
                 internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1850,6 +1872,8 @@ mod tests {
     #[test]
     fn kimi_non_contextual_developer_messages_are_preserved_in_system_prompt() {
         let items = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(codex_protocol::ResponseItemId::from_server(
                 "developer".to_string(),
             )),
@@ -1926,6 +1950,8 @@ mod tests {
     fn kimi_request_omits_openai_specific_chat_fields_but_keeps_kimi_fields() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1964,6 +1990,8 @@ mod tests {
     fn kimi_request_keeps_reasoning_effort_even_without_catalog_reasoning_control() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1997,6 +2025,8 @@ mod tests {
     fn kimi_request_maps_thinking_toggle_model_reasoning_effort_to_thinking() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -2036,6 +2066,8 @@ mod tests {
     fn thinking_toggle_prompt() -> Prompt {
         Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -2134,6 +2166,8 @@ mod tests {
         };
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -2210,6 +2244,8 @@ mod tests {
     fn kimi_messages_drop_unanswered_tool_call() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2223,6 +2259,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "assistant".to_string(),
                 )),
@@ -2255,6 +2293,8 @@ mod tests {
     fn kimi_messages_ignore_empty_assistant_between_tool_call_and_output() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2268,6 +2308,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "chat-message-1".to_string(),
                 )),
@@ -2339,6 +2381,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2408,6 +2452,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2421,6 +2467,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "msg-1".to_string(),
                 )),
@@ -2482,6 +2530,8 @@ mod tests {
     fn kimi_messages_replace_non_text_only_tool_output() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2554,6 +2604,8 @@ mod tests {
     fn kimi_messages_preserve_control_bytes_from_tool_output() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2595,6 +2647,8 @@ mod tests {
     fn kimi_messages_keep_actual_tool_output_after_call() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2651,6 +2705,8 @@ mod tests {
     fn kimi_messages_preserve_kimi_style_failed_tool_content_parts() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2727,6 +2783,8 @@ mod tests {
     fn kimi_messages_preserve_single_kimi_style_failed_tool_part() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2788,6 +2846,8 @@ mod tests {
     fn kimi_messages_preserve_image_tool_output_content() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "fc-1".to_string(),
                 )),
@@ -2878,6 +2938,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "assistant".to_string(),
                 )),

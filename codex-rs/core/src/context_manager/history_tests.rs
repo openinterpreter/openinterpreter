@@ -740,6 +740,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
 
 fn reference_context_item() -> TurnContextItem {
     TurnContextItem {
+        direct_only_tool_namespaces: None,
         turn_id: Some("reference-turn".to_string()),
         root_turn_id: None,
         disabled_plugin_ids: None,
@@ -3262,6 +3263,8 @@ fn image_data_url_payload_does_not_dominate_message_estimate() {
 #[test]
 fn file_images_use_detail_appropriate_estimates() {
     let item = ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "user".to_string(),
         content: vec![

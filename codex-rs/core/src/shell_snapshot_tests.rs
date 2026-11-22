@@ -320,6 +320,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     );
     environments.update_selections(
         &[TurnEnvironmentSelection {
+            selected_capability_roots: Default::default(),
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&dir.path().abs()),
             workspace_roots: Vec::new(),

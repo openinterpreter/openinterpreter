@@ -1502,6 +1502,8 @@ mod tests {
     fn build_request_uses_expected_zcode_basics() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -1563,6 +1565,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![
@@ -1588,6 +1592,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -1604,6 +1610,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -1657,6 +1665,8 @@ mod tests {
     fn zcode_build_messages_appends_user_prompt_before_trailing_skills_system_message() {
         let items = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1676,6 +1686,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1685,6 +1697,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1720,6 +1734,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user-1".to_string(),
                     )),
@@ -1731,6 +1747,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "compact".to_string(),
                     )),
@@ -1785,6 +1803,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user-1".to_string(),
                     )),
@@ -1796,6 +1816,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "assistant-1".to_string(),
                     )),
@@ -1809,6 +1831,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "compact".to_string(),
                     )),
@@ -1873,6 +1897,8 @@ mod tests {
         let items = vec![
             compacted_summary_item("<summary>\nsummary body\n</summary>"),
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1882,6 +1908,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1917,6 +1945,8 @@ mod tests {
         let mut items = Vec::new();
         for index in 1..=8 {
             items.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -1939,6 +1969,8 @@ mod tests {
         }
         for index in 9..=10 {
             items.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -1997,6 +2029,8 @@ mod tests {
 
         let mut historical_items = items;
         historical_items.push(ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
@@ -2030,6 +2064,8 @@ mod tests {
     fn build_messages_appends_stale_todo_reminder_with_existing_todos() {
         let mut items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -2063,6 +2099,8 @@ mod tests {
         ];
         for index in 1..=10 {
             items.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Edit".to_string(),
                 namespace: None,
@@ -2127,6 +2165,8 @@ mod tests {
     fn build_messages_repeats_zcode_todo_reminder_every_ten_non_todo_tool_results() {
         let mut items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -2160,6 +2200,8 @@ mod tests {
         ];
         for index in 1..=20 {
             items.push(ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
@@ -2171,6 +2213,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             });
             items.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Bash".to_string(),
                 namespace: None,
@@ -2235,6 +2279,8 @@ mod tests {
     fn build_messages_restores_zcode_read_token_error_flag_from_persisted_text() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -2289,6 +2335,8 @@ mod tests {
     fn build_messages_counts_direct_user_followup_toward_zcode_todo_staleness() {
         let mut items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -2315,6 +2363,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2326,6 +2376,8 @@ mod tests {
         ];
         for index in 1..=9 {
             items.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -2383,6 +2435,8 @@ mod tests {
     fn zcode_build_messages_does_not_force_cache_control_on_agent_tool_result() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Agent".to_string(),
                 namespace: None,
@@ -2405,6 +2459,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
@@ -2436,6 +2492,8 @@ mod tests {
     fn zcode_build_messages_caches_agent_result_before_hidden_subagent_notification() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Agent".to_string(),
                 namespace: None,
@@ -2458,6 +2516,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2487,6 +2547,8 @@ mod tests {
     fn build_messages_does_not_prepend_restored_todo_reminder_to_user_followup() {
         let items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -2518,6 +2580,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
@@ -2529,6 +2593,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2566,6 +2632,8 @@ mod tests {
     fn build_messages_keeps_historical_user_followup_without_restored_todo_reminder() {
         let mut items = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -2597,6 +2665,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
@@ -2608,6 +2678,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2617,6 +2689,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -2671,6 +2745,8 @@ mod tests {
         }));
 
         items.push(ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {

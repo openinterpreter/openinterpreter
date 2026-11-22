@@ -6451,6 +6451,8 @@ async fn spawn_agent_fork_last_n_turns_drops_parent_startup_prefix_when_under_li
             startup_turn_context.as_ref(),
             startup_turn_context.model_info(),
             &[ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -6582,6 +6584,8 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
             turn_context.model_info(),
             &[
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -6591,6 +6595,8 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![

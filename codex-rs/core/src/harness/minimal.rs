@@ -469,6 +469,8 @@ mod tests {
     fn test_prompt() -> Prompt {
         Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -514,6 +516,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "developer".to_string(),
                     )),
@@ -527,6 +531,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -565,6 +571,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -589,6 +597,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "bash".to_string(),
                     namespace: None,
@@ -609,6 +619,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user2".to_string(),
                     )),
@@ -648,6 +660,8 @@ mod tests {
     fn image_content_is_preserved_for_vision_models() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),

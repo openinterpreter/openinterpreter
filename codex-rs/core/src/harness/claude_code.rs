@@ -2615,8 +2615,11 @@ mod tests {
     #[test]
     fn builds_claude_code_request_with_tool_history() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2627,6 +2630,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -2650,6 +2655,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Read".to_string(),
                     namespace: None,
@@ -2796,8 +2803,11 @@ mod tests {
     #[test]
     fn parallel_tool_results_follow_tool_use_order() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2808,6 +2818,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -2819,6 +2831,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -2893,8 +2907,11 @@ mod tests {
     #[test]
     fn edit_tool_history_includes_default_replace_all_and_trimmed_new_string() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2905,6 +2922,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Edit".to_string(),
                     namespace: None,
@@ -2960,8 +2979,11 @@ mod tests {
     #[test]
     fn developer_skills_section_becomes_first_user_skills_reminder() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2972,6 +2994,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3027,8 +3051,11 @@ mod tests {
 
     fn skills_prompt(skills_instructions: &str) -> Prompt {
         Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3039,6 +3066,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3118,7 +3147,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp_dir.path().join(".git")).expect("create git dir");
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3165,7 +3197,10 @@ mod tests {
     #[test]
     fn build_request_mentions_bash_when_bash_tool_is_available() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3207,7 +3242,10 @@ mod tests {
     #[test]
     fn spawned_subagent_request_uses_claude_child_agent_profile() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3273,8 +3311,11 @@ mod tests {
     #[test]
     fn trims_bash_surrounding_whitespace_from_tool_result() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3285,6 +3326,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -3342,8 +3385,11 @@ mod tests {
     #[test]
     fn normalizes_plain_user_followups_but_keeps_assistant_text_as_blocks() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3354,6 +3400,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -3366,6 +3414,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3427,6 +3477,8 @@ mod tests {
         .to_string();
         let mut input = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3437,6 +3489,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -3461,6 +3515,8 @@ mod tests {
         ];
         for index in 1..=CLAUDE_CODE_TODO_REMINDER_STALENESS_THRESHOLD {
             input.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -3489,6 +3545,7 @@ mod tests {
             });
         }
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input,
             cwd: Some(PathBuf::from("/tmp/workspace")),
             tools: vec![].into(),
@@ -3532,6 +3589,8 @@ mod tests {
         .to_string();
         let mut input = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3542,6 +3601,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -3566,6 +3627,8 @@ mod tests {
         ];
         for index in 1..CLAUDE_CODE_TODO_REMINDER_STALENESS_THRESHOLD {
             input.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -3592,6 +3655,7 @@ mod tests {
             });
         }
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input,
             cwd: Some(PathBuf::from("/tmp/workspace")),
             tools: vec![].into(),
@@ -3624,6 +3688,8 @@ mod tests {
     #[test]
     fn unused_task_reminder_counts_progress_text_for_staleness() {
         let mut input = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3636,6 +3702,8 @@ mod tests {
         for index in 1..=CLAUDE_CODE_TODO_REMINDER_STALENESS_THRESHOLD {
             if index == 5 || index == 9 {
                 input.push(ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -3649,6 +3717,8 @@ mod tests {
                 });
             }
             input.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Bash".to_string(),
                 namespace: None,
@@ -3673,6 +3743,7 @@ mod tests {
             });
         }
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input,
             cwd: Some(PathBuf::from("/tmp/workspace")),
             tools: vec![].into(),
@@ -3736,6 +3807,8 @@ mod tests {
         .to_string();
         let mut input = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3746,6 +3819,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -3771,6 +3846,8 @@ mod tests {
         for index in 1..=7 {
             if index != 1 {
                 input.push(ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -3784,6 +3861,8 @@ mod tests {
                 });
             }
             input.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -3810,6 +3889,7 @@ mod tests {
             });
         }
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input,
             cwd: Some(PathBuf::from("/tmp/workspace")),
             tools: vec![].into(),
@@ -3849,6 +3929,8 @@ mod tests {
         .to_string();
         let mut input = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3859,6 +3941,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -3883,6 +3967,8 @@ mod tests {
         ];
         for index in 1..8 {
             input.push(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Read".to_string(),
                 namespace: None,
@@ -3909,6 +3995,7 @@ mod tests {
             });
         }
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input,
             cwd: Some(PathBuf::from("/tmp/workspace")),
             tools: vec![].into(),
@@ -3941,8 +4028,11 @@ mod tests {
     #[test]
     fn skips_contextual_and_developer_messages() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3954,6 +4044,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -3966,6 +4058,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4236,8 +4330,11 @@ mod tests {
     #[test]
     fn multi_turn_request_only_marks_latest_message_cache_breakpoint() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4248,6 +4345,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -4271,6 +4370,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -4283,6 +4384,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4346,7 +4449,10 @@ mod tests {
     #[test]
     fn builds_title_request_for_first_turn() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4401,8 +4507,11 @@ mod tests {
     #[test]
     fn builds_title_request_from_first_non_contextual_user_text() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4415,6 +4524,8 @@ mod tests {
                 },
                 ResponseItem::Other,
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4427,6 +4538,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -4546,7 +4659,10 @@ mod tests {
     #[test]
     fn opus_47_uses_metadata_default_effort_with_opus_token_budget() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4591,7 +4707,10 @@ mod tests {
     #[test]
     fn opus_47_respects_explicit_medium_effort() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4636,7 +4755,10 @@ mod tests {
     #[test]
     fn provider_prefixed_dotted_opus_47_uses_adaptive_thinking() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4681,7 +4803,10 @@ mod tests {
     #[test]
     fn provider_prefixed_dotted_sonnet_46_uses_adaptive_thinking() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4726,7 +4851,10 @@ mod tests {
     #[test]
     fn thinking_only_models_do_not_send_output_effort() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4788,7 +4916,10 @@ mod tests {
         // flat Responses-style function tools the chat-wire-compat converter
         // consumes. Tools outside the bare set (e.g. Grep) are dropped.
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -4861,7 +4992,10 @@ mod tests {
     #[test]
     fn full_chat_shaping_carries_full_claude_code_prompt() {
         let prompt = Prompt {
+            prompt_cache_ttl: None,
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {

@@ -88,6 +88,7 @@ fn approval_metadata(
     tool_description: Option<&str>,
 ) -> McpToolApprovalMetadata {
     McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: None,
         connector_id: connector_id.map(str::to_string),
         link_id: None,
@@ -1558,6 +1559,7 @@ fn mcp_tool_call_item_metadata_only_trusts_codex_apps_identity() {
     assert_eq!(
         McpToolCallItemMetadata::from_tool_metadata(CODEX_APPS_MCP_SERVER_NAME, Some(&metadata),),
         McpToolCallItemMetadata {
+            mcp_app_resource_uri: None,
             connector_id: Some("asdk_app_0123456789abcdef0123456789abcdef".to_string()),
             link_id: Some("link_fedcba9876543210fedcba9876543210".to_string()),
             mcp_app_ui: None,
@@ -1570,6 +1572,7 @@ fn mcp_tool_call_item_metadata_only_trusts_codex_apps_identity() {
     assert_eq!(
         McpToolCallItemMetadata::from_tool_metadata("custom_server", Some(&metadata)),
         McpToolCallItemMetadata {
+            mcp_app_resource_uri: None,
             connector_id: None,
             link_id: None,
             mcp_app_ui: None,
@@ -1596,6 +1599,7 @@ async fn mcp_tool_call_item_includes_app_identity() {
             arguments: None,
         },
         McpToolCallItemMetadata {
+            mcp_app_resource_uri: None,
             connector_id: Some("asdk_app_0123456789abcdef0123456789abcdef".to_string()),
             link_id: Some("link_fedcba9876543210fedcba9876543210".to_string()),
             mcp_app_ui: None,
@@ -1646,6 +1650,7 @@ async fn codex_apps_tool_call_request_meta_includes_turn_metadata_and_codex_apps
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let expected_turn_metadata = expected_mcp_turn_metadata(&turn_context);
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: None,
         connector_id: Some("calendar".to_string()),
         link_id: None,
@@ -2149,6 +2154,7 @@ fn guardian_mcp_review_request_includes_annotations_when_present() {
         arguments: None,
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(Some(false), Some(true), Some(true))),
         connector_id: None,
         link_id: None,
@@ -2965,6 +2971,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         arguments: None,
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(
             Some(true),
             /*destructive*/ None,
@@ -3049,6 +3056,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         arguments: None,
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(
             Some(true),
             /*destructive*/ None,
@@ -3115,6 +3123,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(
             Some(false),
             Some(true),
@@ -3286,6 +3295,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         arguments: Some(serde_json::json!({ "entities": [] })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(
             Some(false),
             Some(true),
@@ -3403,6 +3413,7 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip(
         arguments: Some(serde_json::json!({ "calendar_id": "primary" })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(Some(read_only), Some(true), Some(true))),
         connector_id: None,
         link_id: None,
@@ -3495,6 +3506,7 @@ async fn assert_mcp_user_approval_persistence(
         arguments: Some(serde_json::json!({ "entities": [] })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(
             Some(false),
             Some(true),
@@ -3588,6 +3600,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
         arguments: None,
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(Some(true), Some(true), Some(true))),
         connector_id: None,
         link_id: None,
@@ -3656,6 +3669,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
         arguments: Some(serde_json::json!({ "id": 1 })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(Some(false), Some(true), Some(true))),
         connector_id: Some("calendar".to_string()),
         link_id: None,
@@ -3718,6 +3732,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
         arguments: Some(serde_json::json!({ "id": 1 })),
     };
     let metadata = McpToolApprovalMetadata {
+        mcp_app_resource_uri: None,
         annotations: Some(annotations(Some(false), Some(true), Some(true))),
         connector_id: Some("calendar".to_string()),
         link_id: None,

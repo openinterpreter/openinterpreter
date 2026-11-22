@@ -1779,6 +1779,8 @@ mod tests {
     fn first_request_matches_terminus_shape() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1893,6 +1895,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -1902,6 +1906,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -1953,6 +1959,8 @@ mod tests {
     fn handoff_summary_prompt_is_summary_request() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -1979,6 +1987,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -1988,6 +1998,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -1998,6 +2010,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -2031,6 +2045,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2040,6 +2056,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2050,6 +2068,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -2084,6 +2104,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2093,6 +2115,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -2104,6 +2128,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2136,6 +2162,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2146,6 +2174,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2157,6 +2187,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {

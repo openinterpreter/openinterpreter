@@ -1286,6 +1286,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
             .push(TurnEnvironmentState::Ready(
                 crate::session::turn_context::TurnEnvironment::new(
                     TurnEnvironmentSelection {
+                        selected_capability_roots: Default::default(),
                         environment_id: "remote".to_string(),
                         cwd: remote_cwd,
                         workspace_roots: Vec::new(),

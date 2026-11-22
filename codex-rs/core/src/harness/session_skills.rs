@@ -177,6 +177,8 @@ mod tests {
         let text = skills_block("- alpha: first (file: /tmp/alpha/SKILL.md)");
         let items = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: text.clone() }],
@@ -185,6 +187,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
@@ -201,6 +205,8 @@ mod tests {
     #[test]
     fn ignores_blocks_without_available_skills_section() {
         let items = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {

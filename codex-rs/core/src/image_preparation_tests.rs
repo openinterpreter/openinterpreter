@@ -280,6 +280,8 @@ async fn preparation_reports_tool_output_item_id() {
 async fn upload_failure_keeps_resized_image_inline() {
     let (image_url, _) = png_data_url(/*width*/ 2048, /*height*/ 2048);
     let mut items = vec![ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {

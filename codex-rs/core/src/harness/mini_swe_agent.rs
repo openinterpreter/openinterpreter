@@ -687,6 +687,8 @@ mod tests {
     fn first_user_message_is_wrapped_with_mini_prompt() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -726,6 +728,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -738,6 +742,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "assistant".to_string(),
                     )),
@@ -752,6 +758,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "call".to_string(),
                     )),
@@ -798,6 +806,8 @@ mod tests {
     #[test]
     fn detects_terminal_submit_call() {
         let item = ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: Some(codex_protocol::ResponseItemId::from_server(
                 "call".to_string(),
             )),
@@ -824,6 +834,8 @@ mod tests {
             .expect("send created");
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "assistant".to_string(),
                 )),
@@ -886,6 +898,8 @@ mod tests {
             .expect("send created");
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "assistant".to_string(),
                 )),
@@ -904,6 +918,8 @@ mod tests {
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "call".to_string(),
                     )),

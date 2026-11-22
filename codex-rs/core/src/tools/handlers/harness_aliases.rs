@@ -4845,6 +4845,8 @@ mod tests {
             .join("read-target.txt");
         let history = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Write".to_string(),
                 namespace: None,
@@ -4908,6 +4910,8 @@ mod tests {
             invocation_with_harness(&workspace, "Read", json!({}), Some("zcode")).await;
         let retained_arguments = json!({ "file_path": retained_path }).to_string();
         let history = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -5313,6 +5317,8 @@ mod tests {
     fn zcode_read_session_context_prompt_has_expected_shape() {
         let history = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -5323,6 +5329,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -5332,6 +5340,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Write".to_string(),
                 namespace: None,
@@ -5406,6 +5416,8 @@ mod tests {
         let history = vec![
             RolloutItem::ResponseItem(ResponseItemEnvelope {
                 item: ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -5419,6 +5431,8 @@ mod tests {
             }),
             RolloutItem::ResponseItem(ResponseItemEnvelope {
                 item: ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Read".to_string(),
                     namespace: None,
@@ -5456,6 +5470,8 @@ mod tests {
     fn zcode_todo_history_restore_excludes_current_write_call() {
         let history = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -5474,6 +5490,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,

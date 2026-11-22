@@ -141,6 +141,8 @@ fn parses_user_message_with_text_and_two_images() {
 #[test]
 fn parses_user_message_with_file_image() {
     let item = ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "user".to_string(),
         content: vec![

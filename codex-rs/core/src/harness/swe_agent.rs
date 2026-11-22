@@ -652,6 +652,8 @@ mod tests {
     fn builds_observed_initial_request_shape() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -784,6 +786,8 @@ mod tests {
         assert_eq!(
             item,
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -886,6 +890,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -898,6 +904,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
@@ -910,6 +918,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -920,6 +930,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {

@@ -125,6 +125,8 @@ async fn review_preserves_user_instructions_until_request_budgeting(
             .inject_response_items(vec![
                 responses::user_message_item(&followup),
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_owned(),
                     content: vec![ContentItem::InputText {
