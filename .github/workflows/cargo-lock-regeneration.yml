@@ -165,7 +165,19 @@ jobs:
         if: steps.policy.outcome == 'failure'
         shell: bash
         working-directory: codex-rs
-        run: cargo deny check
+        run: |
+          set -uo pipefail
+          cargo deny check > "$RUNNER_TEMP/cargo-deny-diagnostic.log" 2>&1
+          result=$?
+          python3 - <<'PY'
+          import os, pathlib, re
+          log = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'cargo-deny-diagnostic.log').read_text(errors='replace')
+          advisory_ids = sorted(set(re.findall(r'RUSTSEC-\d{4}-\d{4}', log)))[:20]
+          categories = sorted(set(re.findall(r'\b(?:advisories|bans|licenses|sources)::[A-Za-z0-9_-]+\b', log)))[:20]
+          packages = sorted(set(re.findall(r'\b[A-Za-z0-9_-]+ \d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?\b', log)))[:20]
+          print(f"::error file=codex-rs/deny.toml,line=1::cargo-deny policy diagnostic advisory_ids={','.join(advisory_ids) or 'none'} categories={','.join(categories) or 'none'} packages={','.join(packages) or 'none'}")
+          PY
+          exit "$result"
 
       - name: Reject a candidate that fails dependency policy
         if: always() && !cancelled()
