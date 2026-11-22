@@ -22,9 +22,12 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let workspace_path = workspace.path().canonicalize()?;
     // macOS's default temporary directory leaves too little room for the control socket path.
     let codex_home = tempfile::tempdir_in("/tmp")?;
-    write_test_config(codex_home.path(), &repo_root)?;
+    write_test_config(codex_home.path(), &workspace_path)?;
     let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?;
+    let config = std::fs::read_to_string(&config_path)?.replace(
+        "model = \"gpt-5.6-terra\"",
+        "model = \"stale-client-model\"",
+    );
     std::fs::write(
         config_path,
         format!("{config}\n[tui]\nstatus_line = [\"thread-id\"]\n"),
@@ -34,11 +37,15 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let listener = UnixListener::bind(socket.as_path())?;
     let (disconnect_tx, mut disconnect_rx) = tokio::sync::oneshot::channel();
     let (restore_tx, restore_rx) = tokio::sync::oneshot::channel();
-    let server_cwd = repo_root.clone();
+    let (complete_tx, mut complete_rx) = tokio::sync::oneshot::channel();
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let server_cwd = workspace_path.clone();
     let id = "00000000-0000-0000-0000-000000000001";
     let server = tokio::spawn(async move {
         let mut methods = Vec::new();
         let mut restore_rx = Some(restore_rx);
+        let mut recovered_completed = false;
+        let mut submitted_tx = Some(submitted_tx);
         let thread = json!({
             "id": id, "sessionId": id, "preview": "", "ephemeral": false,
             "modelProvider": "openai", "createdAt": 1, "updatedAt": 2,
@@ -46,7 +53,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
         // The first connection checks daemon compatibility before TUI startup.
-        for connection in -1..3 {
+        for connection in -1..7 {
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -101,7 +108,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     "initialize" => json!({"userAgent": "reconnect-pty"}),
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
-                        json!({"data": (["code_mode_host", "auth_elicitation"].map(|name| json!({
+                        json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
                         "name": name, "stage": "stable", "displayName": null,
                         "description": null, "announcement": null,
                         "enabled": true, "defaultEnabled": true,
@@ -112,6 +119,8 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     }
                     "model/list" => json!({"data": [], "nextCursor": null}),
                     "config/read" => {
+                        let params = request.params.as_ref().unwrap();
+                        assert_eq!(params["cwd"], server_cwd.to_string_lossy().as_ref());
                         json!({"config": {"model": "gpt-5.6-terra", "model_provider": "openai",
                         "tui": {"status_line": ["thread-id"]}, "projects": {
                         server_cwd.to_string_lossy(): {"trust_level": "trusted"}
@@ -194,7 +203,17 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
         }
         Ok::<_, anyhow::Error>(methods)
     });
-    let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-alt-screen"])?;
+    let mut terminal = PtyCodex::start(
+        &workspace_path,
+        codex_home,
+        &[
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "on-request",
+            "--no-alt-screen",
+        ],
+    )?;
     terminal.wait_for_startup()?;
     let mut disconnect_tx = Some(disconnect_tx);
     let mut restore_tx = Some(restore_tx);

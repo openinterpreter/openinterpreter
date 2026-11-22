@@ -73,7 +73,7 @@ async fn picker_side_worktree_fork_and_cd_run_on_the_production_stack() -> Resul
     // Title generation can include the user prompt and race the actual user turn.
     let _title = responses::mount_sse_once_match(
         &server,
-        body_string_contains(r#"\"thread_source\":\"system\""#),
+        body_string_contains(r#"\"thread_source\":\"thread_title\""#),
         responses::sse(vec![
             responses::ev_assistant_message("title", r#"{"title":"Stack transition test"}"#),
             responses::ev_completed("title-response"),
@@ -143,11 +143,8 @@ async fn picker_side_worktree_fork_and_cd_run_on_the_production_stack() -> Resul
     // The header changes before the queued history replay has finished attaching.
     // Wait for the transition acknowledgement before submitting another command.
     terminal.wait_for_screen(&format!(
-        "/{}/",
-        fork_bucket
-            .file_name()
-            .expect("forked worktree bucket name")
-            .to_string_lossy()
+        "Working directory changed to: {}",
+        forked[0].root.display()
     ))?;
     terminal.ensure_running()?;
 
@@ -173,11 +170,8 @@ async fn picker_side_worktree_fork_and_cd_run_on_the_production_stack() -> Resul
         "new worktree reused the forked thread owner"
     );
     terminal.wait_for_screen(&format!(
-        "/{}/",
-        second_bucket
-            .file_name()
-            .expect("new worktree bucket name")
-            .to_string_lossy()
+        "Working directory changed to: {}",
+        second.root.display()
     ))?;
     terminal.ensure_running()?;
     Ok(())

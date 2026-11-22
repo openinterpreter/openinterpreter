@@ -298,7 +298,9 @@ impl PtyCodex {
     ) -> Result<Self> {
         let codex = codex_utils_cargo_bin::cargo_bin("codex-tui")
             .or_else(|_| codex_utils_cargo_bin::cargo_bin("codex"))?;
-        Self::start_binary(&codex, repo_root, codex_home, extra_args)
+        Self::start_binary(
+            &codex, repo_root, codex_home, extra_args, /*editor*/ None,
+        )
     }
 
     /// Include the CLI dispatch futures when testing production stack headroom.
@@ -309,7 +311,9 @@ impl PtyCodex {
     ) -> Result<Self> {
         let codex = codex_utils_cargo_bin::cargo_bin("codex")
             .context("build codex-cli and set CARGO_BIN_EXE_codex to its executable")?;
-        Self::start_binary(&codex, repo_root, codex_home, extra_args)
+        Self::start_binary(
+            &codex, repo_root, codex_home, extra_args, /*editor*/ None,
+        )
     }
 
     fn start_binary(
@@ -317,6 +321,7 @@ impl PtyCodex {
         repo_root: &Path,
         codex_home: TempDir,
         extra_args: &[&str],
+        editor: Option<&Path>,
     ) -> Result<Self> {
         let mut master_fd = -1;
         let mut slave_fd = -1;
@@ -349,7 +354,11 @@ impl PtyCodex {
         let stdin = slave.try_clone().context("clone pseudo-terminal stdin")?;
         let stdout = slave.try_clone().context("clone pseudo-terminal stdout")?;
 
-        let child = Command::new(codex)
+        let mut command = Command::new(codex);
+        if let Some(editor) = editor {
+            command.env("VISUAL", editor);
+        }
+        let child = command
             .args(extra_args)
             .arg("-C")
             .arg(repo_root)
@@ -360,6 +369,9 @@ impl PtyCodex {
             .env_remove("STY")
             .env("TERM_PROGRAM", "kitty")
             .env_remove("TERM_PROGRAM_VERSION")
+            // Exercise the fixture's login state even on hosts configured with workload identity.
+            .env_remove(codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR)
+            .env_remove(codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR)
             .env("OPENAI_API_KEY", "focus-palette-test")
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
@@ -536,6 +548,24 @@ impl Drop for PtyCodex {
 
 fn contains_bytes(buffer: &[u8], needle: &[u8]) -> bool {
     buffer.windows(needle.len()).any(|window| window == needle)
+}
+
+pub(super) fn write_test_config_with_bundled_models(
+    codex_home: &Path,
+    repo_root: &Path,
+) -> Result<()> {
+    write_test_config(codex_home, repo_root)?;
+    // Model fetches must not delay the startup screens this PTY is waiting for.
+    let catalog = codex_home.join("models.json");
+    std::fs::write(
+        &catalog,
+        serde_json::to_vec(&codex_models_manager::bundled_models_response()?)?,
+    )?;
+    let catalog = serde_json::to_string(&catalog)?;
+    let path = codex_home.join("config.toml");
+    let config = std::fs::read_to_string(&path)?;
+    std::fs::write(path, format!("model_catalog_json = {catalog}\n{config}"))?;
+    Ok(())
 }
 
 pub(super) fn write_test_config(codex_home: &Path, repo_root: &Path) -> Result<()> {
