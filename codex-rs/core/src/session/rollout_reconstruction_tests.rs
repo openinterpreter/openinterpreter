@@ -202,8 +202,7 @@ async fn sender_context_follows_its_delivery_through_checkpoint_and_rollback() {
 
 #[tokio::test]
 async fn recorded_questions_share_queued_input_order_in_thread_owned_context() {
-    let (mut session, turn) = make_session_and_context().await;
-    session.guardian_context_mode = GuardianContextMode::ThreadOwned;
+    let (session, turn) = make_session_and_context().await;
     session.state.lock().await.history = ContextManager::with_guardian_context_mode(
         GuardianContextMode::ThreadOwned,
         &SessionSource::default(),
@@ -260,6 +259,7 @@ async fn recorded_questions_share_queued_input_order_in_thread_owned_context() {
     let saved = serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
             conversation_id: session.thread_id,
             history: Arc::new(saved),
             rollout_path: None,
@@ -278,13 +278,12 @@ async fn recorded_questions_share_queued_input_order_in_thread_owned_context() {
             .collect::<Vec<_>>(),
         vec![Some(0), Some(2), Some(1), None]
     );
-    assert_eq!(session.reserve_user_input_order().await, Some(3));
+    assert_eq!(session.reserve_user_input_order().await, 3);
 }
 
 #[tokio::test]
 async fn sender_context_survives_thread_owned_checkpoint_and_rollback() {
-    let (mut session, turn_context) = make_session_and_context().await;
-    session.guardian_context_mode = GuardianContextMode::ThreadOwned;
+    let (session, turn_context) = make_session_and_context().await;
     let mut live = ContextManager::with_guardian_context_mode(
         GuardianContextMode::ThreadOwned,
         &SessionSource::default(),
@@ -300,7 +299,7 @@ async fn sender_context_survives_thread_owned_checkpoint_and_rollback() {
             receiver_message_id: format!("delivery-{index}"),
             text: format!("Sender context {index}"),
         };
-        let input = [
+        let mut input = [
             ResponseItemEnvelope {
                 item: serde_json::from_value::<ResponseItem>(json!({
                     "type": "function_call_output", "id": snapshot.receiver_message_id,
@@ -321,7 +320,10 @@ async fn sender_context_survives_thread_owned_checkpoint_and_rollback() {
                 }),
             },
         ];
-        live.record_annotated_items(&input, turn_context.model_info().truncation_policy.into());
+        live.record_annotated_items(
+            &mut input,
+            turn_context.model_info().truncation_policy.into(),
+        );
         items.extend(input.into_iter().map(RolloutItem::ResponseItem));
         snapshots.push(snapshot);
     }
@@ -330,7 +332,7 @@ async fn sender_context_survives_thread_owned_checkpoint_and_rollback() {
     checkpoint.replacement_history = Some(live.annotated_items().to_vec());
     checkpoint.retained_context = Some(live.retained_context().clone());
     let mut checkpointed = items.clone();
-    checkpointed.push(RolloutItem::Compacted(checkpoint));
+    checkpointed.push(RolloutItem::Compacted(Box::new(checkpoint)));
     for (num_turns, expected) in [(1, &snapshots[1]), (2, &snapshots[0])] {
         let mut rolled_back = live.clone();
         rolled_back.drop_last_n_user_turns(num_turns);

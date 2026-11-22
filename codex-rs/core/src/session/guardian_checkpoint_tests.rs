@@ -14,8 +14,7 @@ use test_case::test_case;
 #[test_case(GuardianContextMode::ThreadOwned; "thread_owned")]
 #[tokio::test]
 async fn guardian_checkpoint_preserves_live_context_without_storage(mode: GuardianContextMode) {
-    let (mut session, turn) = make_session_and_context().await;
-    session.guardian_context_mode = mode;
+    let (session, turn) = make_session_and_context().await;
     // This session has no live store. A checkpoint must still capture the complete context.
     assert!(session.live_thread().is_none());
     let instruction: ResponseItem = serde_json::from_value(json!({
@@ -58,6 +57,7 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
             .record_items([&followup], turn.model_info().truncation_policy.into());
         state.history.set_reference_context_item(Some(context));
         state.history.set_world_state_baseline(world_state.clone());
+        let input_item_count = state.history.annotated_items().len();
         state.history.update_token_info(
             &TokenUsage {
                 input_tokens: 123,
@@ -65,6 +65,8 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
                 ..Default::default()
             },
             Some(32_000),
+            /*includes_reasoning*/ false,
+            input_item_count,
         );
     }
     let expected = session.clone_history().await;
@@ -74,7 +76,8 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
                 .guardian_history_checkpoint()
                 .unwrap()
                 .0
-                .contains(&instruction)
+                .iter()
+                .any(|item| item.item == instruction)
         );
     }
     let items = session.guardian_fork_history().await;
@@ -88,8 +91,7 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
         .replace_history(Vec::new(), /*reference_context_item*/ None)
         .await;
     // Replay into a fresh session so preserved live state cannot mask missing checkpoint data.
-    let (mut fork, _) = make_session_and_context().await;
-    fork.guardian_context_mode = mode;
+    let (fork, _) = make_session_and_context().await;
     fork.state.lock().await.history =
         ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
     fork.record_initial_history(InitialHistory::Forked(items))
