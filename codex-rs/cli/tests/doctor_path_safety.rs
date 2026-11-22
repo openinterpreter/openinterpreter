@@ -10,6 +10,7 @@ use anyhow::Result;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::RequestId;
 use codex_config::loader::project_trust_key;
+use codex_utils_cargo_bin::copy_executable;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
