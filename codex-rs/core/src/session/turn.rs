@@ -36,6 +36,7 @@ use crate::responses_retry::handle_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::daemon_recovery::RecordedTurnInput;
+use crate::session::input_queue::UnrecordedClientIds;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -168,6 +169,8 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    // Every return before the starting input is handed off for recording drops it.
+    let mut unrecorded_client_ids = UnrecordedClientIds::new(&sess.input_queue, &input);
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
@@ -189,6 +192,7 @@ pub(crate) async fn run_turn(
     .await
     {
         // Compaction runs before the new input is recorded, so preserve it on every failure.
+        unrecorded_client_ids.hand_off();
         run_hooks_and_record_inputs(
             &sess,
             &turn_context,
@@ -238,6 +242,7 @@ pub(crate) async fn run_turn(
         {
             Ok(requirements) => requirements,
             Err(err) => {
+                unrecorded_client_ids.hand_off();
                 run_hooks_and_record_inputs(
                     &sess,
                     &turn_context,
@@ -266,6 +271,7 @@ pub(crate) async fn run_turn(
     {
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+            unrecorded_client_ids.hand_off();
             run_hooks_and_record_inputs(
                 &sess,
                 &turn_context,
@@ -363,6 +369,7 @@ pub(crate) async fn run_turn(
         .await?;
     }
     let mut can_drain_pending_input = input.is_empty();
+    unrecorded_client_ids.hand_off();
     if run_hooks_and_record_inputs(
         &sess,
         &turn_context,
@@ -855,6 +862,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
         .get::<crate::guardian::PendingReviewContext>()
         .is_some()
     {
+        sess.input_queue.forget_client_ids(input);
         return false;
     }
     let mut blocked_input = false;
@@ -863,6 +871,9 @@ pub(crate) async fn run_hooks_and_record_inputs(
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
+            // A blocked prompt is never recorded, so a retry may submit it again.
+            sess.input_queue
+                .forget_client_ids(std::slice::from_ref(input_item));
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {

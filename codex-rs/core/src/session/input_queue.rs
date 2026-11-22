@@ -1,9 +1,11 @@
+use super::accepted_client_ids::AcceptedClientIds;
 use crate::state::ActiveTurn;
 use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_history::ResponseItemEnvelope;
+use codex_history::RolloutItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
@@ -12,6 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
@@ -81,6 +84,9 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// Client message ids accepted on this thread. Never held across an await, so
+    /// it may be taken while holding the active-turn or turn-state locks.
+    accepted_client_ids: std::sync::Mutex<AcceptedClientIds>,
 }
 
 struct PendingMailboxCommunication {
@@ -95,7 +101,43 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            accepted_client_ids: std::sync::Mutex::new(AcceptedClientIds::default()),
         }
+    }
+
+    /// Returns the turn holding input with `client_id`, if this thread accepted it.
+    pub(super) fn accepted_turn_id(&self, client_id: &str) -> Option<String> {
+        self.accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .turn_id(client_id)
+            .map(str::to_string)
+    }
+
+    pub(super) fn record_accepted_client_id(&self, client_id: String, turn_id: String) {
+        self.accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(client_id, turn_id);
+    }
+
+    /// Forgets the client ids of user input that is discarded without being
+    /// recorded, so a retry with the same id is accepted again.
+    pub(crate) fn forget_client_ids(&self, inputs: &[TurnInput]) {
+        let mut accepted = self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for client_id in inputs.iter().filter_map(TurnInput::client_id) {
+            accepted.remove(client_id);
+        }
+    }
+
+    pub(super) fn restore_accepted_client_ids(&self, items: &[RolloutItem]) {
+        *self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = AcceptedClientIds::from_rollout(items);
     }
 
     pub(crate) async fn subscribe_activity(
@@ -207,7 +249,8 @@ impl InputQueue {
     pub(crate) async fn clear_pending(&self, active_turn: &ActiveTurn) {
         let mut turn_state = active_turn.turn_state.lock().await;
         turn_state.clear_pending_waiters();
-        turn_state.pending_input.items.clear();
+        let discarded = std::mem::take(&mut turn_state.pending_input.items);
+        self.forget_client_ids(&discarded);
     }
 
     pub(crate) async fn defer_mailbox_delivery_to_next_turn(
@@ -347,6 +390,65 @@ impl InputQueue {
             return true;
         }
         self.has_pending_mailbox_items().await
+    }
+}
+
+impl TurnInput {
+    /// The client message id of user input, if the client sent one.
+    pub(crate) fn client_id(&self) -> Option<&str> {
+        match self {
+            Self::UserInput { client_id, .. } => client_id.as_deref(),
+            Self::FunctionCallOutput(_)
+            | Self::ResponseItem(_)
+            | Self::InterAgentCommunication(_) => None,
+        }
+    }
+}
+
+/// Client message ids of a turn's starting input that the turn has not yet
+/// handed to `run_hooks_and_record_inputs`.
+///
+/// A turn can end, or be dropped when it is aborted, before its starting input
+/// is recorded. Dropping this guard then forgets those ids, so a retry is
+/// accepted again instead of being answered with a turn that never recorded
+/// the input.
+pub(crate) struct UnrecordedClientIds<'a> {
+    input_queue: &'a InputQueue,
+    client_ids: Vec<String>,
+}
+
+impl<'a> UnrecordedClientIds<'a> {
+    pub(crate) fn new(input_queue: &'a InputQueue, input: &[TurnInput]) -> Self {
+        Self {
+            input_queue,
+            client_ids: input
+                .iter()
+                .filter_map(TurnInput::client_id)
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// Releases the ids once the input is handed to `run_hooks_and_record_inputs`,
+    /// which records each item or itself forgets the id of an item it drops.
+    pub(crate) fn hand_off(&mut self) {
+        self.client_ids.clear();
+    }
+}
+
+impl Drop for UnrecordedClientIds<'_> {
+    fn drop(&mut self) {
+        if self.client_ids.is_empty() {
+            return;
+        }
+        let mut accepted = self
+            .input_queue
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for client_id in &self.client_ids {
+            accepted.remove(client_id);
+        }
     }
 }
 

@@ -1,9 +1,8 @@
 name: rust-release-zsh
 
+# Started by hand from a `codex-zsh-v*.*.*` tag; the metadata job validates it.
 on:
-  push:
-    tags:
-      - "codex-zsh-v*.*.*"
+  workflow_dispatch:
 
 env:
   ZSH_COMMIT: 77045ef899e53b9598bebc5a41db93a548a40ca6
