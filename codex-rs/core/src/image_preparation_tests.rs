@@ -25,7 +25,7 @@ use serde_json::json;
 
 use super::*;
 
-struct FailingAttachmentStore;
+pub(crate) struct FailingAttachmentStore;
 
 impl AttachmentStore for FailingAttachmentStore {
     fn upload(&self, _request: UploadRequest) -> UploadFuture<'_> {
