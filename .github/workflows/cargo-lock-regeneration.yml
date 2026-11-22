@@ -80,6 +80,8 @@ jobs:
           update_affected rustls 0.23.45 0.23.46
           update_affected rustls-webpki 0.103.15 0.103.16
           update_affected tokio 1.53.1 1.53.3
+          # RUSTSEC-2026-0592: nested blob origins can overflow the process stack.
+          update_affected url 2.5.8 2.5.9
           update_affected webpki-root-certs 1.0.9 1.0.10
           update_affected webpki-roots 1.0.9 1.0.10
           update_affected zip 9.0.0 9.0.5
