@@ -3301,6 +3301,71 @@ fn network_probe_args(command: &str, environment_id: &str) -> Value {
     json!({ "cmd": command, "environment_id": environment_id, "login": false, "yield_time_ms": 10_000 })
 }
 
+async fn start_concurrent_network_requests(
+    builder: TestCodexBuilder,
+    server: &wiremock::MockServer,
+    requests: &[(&str, u16)],
+    queued: &mut NamedTraceEvents,
+) -> Result<(
+    TestCodex,
+    ResponseMock,
+    HashMap<String, ExecApprovalRequestEvent>,
+)> {
+    let test = builder.build_with_auto_env(server).await?;
+    let environment = test.executor_environment().selection();
+    let mut calls = Vec::new();
+    for &(id, port) in requests {
+        let command = network_proxy_request_command(
+            &format!("{NETWORK_TEST_HOST}:{port}"),
+            "PROXY",
+            Duration::from_secs(10),
+        );
+        let args = network_probe_args(&command, &environment.environment_id);
+        calls.push(ev_function_call(id, "exec_command", &args.to_string()));
+    }
+    calls.push(ev_completed("network-requests"));
+    let responses = mount_sse_sequence(
+        server,
+        vec![sse(calls), sse(vec![ev_completed("network-done")])],
+    )
+    .await;
+    submit_managed_network_turn(
+        &test,
+        "review these concurrent network requests",
+        vec![environment.clone()],
+        ApprovalsReviewer::User,
+        AskForApproval::OnRequest,
+    )
+    .await?;
+
+    let ports: HashSet<_> = requests.iter().map(|(_, port)| port).collect();
+    let mut prompts = HashMap::new();
+    wait_for_event(&test.codex, |event| {
+        match event {
+            EventMsg::ExecApprovalRequest(approval) => {
+                assert!(
+                    prompts
+                        .insert(approval.command[1].clone(), approval.clone())
+                        .is_none(),
+                    "duplicate prompt for {:?}",
+                    approval.command
+                );
+            }
+            EventMsg::TurnComplete(_) => panic!(
+                "turn completed before network approval: {:?}",
+                responses.function_call_output_text(requests[0].0)
+            ),
+            _ => {}
+        }
+        prompts.len() == ports.len()
+    })
+    .await;
+    for _ in ports.len()..requests.len() {
+        queued.next().await?;
+    }
+    Ok((test, responses, prompts))
+}
+
 fn assert_network_probe_allowed(responses: &ResponseMock, id: &str) {
     let output = responses
         .function_call_output_text(id)
