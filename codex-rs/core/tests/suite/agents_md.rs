@@ -1140,7 +1140,12 @@ impl ThreadInstructionsFixture {
         let thread = test
             .thread_manager
             .start_thread(StartThreadOptions {
-                environments: Some(vec![test.executor_environment().selection().clone()]),
+                environments: Some(vec![
+                    test.executor_environment()
+                        .selection()
+                        .clone()
+                        .into_request(),
+                ]),
                 thread_instructions_provider: Some(provider.clone()),
                 ..StartThreadOptions::new(test.config.clone())
             })
@@ -1334,7 +1339,7 @@ async fn isolated_guardian_keeps_applied_thread_instructions() -> Result<()> {
     let parent = test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(test.codex.environment_selections().await),
+            environments: Some(test.codex.environment_selections().await.into_requests()),
             thread_instructions_provider: Some(provider.clone()),
             ..StartThreadOptions::new(test.config.clone())
         })
@@ -1406,7 +1411,12 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
         .thread_manager
         .start_thread(StartThreadOptions {
             environments: Some(vec![
-                fixture.test.executor_environment().selection().clone(),
+                fixture
+                    .test
+                    .executor_environment()
+                    .selection()
+                    .clone()
+                    .into_request(),
             ]),
             thread_instructions_provider: Some(Arc::new(RecordingThreadInstructionsProvider::new(
                 Some(oversized.clone()),
@@ -1474,10 +1484,10 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(TurnEnvironmentSelections::new(
-                    fixture.test.config.cwd.clone(),
-                    Vec::new(),
-                )),
+                environments: Some(
+                    TurnEnvironmentSelections::new(fixture.test.config.cwd.clone(), Vec::new())
+                        .into_requests(),
+                ),
                 ..Default::default()
             }),
         )

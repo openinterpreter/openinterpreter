@@ -51,7 +51,12 @@ async fn remote_compact_v2_token_estimate_ignores_message_bookkeeping_and_json_e
             .thread_manager
             .start_thread(StartThreadOptions {
                 environments: Some(vec![
-                    harness.test().executor_environment().selection().clone(),
+                    harness
+                        .test()
+                        .executor_environment()
+                        .selection()
+                        .clone()
+                        .into_request(),
                 ]),
                 ..StartThreadOptions::new(harness.test().config.clone())
             })

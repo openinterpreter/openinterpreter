@@ -5347,16 +5347,11 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
         ev_reasoning_item("post-reasoning", &["post"], &[&post_last_reasoning_content]),
         ev_completed_with_tokens("r2", /*total_tokens*/ 80),
     ]);
-    let compact_turn = remote_v2_compaction_response();
     let third_turn = sse(vec![
         ev_assistant_message("m3", THIRD_USER_MSG),
         ev_completed_with_tokens("r3", /*total_tokens*/ 81),
     ]);
     let compact_turn = remote_v2_compaction_response();
-    let fourth_turn = sse(vec![
-        ev_assistant_message("m4", FINAL_REPLY),
-        ev_completed_with_tokens("r4", /*total_tokens*/ 1),
-    ]);
 
     let request_log = mount_response_sequence(
         &server,
@@ -5385,9 +5380,10 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
         })
         .build(&server)
         .await
-        .expect("build codex");
+        .expect("build codex")
+        .codex;
 
-    for (idx, user) in [first_user, second_user, third_user]
+    for (idx, user) in ["USER_ONE", "USER_TWO", "USER_THREE"]
         .into_iter()
         .enumerate()
     {
