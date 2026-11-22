@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(not(unix))]
 use tempfile::TempDir;
 use wiremock::Mock;
@@ -210,7 +210,6 @@ trust_level = "trusted"
 "#,
             server.uri(),
             backend == "daemon",
-            server.uri(),
             server.uri(),
             serde_json::to_string(&source)?,
             serde_json::to_string(&launcher)?
