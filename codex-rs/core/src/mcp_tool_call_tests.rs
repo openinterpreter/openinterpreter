@@ -991,7 +991,7 @@ fn custom_servers_support_session_and_persistent_approval() {
         arguments: None,
     };
     let expected = McpToolApprovalKey {
-        server: "custom_server".to_string(),
+        server: McpServerKey::unscoped("custom_server"),
         plugin_id: None,
         connector_id: None,
         link_id: None,
@@ -1027,7 +1027,12 @@ fn custom_servers_support_session_and_persistent_approval() {
             ..expected.clone()
         };
         assert_eq!(
-            session_mcp_tool_approval_key(&invocation, Some(&metadata), AppToolApproval::Auto),
+            session_mcp_tool_approval_key(
+                &McpServerKey::unscoped(&invocation.server),
+                &invocation,
+                Some(&metadata),
+                AppToolApproval::Auto,
+            ),
             Some(plugin_key)
         );
     }
@@ -1050,7 +1055,7 @@ fn codex_apps_connectors_support_persistent_approval() {
     );
     metadata.link_id = Some("link_a".to_string());
     let expected = McpToolApprovalKey {
-        server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        server: McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
         plugin_id: None,
         connector_id: Some("calendar".to_string()),
         link_id: Some("link_a".to_string()),
@@ -2722,7 +2727,7 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config() {
     let codex_home = session.codex_home().await;
     std::fs::create_dir_all(&codex_home).expect("create codex home");
     let key = McpToolApprovalKey {
-        server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        server: McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
         plugin_id: None,
         connector_id: Some("calendar".to_string()),
         link_id: None,
@@ -2779,7 +2784,7 @@ async fn persistent_mcp_tool_approval_remembers_scoped_session_key(
         .expect("load config");
     turn_context.config = Arc::new(config);
     let key = McpToolApprovalKey {
-        server: "docs".to_string(),
+        server: McpServerKey::unscoped("docs"),
         plugin_id: None,
         connector_id: None,
         link_id: None,
@@ -2828,7 +2833,7 @@ async fn maybe_persist_mcp_tool_approval_writes_plugin_mcp_policy() {
     let codex_home = session.codex_home().await;
     std::fs::create_dir_all(&codex_home).expect("create codex home");
     let key = McpToolApprovalKey {
-        server: "sample".to_string(),
+        server: McpServerKey::unscoped("sample"),
         plugin_id: Some("sample@test".to_string()),
         connector_id: None,
         link_id: None,
@@ -2920,7 +2925,7 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
         .expect("load project config");
     turn_context.config = Arc::new(config);
     let key = McpToolApprovalKey {
-        server: "docs".to_string(),
+        server: McpServerKey::unscoped("docs"),
         plugin_id: None,
         connector_id: None,
         link_id: None,
@@ -3790,7 +3795,8 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
 
 #[tokio::test]
 async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
-    let (session, _) = crate::session::tests::make_session_and_context().await;
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let review_context = GuardianReviewContext::from(&Arc::new(turn_context));
     let invocation = McpInvocation {
         server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
         environment_id: None,
@@ -3804,47 +3810,60 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
         /*tool_title*/ None,
         /*tool_description*/ None,
     );
+    let server_key = McpServerKey::unscoped(&invocation.server);
     let mut call = Box::pin(async {
-        let _approval_metadata =
-            session.register_mcp_tool_approval_metadata("call", &invocation, metadata.clone());
+        let _approval_metadata = session.register_mcp_tool_approval_metadata(
+            "call",
+            &server_key,
+            &invocation,
+            metadata.clone(),
+            review_context.clone(),
+            None,
+        );
         std::future::pending::<()>().await;
     });
     assert!(futures::poll!(call.as_mut()).is_pending());
-    let _other_metadata =
-        session.register_mcp_tool_approval_metadata("other-call", &invocation, metadata.clone());
+    let _other_metadata = session.register_mcp_tool_approval_metadata(
+        "other-call",
+        &server_key,
+        &invocation,
+        metadata.clone(),
+        review_context.clone(),
+        None,
+    );
     assert_eq!(
         session
-            .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
-            .map(|(invocation, metadata)| (invocation, metadata.connector_id)),
+            .mcp_tool_approval_metadata(&server_key, "call")
+            .map(|context| (context.invocation, context.metadata.connector_id)),
         Some((Some(invocation.clone()), Some("connector".to_string()))),
     );
     assert!(
         session
-            .mcp_tool_approval_metadata("another-server", "call")
+            .mcp_tool_approval_metadata(&McpServerKey::unscoped("another-server"), "call")
             .is_none()
     );
     drop(call);
     assert!(
         session
-            .mcp_tool_approval_metadata(CODEX_APPS_MCP_SERVER_NAME, "call")
+            .mcp_tool_approval_metadata(&server_key, "call")
             .is_none()
     );
-    let _next_metadata =
-        session.register_mcp_tool_approval_metadata("next-call", &invocation, metadata);
+    let _next_metadata = session.register_mcp_tool_approval_metadata(
+        "next-call",
+        &server_key,
+        &invocation,
+        metadata,
+        review_context,
+        None,
+    );
     let registry = session.mcp_tool_approval_metadata.lock().unwrap();
     let mut keys = registry.keys().cloned().collect::<Vec<_>>();
     keys.sort();
     assert_eq!(
         keys,
         vec![
-            (
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                "next-call".to_string()
-            ),
-            (
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                "other-call".to_string()
-            ),
+            (server_key.clone(), "next-call".to_string()),
+            (server_key, "other-call".to_string()),
         ],
     );
 }
