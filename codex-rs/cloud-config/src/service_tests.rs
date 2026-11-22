@@ -700,14 +700,7 @@ async fn invalid_cloud_provider_does_not_replace_cached_bundle() {
     let codex_home = tempdir().expect("tempdir");
     let cache = create_test_cache(codex_home.path());
     let previous = test_bundle();
-    cache
-        .save(
-            Some("user-12345".to_string()),
-            Some("account-12345".to_string()),
-            previous.clone(),
-        )
-        .await
-        .expect("cache valid bundle");
+    write_test_cache(&cache, previous.clone()).await;
 
     for contents in [
         "[model_providers.openai]\nname = 'Reserved'",
