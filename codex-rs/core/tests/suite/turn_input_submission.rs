@@ -74,19 +74,17 @@ impl TurnLifecycleContributor for CompletedInputRecorder {
         _thread_store: &'a ExtensionData,
         turn_store: &'a ExtensionData,
         item: &'a TurnItem,
-        metadata: Option<&'a BTreeMap<String, Value>>,
+        data: Option<&'a BTreeMap<String, Value>>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let TurnItem::UserMessage(message) = item {
-                for content in &message.content {
-                    if let UserInput::Text { text, .. } = content {
-                        let _ = self.0.send((
-                            turn_store.level_id().to_string(),
-                            text.clone(),
-                            metadata.and_then(|data| data.get("test").cloned()),
-                        ));
-                    }
-                }
+                self.0
+                    .send((
+                        turn_store.level_id().to_owned(),
+                        message.message(),
+                        data.and_then(|data| data.get("test")).cloned(),
+                    ))
+                    .expect("completion receiver");
             }
         })
     }
