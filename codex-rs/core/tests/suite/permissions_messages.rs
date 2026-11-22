@@ -3,6 +3,7 @@ use codex_config::ConfigLayerStack;
 use codex_core::ForkSnapshot;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
+use codex_features::Feature;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::PermissionProfile;

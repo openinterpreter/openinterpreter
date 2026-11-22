@@ -294,9 +294,7 @@ async fn host_budget_context_refreshes_after_remote_compaction() -> Result<()> {
     let snapshot = context_snapshot::format_request_history_snapshot(
         "Core renders the host's roster with native World State cadence. Compaction rebuilds it from current membership, and the next sampling step refreshes the budget after compaction spending.",
         &requests,
-        &ContextSnapshotOptions::default()
-            .rewrite_known_segments()
-            .preserve_environment_context(),
+        &ContextSnapshotOptions::default().rewrite_known_segments(),
     );
     insta::assert_snapshot!("host_budget_context_after_compaction", snapshot);
     Ok(())

@@ -31,7 +31,6 @@ use codex_core::compact::AutoCompactionDisabled;
 use codex_core::config::Config;
 use codex_core::config::TokenBudgetConfig;
 use codex_exec_server::CreateDirectoryOptions;
-use codex_exec_server::EnvironmentManager;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
@@ -1406,14 +1405,11 @@ async fn astra_omits_disabled_executor_skills_from_model_context() -> Result<()>
         "Use the current workflow",
         "Follow the current workflow.",
     )?;
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
-    )
-    .with_disabled_skill_paths(HashMap::from([(
-        LOCAL_ENVIRONMENT_ID.to_string(),
-        HashSet::from([PathUri::from_host_native_path(disabled)?]),
-    )]));
+    let provider = ExecutorSkillProvider::new_with_restriction_product(None)
+        .with_disabled_skill_paths(HashMap::from([(
+            LOCAL_ENVIRONMENT_ID.to_string(),
+            HashSet::from([PathUri::from_host_native_path(disabled)?]),
+        )]));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install_with_providers(
         &mut extensions,

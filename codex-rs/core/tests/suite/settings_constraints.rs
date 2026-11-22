@@ -169,7 +169,7 @@ async fn protected_model_startup_preserves_legacy_permission_behavior() -> Resul
             let restored = test.codex.restorable_thread_settings().await;
             let environments = restored.environments.expect("captured environments");
             let environment = environments
-                .environment_requests
+                .environments
                 .first()
                 .expect("selected executor environment");
             let actual = restored

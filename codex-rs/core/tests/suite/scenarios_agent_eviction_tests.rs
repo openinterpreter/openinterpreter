@@ -188,9 +188,7 @@ async fn idle_eviction_preserves_worker_context_for_followup() -> Result<()> {
             .await;
             assert_eq!(call.call_id, format!("worker-echo-{tool}"));
             assert_eq!(
-                child
-                    .current_turn_environment_selections(&call.turn_id)
-                    .await,
+                child.active_turn_environment_selections().await,
                 Some(Vec::new()),
             );
             // A child-owned temporary attachment must disappear across idle eviction.
