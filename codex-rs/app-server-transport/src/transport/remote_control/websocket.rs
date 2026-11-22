@@ -1951,17 +1951,13 @@ mod tests {
     #[test]
     fn next_reconnect_delay_resets_after_cap() {
         let mut reconnect_attempt = 9;
-
-        assert!(
-            timeout(Duration::from_secs(4), auth_change.as_mut())
-                .await
-                .is_err()
-        );
-        timeout(Duration::from_secs(2), auth_change)
-            .await
-            .expect("queued credentials should be usable as soon as the server delay expires")
-            .expect("auth watch should remain open");
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        let (delay, reset) = next_reconnect_delay(&mut reconnect_attempt);
+        assert_eq!(delay, REMOTE_CONTROL_RECONNECT_BACKOFF_CAP);
+        assert!(reset);
+        assert_eq!(reconnect_attempt, 0);
+        let (_, reset) = next_reconnect_delay(&mut reconnect_attempt);
+        assert!(!reset);
+        assert_eq!(reconnect_attempt, 1);
     }
 
     #[test]

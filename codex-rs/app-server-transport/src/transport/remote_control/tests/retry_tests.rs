@@ -49,6 +49,7 @@ async fn assert_overload_retry_after(status: &str, reject_enrollment: bool) {
     auth_manager.reload().await;
     let (remote_task, remote_handle) = start_remote_control(
         RemoteControlStartConfig {
+            runtime_auth: None,
             remote_control_url: remote_control_url_for_listener(&listener),
             installation_id: TEST_INSTALLATION_ID.to_string(),
             policy: RemoteControlPolicy::Allowed,

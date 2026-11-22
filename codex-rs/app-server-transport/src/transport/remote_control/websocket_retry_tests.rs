@@ -137,7 +137,7 @@ async fn assert_conflict_recovery(subscribe_cursor: Option<&str>) {
             assert!(matches!(outcome, ConnectOutcome::Connected(_)));
             assert_eq!(websocket.reconnect_attempt, 11);
             assert!(
-                next_reconnect_delay(&mut websocket.reconnect_attempt) >= Duration::from_secs(15),
+                next_reconnect_delay(&mut websocket.reconnect_attempt).0 >= Duration::from_secs(15),
                 "a successful handshake must not reset backoff before the connection stays healthy"
             );
             assert_eq!(current_enrollment.snapshot(), Some(enrollment));
@@ -154,13 +154,13 @@ async fn assert_conflict_recovery(subscribe_cursor: Option<&str>) {
 fn reconnect_backoff_stays_capped_during_sustained_failures() {
     let mut reconnect_attempt = 0;
     for max_delay in [5, 10, 20] {
-        let delay = next_reconnect_delay(&mut reconnect_attempt);
+        let (delay, _) = next_reconnect_delay(&mut reconnect_attempt);
         assert!(delay >= Duration::from_secs(max_delay) / 2);
         assert!(delay <= Duration::from_secs(max_delay));
     }
     for mut reconnect_attempt in [reconnect_attempt, 9, u64::MAX] {
         for _ in 0..1000 {
-            let delay = next_reconnect_delay(&mut reconnect_attempt);
+            let (delay, _) = next_reconnect_delay(&mut reconnect_attempt);
             assert!(delay >= Duration::from_secs(15));
             assert!(delay <= Duration::from_secs(30));
         }

@@ -332,6 +332,7 @@ async fn control_socket_rejects_writable_parent_without_changing_permissions() {
         tx,
         CancellationToken::new(),
         DaemonShutdownAccess::Disabled,
+        WebSocketCompression::Plain,
     )
     .await
     .unwrap_err();
@@ -403,12 +404,14 @@ async fn control_socket_file_is_private_after_bind() {
             sender.clone(),
             shutdown.clone(),
             DaemonShutdownAccess::Disabled,
+            WebSocketCompression::Plain,
         ),
         start_control_socket_acceptor(
             socket_path.clone(),
             sender,
             shutdown.clone(),
             DaemonShutdownAccess::Disabled,
+            WebSocketCompression::Plain,
         ),
     );
     let (acceptor, error) = match (first, second) {
