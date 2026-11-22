@@ -14,6 +14,7 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ThreadStoreResumePreparation;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
