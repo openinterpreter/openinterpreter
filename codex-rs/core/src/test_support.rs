@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::LoadInstructionsFuture;
@@ -31,6 +33,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 
+use crate::CodexThread;
 use crate::ThreadManager;
 pub use crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
 use crate::config::Config;
@@ -40,6 +43,34 @@ use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::thread_manager;
 use crate::unified_exec;
+
+/// Retain the active turn's timing state across completion for integration assertions.
+pub async fn observe_turn_timing(
+    thread: &CodexThread,
+) -> Option<impl Fn(Instant, Instant) -> Option<[Duration; 5]> + use<>> {
+    let timing = {
+        let active = thread.session.active_turn.lock().await;
+        Arc::clone(
+            &active
+                .as_ref()?
+                .task
+                .as_ref()?
+                .turn_context
+                .turn_timing_state,
+        )
+    };
+    Some(move |start: Instant, end: Instant| {
+        let path = timing.snapshot_path(end)?;
+        let durations = path.durations(start, end);
+        Some([
+            durations.sampling,
+            durations.auto_review,
+            durations.tools,
+            durations.overhead + durations.compaction + durations.user_wait,
+            durations.unknown,
+        ])
+    })
+}
 
 /// Supply fixed model metadata to tests without implementing a provider.
 pub fn fixed_model_catalog(
