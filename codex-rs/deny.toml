@@ -102,6 +102,11 @@ ignore = [
     { id = "RUSTSEC-2026-0549", reason = "hickory-proto 0.25.2 via rama-dns/rama-tcp in codex-network-proxy; DNSSEC validation is disabled, including with all workspace features; reassess before enabling DNSSEC; remove after the Rust/Rama upgrade uses Hickory >=0.26.2" },
     { id = "RUSTSEC-2026-0550", reason = "hickory-proto 0.25.2 via rama-dns/rama-tcp in codex-network-proxy; DNSSEC validation is disabled, including with all workspace features; reassess before enabling DNSSEC; remove after the Rust/Rama upgrade uses Hickory >=0.26.2" },
     { id = "RUSTSEC-2026-0551", reason = "hickory-proto 0.25.2 via rama-dns/rama-tcp in codex-network-proxy; DNSSEC validation is disabled, including with all workspace features; reassess before enabling DNSSEC; remove after the Rust/Rama upgrade uses Hickory >=0.26.2" },
+    # Reviewed 2026-11-22. This is a maintenance notice, not a reported exploit;
+    # official Codex main still directly uses chrono across runtime/UI crates.
+    # Keep vulnerability checks active and migrate these callers to time/jiff
+    # with upstream compatibility rather than inventing an incompatible fork.
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained with no safe upgrade; direct upstream/OIX use spans core, TUI, app-server and tests; migrate to time/jiff in a dedicated cross-crate change and reassess immediately if a vulnerability is reported" },
     { id = "RUSTSEC-2026-0194", reason = "quick-xml v0.39.4 remains via plist/syntect and wayland-scanner; plist does not exercise the affected APIs and wayland-scanner parses trusted build-time XML; remove when rust-plist#191 and wayland-rs#938 are released" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml v0.39.4 remains via plist/syntect and wayland-scanner; plist does not exercise the affected APIs and wayland-scanner parses trusted build-time XML; remove when rust-plist#191 and wayland-rs#938 are released" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant 4.2.0 is unmaintained; pulled in via zbus 4.4.0 by Linux TUI accessibility integration and keyring/secret-service; remove when those paths migrate off the retired standalone crates" },
