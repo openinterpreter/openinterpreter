@@ -3701,13 +3701,12 @@ fn collect_glob_matches(
     include_dirs: bool,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    let pattern = SimpleGlob::new(pattern);
     for entry in harness_fs::bounded_walk(root)? {
         let path = entry.path;
         let relative = path.strip_prefix(root).unwrap_or(path.as_path());
         let relative_text = relative.to_string_lossy();
-        if (include_dirs || entry.kind == WalkEntryKind::File)
-            && simple_glob_matches(pattern, &relative_text)
-        {
+        if (include_dirs || entry.kind == WalkEntryKind::File) && pattern.is_match(&relative_text) {
             matches.push(relative_text.to_string());
         }
     }
@@ -3721,6 +3720,7 @@ fn collect_grep_matches(
     glob: Option<&str>,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    let glob = glob.map(SimpleGlob::new);
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3728,7 +3728,9 @@ fn collect_grep_matches(
         let path = entry.path;
         let relative = path.strip_prefix(root).unwrap_or(path.as_path());
         let relative_text = relative.to_string_lossy();
-        if glob.is_none_or(|pattern| simple_glob_matches(pattern, &relative_text))
+        if glob
+            .as_ref()
+            .is_none_or(|glob| glob.is_match(&relative_text))
             && let Some(text) = harness_fs::read_search_file(&path)
         {
             for line in text.lines() {
@@ -3761,6 +3763,7 @@ fn collect_zcode_grep_content_matches(
         );
         return Ok(());
     }
+    let glob = glob.map(SimpleGlob::new);
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3770,7 +3773,10 @@ fn collect_zcode_grep_content_matches(
             .strip_prefix(path)
             .unwrap_or(entry_path.as_path());
         let relative_text = relative.to_string_lossy();
-        if glob.is_none_or(|pattern| simple_glob_matches(pattern, &relative_text)) {
+        if glob
+            .as_ref()
+            .is_none_or(|glob| glob.is_match(&relative_text))
+        {
             collect_zcode_grep_content_matches_for_file(
                 &entry_path,
                 &entry_path,
@@ -3823,6 +3829,7 @@ fn collect_zcode_grep_count_matches(
     glob: Option<&str>,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    let glob = glob.map(SimpleGlob::new);
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3830,7 +3837,9 @@ fn collect_zcode_grep_count_matches(
         let path = entry.path;
         let relative = path.strip_prefix(display_root).unwrap_or(path.as_path());
         let relative_text = relative.to_string_lossy();
-        if glob.is_none_or(|pattern| simple_glob_matches(pattern, &relative_text))
+        if glob
+            .as_ref()
+            .is_none_or(|glob| glob.is_match(&relative_text))
             && let Some(text) = harness_fs::read_search_file(&path)
         {
             let count = text.lines().filter(|line| regex.is_match(line)).count();
@@ -3904,81 +3913,213 @@ fn count_searchable_files(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn simple_glob_matches(pattern: &str, relative_path: &str) -> bool {
-    let path = relative_path.chars().collect::<Vec<_>>();
-    let name_start = path
-        .iter()
-        .rposition(|ch| *ch == '/')
-        .map_or(0, |index| index + 1);
-    expand_glob_braces(pattern).iter().any(|pattern| {
-        let pattern = pattern.chars().collect::<Vec<_>>();
-        if pattern.contains(&'/') {
-            glob_wildcard_matches(&pattern, &path)
-        } else {
-            glob_wildcard_matches(&pattern, &path[name_start..])
-        }
-    })
+/// Glob pattern compiled once per Glob/Grep query. `*` and `?` stay inside one
+/// path component, `**/` spans zero or more directories and `{a,b}` is an
+/// alternative. Matching runs the pattern as an NFA, so a path costs at most
+/// `states × path length` steps and brace groups are never expanded.
+struct SimpleGlob {
+    states: Vec<GlobState>,
+    start: usize,
+    matches_file_name: bool,
 }
 
-fn expand_glob_braces(pattern: &str) -> Vec<String> {
-    let Some(open) = pattern.find('{') else {
-        return vec![pattern.to_string()];
-    };
-    let mut depth = 0;
-    let mut close = None;
-    let mut alternatives = Vec::new();
-    let mut start = open + 1;
-    for (index, ch) in pattern[open..].char_indices().map(|(i, ch)| (open + i, ch)) {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    alternatives.push(&pattern[start..index]);
-                    close = Some(index);
-                    break;
+enum GlobState {
+    Literal(char, usize),
+    ComponentChar(usize),
+    AnyChar(usize),
+    Split(Vec<usize>),
+    Accept,
+}
+
+enum GlobToken {
+    Literal(char),
+    ComponentChar,
+    Star,
+    DoubleStar,
+    DoubleStarSlash,
+    Alternatives(Vec<Vec<GlobToken>>),
+}
+
+impl SimpleGlob {
+    fn new(pattern: &str) -> Self {
+        let chars = pattern.chars().collect::<Vec<_>>();
+        let mut closing_braces = vec![None; chars.len()];
+        let mut open_braces = Vec::new();
+        for (index, ch) in chars.iter().enumerate() {
+            match ch {
+                '{' => open_braces.push(index),
+                '}' => {
+                    if let Some(open) = open_braces.pop() {
+                        closing_braces[open] = Some(index);
+                    }
                 }
+                _ => {}
             }
-            ',' if depth == 1 => {
-                alternatives.push(&pattern[start..index]);
-                start = index + 1;
-            }
-            _ => {}
+        }
+        let tokens = parse_glob_tokens(&chars, 0, chars.len(), &closing_braces);
+        let mut states = vec![GlobState::Accept];
+        let start = build_glob_states(&tokens, 0, &mut states);
+        Self {
+            states,
+            start,
+            // A pattern without `/` matches the file name at any depth.
+            matches_file_name: !pattern.contains('/'),
         }
     }
-    let Some(close) = close else {
-        return vec![pattern.to_string()];
-    };
-    let (prefix, suffix) = (&pattern[..open], &pattern[close + 1..]);
-    alternatives
-        .into_iter()
-        .flat_map(|alternative| expand_glob_braces(&format!("{prefix}{alternative}{suffix}")))
-        .collect()
+
+    fn is_match(&self, relative_path: &str) -> bool {
+        let text = if self.matches_file_name {
+            relative_path.rsplit('/').next().unwrap_or(relative_path)
+        } else {
+            relative_path
+        };
+        let mut seen = vec![false; self.states.len()];
+        let mut pending = Vec::new();
+        let mut current = Vec::new();
+        let mut next = Vec::new();
+        self.add_state(self.start, &mut current, &mut seen, &mut pending);
+        for ch in text.chars() {
+            seen.fill(false);
+            next.clear();
+            for &state in &current {
+                let target = match self.states[state] {
+                    GlobState::Literal(literal, target) if literal == ch => target,
+                    GlobState::ComponentChar(target) if ch != '/' => target,
+                    GlobState::AnyChar(target) => target,
+                    _ => continue,
+                };
+                self.add_state(target, &mut next, &mut seen, &mut pending);
+            }
+            if next.is_empty() {
+                return false;
+            }
+            std::mem::swap(&mut current, &mut next);
+        }
+        current
+            .iter()
+            .any(|state| matches!(self.states[*state], GlobState::Accept))
+    }
+
+    fn add_state(
+        &self,
+        state: usize,
+        active: &mut Vec<usize>,
+        seen: &mut [bool],
+        pending: &mut Vec<usize>,
+    ) {
+        pending.push(state);
+        while let Some(state) = pending.pop() {
+            if std::mem::replace(&mut seen[state], true) {
+                continue;
+            }
+            match &self.states[state] {
+                GlobState::Split(targets) => pending.extend(targets),
+                _ => active.push(state),
+            }
+        }
+    }
 }
 
-fn glob_wildcard_matches(pattern: &[char], path: &[char]) -> bool {
-    match pattern {
-        [] => path.is_empty(),
-        ['*', '*', '/', rest @ ..] => {
-            glob_wildcard_matches(rest, path)
-                || path.iter().enumerate().any(|(index, ch)| {
-                    *ch == '/' && glob_wildcard_matches(rest, &path[index + 1..])
-                })
-        }
-        ['*', '*', rest @ ..] => {
-            (0..=path.len()).any(|index| glob_wildcard_matches(rest, &path[index..]))
-        }
-        ['*', rest @ ..] => {
-            let segment_len = path.iter().position(|ch| *ch == '/').unwrap_or(path.len());
-            (0..=segment_len).any(|index| glob_wildcard_matches(rest, &path[index..]))
-        }
-        ['?', rest @ ..] => {
-            path.first().is_some_and(|ch| *ch != '/') && glob_wildcard_matches(rest, &path[1..])
-        }
-        [literal, rest @ ..] => {
-            path.first() == Some(literal) && glob_wildcard_matches(rest, &path[1..])
-        }
+fn parse_glob_tokens(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    closing_braces: &[Option<usize>],
+) -> Vec<GlobToken> {
+    let mut tokens = Vec::new();
+    let mut index = start;
+    while index < end {
+        let rest = &chars[index..end];
+        let (token, len) = if rest.starts_with(&['*', '*', '/']) {
+            (GlobToken::DoubleStarSlash, 3)
+        } else if rest.starts_with(&['*', '*']) {
+            (GlobToken::DoubleStar, 2)
+        } else {
+            match (rest[0], closing_braces[index]) {
+                ('*', _) => (GlobToken::Star, 1),
+                ('?', _) => (GlobToken::ComponentChar, 1),
+                ('{', Some(close)) => {
+                    let mut alternatives = Vec::new();
+                    let mut alternative_start = index + 1;
+                    let mut cursor = index + 1;
+                    while cursor < close {
+                        match (chars[cursor], closing_braces[cursor]) {
+                            (',', _) => {
+                                alternatives.push(parse_glob_tokens(
+                                    chars,
+                                    alternative_start,
+                                    cursor,
+                                    closing_braces,
+                                ));
+                                alternative_start = cursor + 1;
+                            }
+                            ('{', Some(inner_close)) => cursor = inner_close,
+                            _ => {}
+                        }
+                        cursor += 1;
+                    }
+                    alternatives.push(parse_glob_tokens(
+                        chars,
+                        alternative_start,
+                        close,
+                        closing_braces,
+                    ));
+                    (GlobToken::Alternatives(alternatives), close + 1 - index)
+                }
+                (ch, _) => (GlobToken::Literal(ch), 1),
+            }
+        };
+        tokens.push(token);
+        index += len;
     }
+    tokens
+}
+
+/// Appends the states for `tokens` and returns the entry state; `next` is the
+/// state reached once all tokens have matched.
+fn build_glob_states(tokens: &[GlobToken], next: usize, states: &mut Vec<GlobState>) -> usize {
+    let mut next = next;
+    for token in tokens.iter().rev() {
+        next = match token {
+            GlobToken::Literal(ch) => push_glob_state(states, GlobState::Literal(*ch, next)),
+            GlobToken::ComponentChar => push_glob_state(states, GlobState::ComponentChar(next)),
+            GlobToken::Star => {
+                let split = push_glob_state(states, GlobState::Split(Vec::new()));
+                let component_char = push_glob_state(states, GlobState::ComponentChar(split));
+                states[split] = GlobState::Split(vec![component_char, next]);
+                split
+            }
+            GlobToken::DoubleStar => {
+                let split = push_glob_state(states, GlobState::Split(Vec::new()));
+                let any_char = push_glob_state(states, GlobState::AnyChar(split));
+                states[split] = GlobState::Split(vec![any_char, next]);
+                split
+            }
+            GlobToken::DoubleStarSlash => {
+                // `**/` is `([^/]*/)*`: each directory loops back to `split`.
+                let split = push_glob_state(states, GlobState::Split(Vec::new()));
+                let slash = push_glob_state(states, GlobState::Literal('/', split));
+                let component = push_glob_state(states, GlobState::Split(Vec::new()));
+                let component_char = push_glob_state(states, GlobState::ComponentChar(component));
+                states[component] = GlobState::Split(vec![component_char, slash]);
+                states[split] = GlobState::Split(vec![next, component]);
+                split
+            }
+            GlobToken::Alternatives(alternatives) => {
+                let starts = alternatives
+                    .iter()
+                    .map(|alternative| build_glob_states(alternative, next, states))
+                    .collect();
+                push_glob_state(states, GlobState::Split(starts))
+            }
+        };
+    }
+    next
+}
+
+fn push_glob_state(states: &mut Vec<GlobState>, state: GlobState) -> usize {
+    states.push(state);
+    states.len() - 1
 }
 
 fn harness_alias_spec(name: &str) -> ToolSpec {
@@ -4723,6 +4864,41 @@ mod tests {
         .expect("grep succeeds");
 
         assert_eq!(output, "src/app.ts\nsrc/lib/util.ts\nsrc/view.tsx");
+    }
+
+    #[tokio::test]
+    async fn glob_alias_rejects_repeated_wildcards_without_backtracking() {
+        let workspace = write_glob_workspace();
+        std::fs::write(workspace.path().join("a".repeat(60)), "NEEDLE\n").expect("write file");
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Glob,
+            "Glob",
+            json!({ "pattern": format!("{}Z", "*".repeat(32)) }),
+        )
+        .await
+        .expect("glob succeeds");
+
+        assert_eq!(output, "");
+    }
+
+    #[tokio::test]
+    async fn grep_alias_glob_filter_matches_repeated_brace_groups() {
+        let workspace = write_glob_workspace();
+        let name = format!("{}.ts", "ab".repeat(20));
+        std::fs::write(workspace.path().join(&name), "NEEDLE\n").expect("write file");
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Grep,
+            "Grep",
+            json!({ "pattern": "NEEDLE", "glob": format!("{}.ts", "{a,b}".repeat(40)) }),
+        )
+        .await
+        .expect("grep succeeds");
+
+        assert_eq!(output, name);
     }
 
     #[tokio::test]
