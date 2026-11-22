@@ -247,6 +247,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod accepted_client_ids;
 pub(crate) mod async_compaction;
 pub(crate) mod file_audio;
 pub(crate) use file_audio::FileAudioDurations;
@@ -1816,6 +1817,7 @@ impl Session {
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                self.input_queue.restore_accepted_client_ids(&rollout_items);
 
                 // If resuming, warn when the last recorded model differs from the current one.
                 let curr: &str = turn_context.model_info().slug.as_str();

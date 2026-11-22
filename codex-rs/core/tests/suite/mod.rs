@@ -71,6 +71,7 @@ mod catalog_permission_messages;
 mod claude_code_chat;
 mod cli_stream;
 mod client;
+mod client_message_id;
 mod client_websockets;
 mod cloud_config;
 mod code_mode;

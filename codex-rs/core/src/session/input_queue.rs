@@ -1,3 +1,4 @@
+use super::accepted_client_ids::AcceptedClientIds;
 use crate::agent::api::AgentControl;
 use crate::agent_communication::PENDING_MAILBOX_MESSAGES;
 use crate::agent_communication::PendingAgentMessage;
@@ -6,15 +7,19 @@ use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_diagnostics::GaugeGuard;
 use codex_history::ResponseItemEnvelope;
+use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -134,6 +139,10 @@ pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     controller: Option<(ThreadId, Arc<dyn AgentControl>, watch::Receiver<bool>)>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// Never held across an await; safe under the active-turn and turn-state locks.
+    accepted_client_ids: std::sync::Mutex<AcceptedClientIds>,
+    /// Causal roots for the same bounded accepted client IDs.
+    accepted_client_roots: std::sync::Mutex<HashMap<String, String>>,
 }
 
 pub(crate) struct PendingMailboxCommunication {
@@ -149,6 +158,8 @@ impl InputQueue {
             activity_tx,
             controller: None,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            accepted_client_ids: std::sync::Mutex::new(AcceptedClientIds::default()),
+            accepted_client_roots: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -157,6 +168,94 @@ impl InputQueue {
         Self {
             controller: Some((thread_id, control, updates)),
             ..Self::new()
+        }
+    }
+
+    pub(super) fn accepted_turn(&self, client_id: &str) -> Option<(String, String)> {
+        let accepted = self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let turn_id = accepted.turn_id(client_id)?.to_owned();
+        let root_turn_id = self
+            .accepted_client_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(client_id)
+            .cloned()
+            .unwrap_or_else(|| turn_id.clone());
+        Some((turn_id, root_turn_id))
+    }
+
+    pub(super) fn record_accepted_client_id(
+        &self,
+        client_id: String,
+        turn_id: String,
+        root_turn_id: String,
+    ) {
+        let mut accepted = self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        accepted.insert(client_id.clone(), turn_id);
+        let mut roots = self
+            .accepted_client_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        roots.insert(client_id, root_turn_id);
+        if roots.len() > 4_096 {
+            roots.retain(|id, _| accepted.turn_id(id).is_some());
+        }
+    }
+
+    /// Discarded, unrecorded inputs must be eligible for resubmission.
+    pub(crate) fn forget_client_ids(&self, inputs: &[TurnInput]) {
+        let mut accepted = self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut roots = self
+            .accepted_client_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for client_id in inputs.iter().filter_map(TurnInput::client_id) {
+            accepted.remove(client_id);
+            roots.remove(client_id);
+        }
+    }
+
+    pub(super) fn restore_accepted_client_ids(&self, items: &[RolloutItem]) {
+        let mut accepted = self
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *accepted = AcceptedClientIds::from_rollout(items);
+        let mut roots = self
+            .accepted_client_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        roots.clear();
+        let mut current_turn: Option<(&str, &str)> = None;
+        for item in items {
+            if let RolloutItem::EventMsg(event) = item {
+                match event {
+                    EventMsg::TurnStarted(event) => {
+                        current_turn = Some((
+                            &event.turn_id,
+                            event.root_turn_id.as_deref().unwrap_or(&event.turn_id),
+                        ));
+                    }
+                    EventMsg::UserMessage(event) => {
+                        if let (Some(client_id), Some((turn_id, root))) =
+                            (&event.client_id, current_turn)
+                            && accepted.turn_id(client_id) == Some(turn_id)
+                        {
+                            roots.insert(client_id.clone(), root.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -369,6 +468,7 @@ impl InputQueue {
             turn_state.clear_pending_waiters();
             std::mem::take(&mut turn_state.pending_input)
         };
+        self.forget_client_ids(&pending_input.items);
         // A terminal result still in the queue has no writer yet. Keep it available
         // to the next turn or to the source writer during a graceful drain.
         let results: Vec<_> = pending_input
@@ -537,6 +637,59 @@ impl InputQueue {
             return true;
         }
         self.has_pending_mailbox_items().await
+    }
+}
+
+impl TurnInput {
+    pub(crate) fn client_id(&self) -> Option<&str> {
+        match self {
+            Self::UserInput { client_id, .. } => client_id.as_deref(),
+            Self::FunctionCallOutput(_)
+            | Self::ResponseItem(_)
+            | Self::InterAgentCommunication(_) => None,
+        }
+    }
+}
+
+/// Initial client IDs remain tentative until input recording has taken custody.
+pub(crate) struct UnrecordedClientIds<'a> {
+    input_queue: &'a InputQueue,
+    client_ids: Vec<String>,
+}
+
+impl<'a> UnrecordedClientIds<'a> {
+    pub(crate) fn new(input_queue: &'a InputQueue, input: &[TurnInput]) -> Self {
+        Self {
+            input_queue,
+            client_ids: input
+                .iter()
+                .filter_map(TurnInput::client_id)
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn hand_off(&mut self) {
+        self.client_ids.clear();
+    }
+}
+
+impl Drop for UnrecordedClientIds<'_> {
+    fn drop(&mut self) {
+        let mut accepted = self
+            .input_queue
+            .accepted_client_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut roots = self
+            .input_queue
+            .accepted_client_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for client_id in &self.client_ids {
+            accepted.remove(client_id);
+            roots.remove(client_id);
+        }
     }
 }
 

@@ -96,6 +96,18 @@ impl TurnStartKind {
     }
 }
 
+/// Duplicate submissions report the original turn without applying new settings.
+enum SteerOutcome {
+    Accepted {
+        turn_id: String,
+        root_turn_id: String,
+    },
+    Duplicate {
+        turn_id: String,
+        root_turn_id: String,
+    },
+}
+
 /// Thread settings and start-only options prepared before Core knows whether
 /// turn input starts or steers.
 ///
@@ -464,13 +476,23 @@ async fn start_or_steer(
         )
         .await
     {
-        Ok((turn_id, root_turn_id)) => {
+        Ok(SteerOutcome::Accepted {
+            turn_id,
+            root_turn_id,
+        }) => {
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered {
                 turn_id,
                 root_turn_id,
             })
         }
+        Ok(SteerOutcome::Duplicate {
+            turn_id,
+            root_turn_id,
+        }) => Ok(TurnInputSubmission::Steered {
+            turn_id,
+            root_turn_id,
+        }),
         Err(NotSubmittedReason::NoActiveTurn) => {
             // MAv1 sends explicit input to spawned agents as part of an existing
             // parent's work. Client RPCs are gated separately by the host.
@@ -515,6 +537,7 @@ async fn start_or_steer(
                         input,
                         sender_messages.as_ref(),
                         &turn_context.sub_id,
+                        &turn_context.root_turn_id(),
                         input_metadata,
                     )
                     .await,
@@ -672,6 +695,7 @@ async fn start_if_idle(
                     input,
                     sender_messages.as_ref(),
                     &turn_context.sub_id,
+                    &turn_context.root_turn_id(),
                     input_metadata,
                 )
                 .await,
@@ -686,6 +710,7 @@ async fn start_if_idle(
                         input,
                         sender_messages.as_ref(),
                         &turn_context.sub_id,
+                        &turn_context.root_turn_id(),
                         input_metadata,
                     )
                     .await,
@@ -752,13 +777,23 @@ async fn steer(
         )
         .await
     {
-        Ok((turn_id, root_turn_id)) => {
+        Ok(SteerOutcome::Accepted {
+            turn_id,
+            root_turn_id,
+        }) => {
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered {
                 turn_id,
                 root_turn_id,
             })
         }
+        Ok(SteerOutcome::Duplicate {
+            turn_id,
+            root_turn_id,
+        }) => Ok(TurnInputSubmission::Steered {
+            turn_id,
+            root_turn_id,
+        }),
         Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
     }
 }
@@ -972,7 +1007,7 @@ impl Session {
 
     /// Inject additional user input or a standalone tool output into the active turn.
     ///
-    /// Returns the active turn id when accepted.
+    /// Returns the accepting turn, including when this client id was already accepted.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
@@ -990,8 +1025,19 @@ impl Session {
         required_final_output_json_schema: Option<&Value>,
         responsesapi_client_metadata: ResponsesApiClientMetadataUpdate,
         input_metadata: UserInputMetadata,
-    ) -> Result<(String, String), NotSubmittedReason> {
+    ) -> Result<SteerOutcome, NotSubmittedReason> {
         let mut active = self.active_turn.lock().await;
+        if let SubmittedTurnInput::UserInput {
+            client_id: Some(client_id),
+            ..
+        } = &*input
+            && let Some((turn_id, root_turn_id)) = self.input_queue.accepted_turn(client_id)
+        {
+            return Ok(SteerOutcome::Duplicate {
+                turn_id,
+                root_turn_id,
+            });
+        }
         let Some(active_turn) = active.as_mut() else {
             return Err(NotSubmittedReason::NoActiveTurn);
         };
@@ -1045,20 +1091,30 @@ impl Session {
             .update_responsesapi_client_metadata(responsesapi_client_metadata);
 
         let input = match input {
-            SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
-                content: std::mem::take(content),
-                client_id: client_id.clone(),
-                metadata: super::UserInputMetadata {
-                    acceptance_order: Some(self.reserve_user_input_order().await),
-                    ..input_metadata
-                },
-            },
+            SubmittedTurnInput::UserInput { content, client_id } => {
+                if let Some(client_id) = client_id {
+                    self.input_queue.record_accepted_client_id(
+                        client_id.clone(),
+                        active_turn_id.clone(),
+                        active_task.turn_context.root_turn_id(),
+                    );
+                }
+                TurnInput::UserInput {
+                    content: std::mem::take(content),
+                    client_id: client_id.clone(),
+                    metadata: super::UserInputMetadata {
+                        acceptance_order: Some(self.reserve_user_input_order().await),
+                        ..input_metadata
+                    },
+                }
+            }
             input => {
                 pending_turn_input(
                     self,
                     input.clone(),
                     sender_messages,
                     active_turn_id,
+                    &active_task.turn_context.root_turn_id(),
                     input_metadata,
                 )
                 .await
@@ -1071,10 +1127,10 @@ impl Session {
                 pending_input,
             )
             .await;
-        Ok((
-            active_turn_id.clone(),
-            active_task.turn_context.root_turn_id(),
-        ))
+        Ok(SteerOutcome::Accepted {
+            turn_id: active_turn_id.clone(),
+            root_turn_id: active_task.turn_context.root_turn_id(),
+        })
     }
 }
 
@@ -1144,6 +1200,7 @@ async fn pending_turn_input(
     input: SubmittedTurnInput,
     sender_messages: Option<&SenderUserMessages>,
     turn_id: &str,
+    root_turn_id: &str,
     input_metadata: UserInputMetadata,
 ) -> TurnInput {
     let retain = match &input {
@@ -1151,14 +1208,23 @@ async fn pending_turn_input(
         _ => false,
     };
     let mut input = match input {
-        SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
-            content,
-            client_id,
-            metadata: super::UserInputMetadata {
-                acceptance_order: Some(session.reserve_user_input_order().await),
-                ..input_metadata
-            },
-        },
+        SubmittedTurnInput::UserInput { content, client_id } => {
+            if let Some(client_id) = &client_id {
+                session.input_queue.record_accepted_client_id(
+                    client_id.clone(),
+                    turn_id.to_owned(),
+                    root_turn_id.to_owned(),
+                );
+            }
+            TurnInput::UserInput {
+                content,
+                client_id,
+                metadata: super::UserInputMetadata {
+                    acceptance_order: Some(session.reserve_user_input_order().await),
+                    ..input_metadata
+                },
+            }
+        }
         SubmittedTurnInput::ResponseItem(item)
         | SubmittedTurnInput::AnnotatedResponseItem(AnnotatedResponseItem { item, .. })
             if matches!(

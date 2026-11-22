@@ -46,6 +46,7 @@ use crate::responses_retry::handle_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::daemon_recovery::RecordedTurnInput;
+use crate::session::input_queue::UnrecordedClientIds;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -221,10 +222,13 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    // Forget initial IDs if admission exits before input recording takes custody.
+    let mut unrecorded_client_ids = UnrecordedClientIds::new(&sess.input_queue, &input);
     let model_info = turn_context.capture_current_model_info();
     if !model_info.input_modalities.contains(&InputModality::Audio)
         && input.iter().any(turn_input_has_uploaded_audio_file)
     {
+        unrecorded_client_ids.hand_off();
         let result = run_hooks_and_record_inputs(
             &sess,
             &turn_context,
@@ -272,6 +276,7 @@ pub(crate) async fn run_turn(
         .await?
     {
         // Compaction runs before the new input is recorded, so preserve it on every failure.
+        unrecorded_client_ids.hand_off();
         let _ = run_hooks_and_record_inputs(
             &sess,
             &turn_context,
@@ -321,6 +326,7 @@ pub(crate) async fn run_turn(
         {
             Ok(requirements) => requirements,
             Err(err) => {
+                unrecorded_client_ids.hand_off();
                 let _ = run_hooks_and_record_inputs(
                     &sess,
                     &turn_context,
@@ -349,6 +355,7 @@ pub(crate) async fn run_turn(
     {
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+            unrecorded_client_ids.hand_off();
             let _ = run_hooks_and_record_inputs(
                 &sess,
                 &turn_context,
@@ -453,6 +460,7 @@ pub(crate) async fn run_turn(
         .await?;
     }
     let mut can_drain_pending_input = input.is_empty();
+    unrecorded_client_ids.hand_off();
     if run_hooks_and_record_inputs(
         &sess,
         &turn_context,
@@ -1051,6 +1059,15 @@ pub(crate) async fn run_hooks_and_record_inputs(
     input: &[TurnInput],
     persist_context: PersistContext,
 ) -> CodexResult<bool> {
+    if sess
+        .services
+        .thread_extension_data
+        .get::<crate::guardian::PendingReviewContext>()
+        .is_some()
+    {
+        // Guardian has not finalized this evidence for reusable history.
+        sess.input_queue.forget_client_ids(input);
+    }
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     for input_item in recordable_inputs(sess, model_info, input) {
@@ -1058,6 +1075,8 @@ pub(crate) async fn run_hooks_and_record_inputs(
         let hook_outcome = inspect_pending_input(sess, turn_context, &input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
+            sess.input_queue
+                .forget_client_ids(std::slice::from_ref(input_item.as_ref()));
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
             if matches!(input_item.as_ref(), TurnInput::UserInput { content, .. } if !content.is_empty())
