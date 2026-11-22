@@ -2,12 +2,14 @@ use std::io::Cursor;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_analytics::ImagePreparationMetadata;
 use codex_attachment_store::AttachmentStoreError;
 use codex_attachment_store::AttachmentStoreErrorKind;
 use codex_attachment_store::InlineAttachmentStore;
 use codex_attachment_store::ResolveFuture;
 use codex_attachment_store::ResolveRequest;
 use codex_attachment_store::UploadFuture;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -24,6 +26,33 @@ use serde_json::from_value;
 use serde_json::json;
 
 use super::*;
+
+// These tests assert on response items, while production attaches replay metadata to envelopes.
+async fn prepare_test_items(
+    thread_id: &str,
+    ephemeral: bool,
+    items: &mut Vec<ResponseItem>,
+    mode: ImagePreparationMode,
+    resize_notice_mode: ImageResizeNoticeMode,
+    image_store: &dyn AttachmentStore,
+) -> Vec<ImagePreparationMetadata> {
+    let mut envelopes: Vec<ResponseItemEnvelope> =
+        std::mem::take(items).into_iter().map(Into::into).collect();
+    let metadata = super::prepare_response_items(
+        thread_id,
+        ephemeral,
+        &mut envelopes,
+        mode,
+        resize_notice_mode,
+        image_store,
+    )
+    .await;
+    *items = envelopes
+        .into_iter()
+        .map(|envelope| envelope.item)
+        .collect();
+    metadata
+}
 
 pub(crate) struct FailingAttachmentStore;
 
@@ -105,7 +134,7 @@ async fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    prepare_response_items(
+    prepare_test_items(
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
@@ -197,7 +226,7 @@ async fn detail_policies_apply_the_expected_budgets() {
             internal_chat_message_metadata_passthrough: None,
         }];
 
-        let metadata = prepare_response_items(
+        let metadata = prepare_test_items(
             "image-preparation-thread",
             /*ephemeral*/ false,
             &mut items,
@@ -252,7 +281,7 @@ async fn preparation_reports_tool_output_item_id() {
         ]),
         internal_chat_message_metadata_passthrough: None,
     }];
-    let metadata = prepare_response_items(
+    let metadata = prepare_test_items(
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
@@ -292,7 +321,9 @@ async fn upload_failure_keeps_resized_image_inline() {
         internal_chat_message_metadata_passthrough: None,
     }];
 
-    prepare_response_items(
+    prepare_test_items(
+        "image-preparation-thread",
+        /*ephemeral*/ false,
         &mut items,
         ImagePreparationMode::default(),
         ImageResizeNoticeMode::Disabled,
@@ -394,7 +425,7 @@ async fn resize_notices_count_file_backed_images_and_skip_failed_images() {
         },
     ];
 
-    prepare_response_items(
+    prepare_test_items(
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,
@@ -591,7 +622,7 @@ async fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
         internal_chat_message_metadata_passthrough: None,
     }];
 
-    prepare_response_items(
+    prepare_test_items(
         "image-preparation-thread",
         /*ephemeral*/ false,
         &mut items,

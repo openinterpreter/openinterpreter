@@ -1,6 +1,48 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use rmcp::model::BooleanSchema;
+use rmcp::model::ElicitationSchema;
+use rmcp::model::PrimitiveSchemaDefinition;
+use rmcp::model::RequestMetaObject;
+use serde_json::Value;
 use serde_json::json;
+
+fn meta(value: Value) -> Option<RequestMetaObject> {
+    let Value::Object(map) = value else {
+        panic!("metadata must be an object");
+    };
+    Some(RequestMetaObject::from(map))
+}
+
+fn guardian_meta(tool_params: Option<Value>) -> Option<RequestMetaObject> {
+    let mut value = json!({
+        "codex_approval_kind": "mcp_tool_call",
+        "codex_request_type": "approval_request",
+        "connector_id": "browser-use",
+        "connector_name": "Browser Use",
+        "tool_name": "access_browser_origin",
+        "tool_title": "Access browser origin",
+    });
+    if let Some(tool_params) = tool_params {
+        value["tool_params"] = tool_params;
+    }
+    meta(value)
+}
+
+fn form_request(meta: Option<RequestMetaObject>) -> ElicitationReviewRequest {
+    ElicitationReviewRequest {
+        server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
+        request_id: rmcp::model::NumberOrString::Number(7),
+        elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
+            meta,
+            message: "Allow origin?".to_string(),
+            requested_schema: ElicitationSchema::builder()
+                .build()
+                .expect("schema should build"),
+        }),
+    }
+}
 
 #[test]
 fn plugin_install_elicitation_telemetry_metadata_requires_install_tool_suggestion() {
@@ -78,6 +120,7 @@ fn guardian_elicitation_review_request_requires_opt_in() {
 fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
     let url_request = ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
         request_id: rmcp::model::NumberOrString::Number(8),
         elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::UrlElicitationParams {
             meta: guardian_meta(Some(json!({}))),
@@ -93,6 +136,7 @@ fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
 
     let non_empty_schema_request = ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
         request_id: rmcp::model::NumberOrString::Number(9),
         elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
             meta: guardian_meta(Some(json!({}))),

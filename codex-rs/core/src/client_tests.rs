@@ -69,6 +69,7 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
@@ -216,9 +217,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
         }
         // Exercise the resolved route's redirect policy against loopback HTTP servers.
         setup.api_provider.base_url = origin.uri();
-        let transport = client
-            .build_api_transport(&setup.api_provider, "/responses", setup.redirect_policy)
-            .unwrap();
+        let transport = setup.http_transport("/responses").unwrap();
         let request = setup
             .api_provider
             .build_request(http::Method::POST, "/responses")
@@ -368,7 +367,12 @@ async fn client_setup_accepts_command_credential_refresh() {
                 refreshed_revision
             ),
         );
-        assert_ne!(setup.auth_owner_generation, client.auth_owner_generation());
+        assert!(
+            setup
+                .auth_owner
+                .as_ref()
+                .is_some_and(|owner| owner.is_current())
+        );
     }
 }
 
@@ -422,8 +426,14 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
             );
             assert_eq!(setup.auth.unwrap().get_token().unwrap(), refreshed_token);
             assert_eq!(
-                (setup.auth_revision, setup.auth_owner_generation),
-                (Some(*manager.auth_change_receiver().borrow()), Some(0))
+                setup.auth_revision,
+                Some(*manager.auth_change_receiver().borrow())
+            );
+            assert!(
+                setup
+                    .auth_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.is_current())
             );
         } else {
             assert_eq!(
@@ -545,8 +555,11 @@ fn responses_request_limits_raw_tool_metadata_to_resolved_first_party_https_endp
                 codex_protocol::config_types::ReasoningSummary::None,
                 /*service_tier*/ None,
                 &responses_metadata,
+                client
+                    .state
+                    .provider
+                    .include_internal_metadata(&api_provider),
             )?;
-            ModelClient::filter_tool_result_metadata(&mut request.input, &api_provider);
             assert_eq!(
                 request.input.last(),
                 Some(if allowed {
@@ -615,6 +628,7 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
             true,
         ),
     ] {
+        api_provider.base_url = base_url.to_string();
         let [mut previous_output, mut current_output] =
             [previous_metadata, current_metadata].map(|metadata| {
                 let mut call =
@@ -635,7 +649,7 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
             });
         previous_output.set_turn_id_if_missing("previous-turn");
         current_output.set_turn_id_if_missing("current-turn");
-        let mut previous = client.build_responses_request(
+        let previous = client.build_responses_request(
             &Prompt {
                 input: vec![previous_output],
                 ..Default::default()
@@ -645,6 +659,10 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
             codex_protocol::config_types::ReasoningSummary::None,
             /*service_tier*/ None,
             &responses_metadata,
+            client
+                .state
+                .provider
+                .include_internal_metadata(&api_provider),
         )?;
         let follow_up = ResponseItem::from(ResponseInputItem::FunctionCallOutput {
             call_id: "wait-call".to_string(),
@@ -652,12 +670,19 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
         });
         let mut current = previous.clone();
         current.input = vec![current_output, follow_up.clone()];
-        api_provider.base_url = base_url.to_string();
-        ModelClient::filter_tool_result_metadata(&mut previous.input, &api_provider);
-        ModelClient::filter_tool_result_metadata(&mut current.input, &api_provider);
+        if !client
+            .state
+            .provider
+            .include_internal_metadata(&api_provider)
+        {
+            current
+                .input
+                .iter_mut()
+                .for_each(ResponseItem::clear_tool_result_metadata);
+        }
 
         let mut session = client.new_session();
-        session.websocket_session.last_request = Some(previous);
+        session.websocket_session.last_request = Some(Arc::new(previous));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         sender
             .send(super::LastResponse {
@@ -668,7 +693,7 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
         session.websocket_session.last_response_rx = Some(receiver);
         let continuation = session.prepare_websocket_request(&current);
         assert_eq!(
-            continuation.map(|continuation| (
+            continuation.ok().map(|continuation| (
                 continuation.response_id,
                 continuation.items,
                 continuation.from_untraced_warmup,
@@ -1232,6 +1257,7 @@ fn websocket_continuation_reset_reason_survives_failed_reconnect_and_turn_bounda
                     /*parent_thread_id*/ None,
                     TestCodexResponsesRequestKind::Turn,
                 ),
+                /*include_internal*/ false,
             )
             .expect("build continuation request");
         let mut session = client.new_session();
@@ -2527,7 +2553,7 @@ async fn realtime_custom_call_keeps_selected_key_for_openai_sideband(mode: Runti
                 event_parser: codex_api::RealtimeEventParser::V1,
                 session_mode: codex_api::RealtimeSessionMode::Conversational,
                 output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
-                voice: codex_protocol::protocol::RealtimeVoice::Cove,
+                voice: Some(codex_protocol::protocol::RealtimeVoice::Cove),
             },
             http::HeaderMap::new(),
             Some(call_provider),
@@ -2671,6 +2697,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         trace: attempt,
         client: Arc::clone(&test_model_client(SessionSource::Cli).state),
         interceptors: vec![Box::new(ReplaceOutput)],
+        postprocess: None,
         continuation: Some(last_response_tx),
     }
     .into_raw_stream()?;

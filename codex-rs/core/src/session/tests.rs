@@ -403,26 +403,26 @@ async fn default_turn_context_assigns_missing_agent_and_additional_tools_ids() {
         },
     ];
     let (items, _) = session
-        .prepare_conversation_items_for_history(&turn_context, turn_context.model_info(), &items)
+        .prepare_conversation_items_for_history(
+            &turn_context,
+            turn_context.model_info(),
+            items.into_iter().map(Into::into).collect(),
+        )
         .await;
-
-    let items = Session::assign_missing_response_item_ids(items);
-
-    assert!(items[0].id().is_some_and(|id| id.starts_with("amsg_")));
-    assert!(items[1].id().is_some_and(|id| id.starts_with("msg_")));
+    assert!(items[0].item.id().is_some_and(|id| id.starts_with("amsg_")));
+    assert!(items[1].item.id().is_some_and(|id| id.starts_with("msg_")));
 }
 
 #[test]
 fn assign_missing_response_item_ids_assigns_additional_tools_ids() {
-    let items = Cow::Owned(vec![ResponseItem::AdditionalTools {
+    let mut item = ResponseItem::AdditionalTools {
         id: None,
         role: "developer".to_string(),
-        tools: Vec::new(),
-    }]);
-
-    let items = Session::assign_missing_response_item_ids(items);
-
-    assert!(items[0].id().is_some_and(|id| id.starts_with("at_")));
+        tools: Arc::from([]),
+    };
+    let generator = codex_protocol_test_support::uuid_v7_item_id_generator_for_test();
+    super::assign_missing_item_id(&mut item, &generator);
+    assert!(item.id().is_some_and(|id| id.starts_with("at_")));
 }
 
 #[tokio::test]
@@ -434,12 +434,13 @@ async fn default_turn_context_assigns_missing_response_item_ids() {
         .prepare_conversation_items_for_history(
             &turn_context,
             turn_context.model_info(),
-            std::slice::from_ref(&response_item),
+            vec![response_item.into()],
         )
         .await;
 
     assert!(
         items[0]
+            .item
             .id()
             .is_some_and(|item_id| item_id.starts_with("msg_"))
     );
@@ -840,8 +841,7 @@ async fn request_mcp_server_elicitation_waits_for_user_response(source: SessionS
         .await
         .expect("elicitation should finish")
         .expect("elicitation task should succeed");
-    assert_eq!(outcome.response, Some(response));
-    assert!(outcome.sent);
+    assert_eq!(outcome, Some(response));
     assert!(!*paused.borrow());
     assert!(rx.try_recv().is_err());
 }
@@ -7277,6 +7277,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
         local_agent_runtime: agent_control.runtime.clone(),
+        granted_permissions_by_environment_id: Arc::default(),
         agent_control: Arc::new(agent_control),
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -7341,7 +7342,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
-        guardian_context_mode: GuardianContextMode::from_features(&config.features),
         isolation: codex_extension_api::SessionIsolation::Inherit,
         tool_policy: Arc::default(),
         windows_sandbox_proxy_settings_mode:
@@ -7369,10 +7369,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     };
     let per_turn_config = session.build_per_turn_config(
         &session_configuration,
-        session_configuration.cwd().clone(),
-        crate::environment_selection::ThreadEnvironments::primary_workspace_roots_for(
-            &session_configuration.environments,
-        ),
+        session_configuration.environments.first(),
     );
     let plugins_input = per_turn_config.plugins_config_input();
     let plugin_outcome = session
@@ -8157,7 +8154,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
         )
     };
     turn_context_mut.initial_environments.environments[0] =
-        TurnEnvironmentState::Ready(environment);
+        TurnEnvironmentState::Ready(environment.clone());
 
     let call_id = "call-1".to_string();
     let arguments = json!({
@@ -9351,7 +9348,7 @@ async fn submission_loop_channel_close_aborts_active_turn_before_thread_stop_lif
 #[tokio::test]
 async fn shutdown_and_wait_allows_multiple_waiters() {
     let (_session, _turn_context) = make_session_and_context().await;
-    let (tx_sub, rx_sub) = async_channel::bounded::<Submission>(4);
+    let (tx_sub, rx_sub) = async_channel::bounded::<Box<Submission>>(4);
     let (_tx_event, rx_event) = async_channel::unbounded();
     let session_loop_handle = tokio::spawn(async move {
         let shutdown = rx_sub.recv().await.expect("shutdown submission");
@@ -9642,6 +9639,7 @@ where
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
         local_agent_runtime: agent_control.runtime.clone(),
+        granted_permissions_by_environment_id: Arc::default(),
         agent_control: Arc::new(agent_control),
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -9706,7 +9704,6 @@ where
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
-        guardian_context_mode: GuardianContextMode::from_features(&config.features),
         isolation: codex_extension_api::SessionIsolation::Inherit,
         tool_policy: Arc::default(),
         windows_sandbox_proxy_settings_mode:
@@ -9734,10 +9731,7 @@ where
     });
     let per_turn_config = session.build_per_turn_config(
         &session_configuration,
-        session_configuration.cwd().clone(),
-        crate::environment_selection::ThreadEnvironments::primary_workspace_roots_for(
-            &session_configuration.environments,
-        ),
+        session_configuration.environments.first(),
     );
     let plugins_input = per_turn_config.plugins_config_input();
     let plugin_outcome = session
@@ -10592,6 +10586,7 @@ async fn capability_discovery_uses_environment_permission_profile() {
     environment_config.use_legacy_landlock = true;
     let expected_sandbox = FileSystemSandboxContext {
         permissions: environment.permission_profile().clone(),
+        sandbox_override: SandboxOverride::NoOverride,
         cwd: environment.cwd().clone(),
         workspace_roots: environment.workspace_roots().to_vec(),
         user_home_dir: environment.user_home_dir.clone(),
@@ -10612,6 +10607,8 @@ async fn capability_discovery_uses_environment_permission_profile() {
             &turn_context.config,
             /*ready_selected_capability_roots*/ &[],
             &turn_context.initial_environments,
+            /*v2_snapshots*/ None,
+            /*skill_turn*/ None,
         )
         .await;
     let discovery = discovery.expect("restricted environment should trigger capability discovery");
@@ -12367,6 +12364,7 @@ impl SessionTask for ExtensionInterruptedTask {
                 EventMsg::Warning(codex_protocol::protocol::WarningEvent {
                     message: "extension interrupted this turn".into(),
                 }),
+                /*error*/ None,
             )
             .await;
 
@@ -12754,6 +12752,7 @@ async fn extension_interrupt_survives_the_calling_runtime() {
                     EventMsg::Warning(codex_protocol::protocol::WarningEvent {
                         message: "extension interrupted this turn".into(),
                     }),
+                    /*error*/ None,
                 )
                 .await;
         });
