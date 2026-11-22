@@ -138,7 +138,6 @@ async fn stdio_callbacks_preserve_context_across_overlapping_yielded_cells() {
                         max_output_tokens: None,
                     },
                     delegate.clone(),
-                    /*preempt*/ None,
                 )
                 .await
                 .unwrap()
