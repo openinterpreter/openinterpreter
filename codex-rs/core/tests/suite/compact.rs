@@ -5436,7 +5436,11 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
 #[test_case::test_case("response.incomplete", false, false; "non_lite_incomplete_without_usage")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // TODO(ccunningham): Update once pre-turn compaction includes incoming user input.
-async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_message() {
+async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_message(
+    terminal_type: &'static str,
+    includes_usage: bool,
+    responses_lite: bool,
+) {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
@@ -5445,9 +5449,21 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
         ev_assistant_message("m1", FIRST_REPLY),
         ev_completed_with_tokens("r1", /*total_tokens*/ 60),
     ]);
+    let mut second_terminal = ev_completed_with_tokens("r2", /*total_tokens*/ 500);
+    second_terminal["type"] = json!(terminal_type);
+    if terminal_type == "response.incomplete" {
+        second_terminal["response"]["status"] = json!("incomplete");
+        second_terminal["response"]["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    }
+    if !includes_usage {
+        second_terminal["response"]
+            .as_object_mut()
+            .expect("response object")
+            .remove("usage");
+    }
     let sse2 = sse(vec![
         ev_assistant_message("m2", "SECOND_REPLY"),
-        ev_completed_with_tokens("r2", /*total_tokens*/ 500),
+        second_terminal,
     ]);
     let sse3 = sse(vec![
         ev_assistant_message("m3", "PRE_TURN_SUMMARY"),
@@ -5461,6 +5477,9 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
 
     let model_provider = non_openai_model_provider(&server);
     let codex = test_codex()
+        .with_model_info_override("gpt-5.5", move |model| {
+            model.use_responses_lite = responses_lite;
+        })
         .with_config(move |config| {
             config.update_plan_enabled = true;
             config.model_provider = model_provider;

@@ -664,8 +664,8 @@ async fn responses_websocket_resume_prewarm_reuses_and_repairs_connection() -> a
 
     // A healthy warm resume skips preparation; only the user turn reloads instructions.
     let instruction_loads = instructions.load_count();
-    test.codex.prewarm_with_history().await;
-    test.codex.prewarm_with_history().await;
+    test.codex.prewarm().await;
+    test.codex.prewarm().await;
     test.submit_text_turn("continue").await?;
 
     assert_eq!(instructions.load_count(), instruction_loads + 1);
@@ -684,23 +684,14 @@ async fn responses_websocket_resume_prewarm_reuses_and_repairs_connection() -> a
     assert_eq!(prewarm["input"].as_array().unwrap().len(), 1);
     assert_eq!(prewarm["input"][0]["role"], "developer");
     assert_eq!(connection[2].body_json()["previous_response_id"], "resp-1");
-    let mut expected_history = connection
-        .iter()
-        .flat_map(|request| request.body_json()["input"].as_array().unwrap().clone())
-        .collect::<Vec<_>>();
-    expected_history.push(serde_json::to_value(assistant_message_item(
-        "2",
-        "ready to continue",
-    ))?);
-
     // Turn idle does not synchronize with the reader observing the server's close.
     // Retry resume until it sees the close; pending attempts must still share one socket.
     ThreadIdle::wait(&test.codex).await;
     let instruction_loads = instructions.load_count();
     let warmup = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            test.codex.prewarm_with_history().await;
-            test.codex.prewarm_with_history().await;
+            test.codex.prewarm().await;
+            test.codex.prewarm().await;
             tokio::select! {
                 request = server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 0) => break request,
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
@@ -711,19 +702,29 @@ async fn responses_websocket_resume_prewarm_reuses_and_repairs_connection() -> a
     assert!(instructions.load_count() > instruction_loads);
     assert_eq!(warmup.body_json()["generate"], false);
     assert!(warmup.body_json().get("previous_response_id").is_none());
-    let mut actual_history: Vec<ResponseItem> =
-        serde_json::from_value(warmup.body_json()["input"].clone())?;
-    let mut expected_history: Vec<ResponseItem> = serde_json::from_value(json!(expected_history))?;
-    for item in actual_history.iter_mut().chain(&mut expected_history) {
-        item.clear_internal_chat_message_metadata_passthrough();
-    }
-    assert_eq!(actual_history, expected_history);
+    // The public prewarm API starts with base instructions. The resumed turn,
+    // not its non-generating warmup, must replay the full prior conversation.
+    assert_eq!(warmup.body_json()["input"][0]["role"], "developer");
+    assert_eq!(warmup.body_json()["input"].as_array().unwrap().len(), 1);
     assert!(warmup.body_json().get("prompt_cache_options").is_none());
 
     test.submit_text_turn("continue after reconnect").await?;
     assert_eq!(server.handshakes().len(), 2);
     let connections = server.connections();
     assert_eq!(connections[1].len(), 2);
+    let resumed_input = connections[1][1].body_json()["input"]
+        .as_array()
+        .expect("resumed turn input")
+        .iter()
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in ["hello", "ready to continue", "continue after reconnect"] {
+        assert!(
+            resumed_input.contains(expected),
+            "resumed turn lost {expected:?}: {resumed_input}"
+        );
+    }
     assert_eq!(
         connections[1][1].body_json()["previous_response_id"],
         "warm-2"

@@ -1,8 +1,11 @@
+use anyhow::Context;
 use anyhow::Result;
 use codex_config::types::Personality;
+use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
+use codex_history::RolloutItem;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -28,6 +31,25 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+
+// SessionConfigured no longer carries a synthesized replay list. Inspect the
+// persisted rollout events instead, which are the source for resumed history.
+async fn persisted_turn_events(thread: &CodexThread) -> Result<Vec<EventMsg>> {
+    thread.flush_rollout().await?;
+    let path = thread.rollout_path().context("persisted rollout path")?;
+    let history = codex_rollout::RolloutRecorder::get_rollout_history(&path).await?;
+    let InitialHistory::Resumed(history) = history else {
+        anyhow::bail!("expected persisted resume history");
+    };
+    Ok(history
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect())
+}
 
 /// A supplied preparation must select the prepared store path instead of silently falling back to
 /// an ordinary resume.
@@ -204,18 +226,31 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         .await?;
 
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-    let mut resumed = builder.restart(&server, &initial).await?;
-    let initial_messages = resumed
-        .session_configured
-        .initial_messages
-        .take()
-        .expect("expected initial messages to be present for resumed session");
-    match initial_messages.as_slice() {
+    let initial_messages = persisted_turn_events(&codex).await?;
+    let resumed = builder.restart(&server, &initial).await?;
+    let resumed_messages = persisted_turn_events(&resumed.codex).await?;
+    assert_eq!(
+        serde_json::to_value(&resumed_messages)?,
+        serde_json::to_value(&initial_messages)?,
+        "resume must preserve persisted turn events"
+    );
+    let turn_events = resumed_messages
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EventMsg::TurnStarted(_)
+                    | EventMsg::UserMessage(_)
+                    | EventMsg::AgentMessage(_)
+                    | EventMsg::TurnComplete(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    match turn_events.as_slice() {
         [
             EventMsg::TurnStarted(started),
             EventMsg::UserMessage(first_user),
             EventMsg::AgentMessage(assistant_message),
-            EventMsg::TokenCount(_),
             EventMsg::TurnComplete(completed),
         ] => {
             assert_eq!(first_user.message, "Record some messages");
@@ -230,8 +265,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         other => panic!("unexpected initial messages after resume: {other:#?}"),
     }
 
-    resumed.codex.flush_rollout().await?;
-    let mut rejoined = resumed
+    let rejoined = resumed
         .thread_manager
         .resume_legacy_thread_from_rollout(
             resumed.config.clone(),
@@ -242,18 +276,14 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         )
         .await?;
     assert!(Arc::ptr_eq(&rejoined.thread, &resumed.codex));
-    let rejoined_messages = rejoined
-        .session_configured
-        .initial_messages
-        .take()
-        .expect("rejoining a loaded thread must still provide replay messages");
     assert_eq!(
         serde_json::to_value(&rejoined.session_configured)?,
         serde_json::to_value(&resumed.session_configured)?,
     );
     assert_eq!(
-        serde_json::to_value(&rejoined_messages[..initial_messages.len()])?,
-        serde_json::to_value(&initial_messages)?,
+        serde_json::to_value(&persisted_turn_events(&rejoined.thread).await?)?,
+        serde_json::to_value(&resumed_messages)?,
+        "rejoining a loaded thread must retain the same recorded events",
     );
 
     Ok(())
@@ -286,19 +316,35 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
         .await?;
 
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let initial_messages = persisted_turn_events(&codex).await?;
     let resumed = builder.restart(&server, &initial).await?;
-    let initial_messages = resumed
-        .session_configured
-        .initial_messages
-        .expect("expected initial messages to be present for resumed session");
-    match initial_messages.as_slice() {
+    let resumed_messages = persisted_turn_events(&resumed.codex).await?;
+    assert_eq!(
+        serde_json::to_value(&resumed_messages)?,
+        serde_json::to_value(&initial_messages)?,
+        "resume must preserve reasoning events"
+    );
+    let turn_events = resumed_messages
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EventMsg::TurnStarted(_)
+                    | EventMsg::UserMessage(_)
+                    | EventMsg::AgentReasoning(_)
+                    | EventMsg::AgentReasoningRawContent(_)
+                    | EventMsg::AgentMessage(_)
+                    | EventMsg::TurnComplete(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    match turn_events.as_slice() {
         [
             EventMsg::TurnStarted(started),
             EventMsg::UserMessage(first_user),
             EventMsg::AgentReasoning(reasoning),
             EventMsg::AgentReasoningRawContent(raw),
             EventMsg::AgentMessage(assistant_message),
-            EventMsg::TokenCount(_),
             EventMsg::TurnComplete(completed),
         ] => {
             assert_eq!(first_user.message, "Record reasoning messages");
