@@ -570,7 +570,7 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(next_cwd)),
+                environments: Some(local_selections(next_cwd).into_requests()),
                 approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
@@ -826,7 +826,7 @@ async fn submit_turn_with_session_permissions(
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_selections(test.config.cwd.clone()).into_requests()),
                 approval_policy: Some(approval_policy),
                 approvals_reviewer: Some(approvals_reviewer),
                 sandbox_policy: Some(sandbox_policy),

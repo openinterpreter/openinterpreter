@@ -732,8 +732,7 @@ async fn saved_daybreak_rejection_records_child_input(
         }
     };
     assert_history(&child).await;
-    let (child_id, history) =
-        super::agents_md::persisted_resume_history(&child, test.thread_store.as_ref()).await?;
+    let (child_id, history) = super::agents_md::persisted_resume_history(&child).await?;
     child.shutdown_and_wait().await?;
     test.thread_manager.remove_thread(&child_id).await;
     assert_eq!(requests.requests().len(), requests_before_rejection);
