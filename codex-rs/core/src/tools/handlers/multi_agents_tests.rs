@@ -920,6 +920,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
     let child_thread_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(
             session.thread_id,
             &turn.session_source,
@@ -1505,6 +1506,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
@@ -1677,6 +1679,7 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
@@ -1738,6 +1741,7 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
@@ -1808,6 +1812,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -1864,6 +1869,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -1941,6 +1947,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -2096,6 +2103,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -2149,6 +2157,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -3017,6 +3026,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -3519,6 +3529,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "test_process")
         .await
         .expect("relative path should resolve");
@@ -3611,6 +3622,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -3698,6 +3710,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
     let worker_b_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker_b")
         .await
         .expect("worker_b should resolve");
@@ -3791,6 +3804,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker should resolve");
@@ -3885,6 +3899,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
@@ -3908,6 +3923,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
     let child_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker/child")
         .await
         .expect("child path should resolve");
@@ -3930,6 +3946,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
         session
             .services
             .local_agent_runtime
+            .control(session.session_id())
             .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
             .await
             .expect("worker path should remain resolvable"),
@@ -4015,6 +4032,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
     let agent_id = session
         .services
         .local_agent_runtime
+        .control(session.session_id())
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
