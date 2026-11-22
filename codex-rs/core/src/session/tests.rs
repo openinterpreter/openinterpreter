@@ -742,25 +742,29 @@ async fn request_mcp_server_elicitation_auto_accepts_when_auto_deny_is_enabled(
         .mcp_runtime
         .set_elicitations_auto_deny(/*auto_deny*/ true);
 
-    let response = ElicitationResponse {
-        action: ElicitationAction::Accept,
-        content: None,
-        meta: None,
-    };
-    session
-        .resolve_elicitation(
-            "codex_apps".to_string(),
+    let response = session
+        .request_mcp_server_elicitation(
+            turn_context.as_ref(),
+            codex_mcp::McpServerKey::unscoped("codex_apps"),
             RequestId::String("request-1".into()),
-            response.clone(),
+            ElicitationRequest::Form {
+                meta: None,
+                message: "Allow this request?".to_string(),
+                requested_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
         )
-        .await
-        .expect("user response should resolve the elicitation");
-    let received = tokio::time::timeout(Duration::from_secs(1), pending)
-        .await
-        .expect("elicitation should finish")
-        .expect("elicitation task should succeed");
-    assert_eq!(received, Some(response));
-    assert!(!*paused.borrow());
+        .await;
+    assert_eq!(
+        response,
+        Some(ElicitationResponse {
+            action: ElicitationAction::Accept,
+            content: Some(json!({})),
+            meta: None,
+        })
+    );
     assert!(rx.try_recv().is_err());
 }
 

@@ -465,6 +465,27 @@ fn form_elicitations(meta: Option<Value>, properties: Value) -> [Elicitation; 3]
 }
 
 #[tokio::test]
+async fn auto_deny_declines_mcp_forms_without_publishing_a_request() {
+    let (manager, events, sender) = elicitation_fixture(
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+        None,
+    );
+    manager.router.set_auto_deny(true);
+    assert!(manager.router.auto_deny());
+    assert_eq!(
+        send_elicitation(&sender, /*marker*/ None).await,
+        ElicitationResponse {
+            action: ElicitationAction::Decline,
+            content: None,
+            meta: None,
+        }
+    );
+    assert!(events.is_empty());
+    assert!(manager.router.requests.lock().unwrap().pending.is_empty());
+}
+
+#[tokio::test]
 async fn permission_elicitation_preserves_automatic_review_decisions() {
     for (strict_auto_review, approval_policy, expected_reviews) in [
         (false, AskForApproval::OnRequest, 1),

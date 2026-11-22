@@ -794,6 +794,13 @@ impl Session {
         request_id: RequestId,
         request: ElicitationRequest,
     ) -> Option<ElicitationResponse> {
+        if self.services.mcp_runtime.elicitations_auto_deny() {
+            return Some(ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(serde_json::json!({})),
+                meta: None,
+            });
+        }
         let server_name = server_key.name().to_owned();
         // This callback carries a request ID, not a reliable tool invocation owner.
         // Do not report its human wait as ordinary tool execution.
