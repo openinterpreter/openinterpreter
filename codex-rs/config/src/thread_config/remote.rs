@@ -551,7 +551,6 @@ mod tests {
                             credential_file: None,
                             capabilities: Some(proto::ModelProviderCapabilities {
                                 cyber_access_programs: Some(true),
-                                ..Default::default()
                             }),
                         }],
                         features: HashMap::from([

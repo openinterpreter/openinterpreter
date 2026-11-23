@@ -88,11 +88,8 @@ impl CloudRequirementsTomlBundle {
                     }
                     higher_priority_ultrafast |= explicit_ultrafast || normalized;
                 }
-                let layer = if normalized {
-                    RequirementsLayerEntry::from_toml_value(
-                        source,
-                        parsed.expect("normalized requirements were parsed"),
-                    )
+                let layer = if let (true, Some(parsed)) = (normalized, parsed) {
+                    RequirementsLayerEntry::from_toml_value(source, parsed)
                 } else {
                     RequirementsLayerEntry::from_toml(source, fragment.contents)
                 };

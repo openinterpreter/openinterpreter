@@ -795,11 +795,11 @@ async fn runtime_transports_authenticate_each_classification() -> Result<()> {
             ));
             let mut info = config.provider.info().clone();
             info.supports_websockets = transport != "http";
-            config.provider = codex_model_provider::test_support::runtime_model_provider(
-                info,
-                Arc::clone(&credentials),
-                (runtime, mode),
-            );
+            config.provider = codex_model_provider::ProviderAuthContext {
+                credentials: Arc::clone(&credentials),
+                runtime_auth: Some((runtime, mode)),
+            }
+            .model_provider(info);
             let sampler = LunaSampler::new(config);
             sampler.prewarm().await;
             if let Some(ws) = &ws {
