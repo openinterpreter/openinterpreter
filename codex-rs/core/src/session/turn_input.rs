@@ -81,6 +81,15 @@ impl TurnStartKind {
     }
 }
 
+/// How `steer_input` disposed of submitted input.
+enum SteerOutcome {
+    /// The input was queued on the active turn.
+    Accepted { turn_id: String },
+    /// This thread already accepted input with the same client message id;
+    /// nothing was added and `turn_id` holds, or will hold, the original input.
+    Duplicate { turn_id: String },
+}
+
 /// Thread settings and start-only options prepared before Core knows whether
 /// turn input starts or steers.
 ///
@@ -310,10 +319,13 @@ async fn start_or_steer(
         )
         .await
     {
-        Ok(turn_id) => {
+        Ok(SteerOutcome::Accepted { turn_id }) => {
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered { turn_id })
         }
+        // A repeat neither starts a turn nor applies settings. `Steered` tells the
+        // caller the truth: an existing turn holds the input.
+        Ok(SteerOutcome::Duplicate { turn_id }) => Ok(TurnInputSubmission::Steered { turn_id }),
         Err(NotSubmittedReason::NoActiveTurn) => {
             // MAv1 sends explicit input to spawned agents as part of an existing
             // parent's work. Client RPCs are gated separately by the host.
@@ -356,6 +368,9 @@ async fn start_or_steer(
             }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
             if has_explicit_input {
+                // `steer_input` checked the id under the active-turn lock, and the
+                // submission loop handles one turn-input op at a time, so no other
+                // start or steer can accept the same id before it is recorded here.
                 task_input.push(pending_turn_input(session, input, &turn_context.sub_id).await);
             }
             session
@@ -542,10 +557,11 @@ async fn steer(
         )
         .await
     {
-        Ok(turn_id) => {
+        Ok(SteerOutcome::Accepted { turn_id }) => {
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered { turn_id })
         }
+        Ok(SteerOutcome::Duplicate { turn_id }) => Ok(TurnInputSubmission::Steered { turn_id }),
         Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
     }
 }
@@ -616,7 +632,8 @@ impl Session {
 
     /// Inject additional user input or a standalone tool output into the active turn.
     ///
-    /// Returns the active turn id when accepted.
+    /// Returns the active turn id when accepted, or the turn holding the
+    /// original input when the client message id was already accepted.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
@@ -628,8 +645,19 @@ impl Session {
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
-    ) -> Result<String, NotSubmittedReason> {
+    ) -> Result<SteerOutcome, NotSubmittedReason> {
         let mut active = self.active_turn.lock().await;
+        // The original request already succeeded, so a repeat is answered with the
+        // turn holding its input even if that turn has finished or the repeat
+        // names a different expected turn.
+        if let SubmittedTurnInput::UserInput {
+            client_id: Some(client_id),
+            ..
+        } = &*input
+            && let Some(turn_id) = self.input_queue.accepted_turn_id(client_id)
+        {
+            return Ok(SteerOutcome::Duplicate { turn_id });
+        }
         let Some(active_turn) = active.as_mut() else {
             return Err(NotSubmittedReason::NoActiveTurn);
         };
@@ -688,6 +716,11 @@ impl Session {
                     .turn_context
                     .session_telemetry
                     .user_prompt(content);
+                // Still under the active-turn lock taken for the duplicate check.
+                if let Some(client_id) = client_id {
+                    self.input_queue
+                        .record_accepted_client_id(client_id.clone(), active_turn_id.clone());
+                }
                 TurnInput::UserInput {
                     content: std::mem::take(content),
                     client_id: client_id.clone(),
@@ -703,7 +736,9 @@ impl Session {
                 pending_input,
             )
             .await;
-        Ok(active_turn_id.clone())
+        Ok(SteerOutcome::Accepted {
+            turn_id: active_turn_id.clone(),
+        })
     }
 }
 
@@ -722,17 +757,26 @@ async fn merge_additional_context_input(
         .collect()
 }
 
+/// Converts accepted input for turn `turn_id`. A client message id on user
+/// input is recorded as accepted by that turn.
 async fn pending_turn_input(
     session: &Session,
     input: SubmittedTurnInput,
     turn_id: &str,
 ) -> TurnInput {
     match input {
-        SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
-            content,
-            client_id,
-            acceptance_order: session.reserve_user_input_order().await,
-        },
+        SubmittedTurnInput::UserInput { content, client_id } => {
+            if let Some(client_id) = &client_id {
+                session
+                    .input_queue
+                    .record_accepted_client_id(client_id.clone(), turn_id.to_string());
+            }
+            TurnInput::UserInput {
+                content,
+                client_id,
+                acceptance_order: session.reserve_user_input_order().await,
+            }
+        }
         SubmittedTurnInput::ResponseItem(mut item)
             if matches!(
                 &item,
