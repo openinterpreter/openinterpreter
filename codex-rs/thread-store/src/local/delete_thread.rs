@@ -157,6 +157,8 @@ pub(super) async fn delete_threads(
         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
     }
 
+    // Hold these guards through reference validation and deletion; acquiring them
+    // again below would conflict with our own first acquisition.
     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
     let reference_index = scan_reference_index(store).await?;
     let thread_rollouts = thread_ids
@@ -166,7 +168,6 @@ pub(super) async fn delete_threads(
     check_attached_children(&reference_index, &lock_thread_ids)?;
     ensure_no_external_references(&reference_index, thread_rollouts.as_slice())?;
 
-    let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
     if let Some(cleanup) = &store.thread_data_cleanup {
         cleanup(thread_ids.clone()).await?;
     }

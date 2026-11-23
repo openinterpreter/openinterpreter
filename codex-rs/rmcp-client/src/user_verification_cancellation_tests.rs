@@ -14,12 +14,8 @@ use rmcp::ServiceExt;
 use rmcp::model::CancelledNotification;
 use rmcp::model::CancelledNotificationParam;
 use rmcp::model::ClientConfig;
-use rmcp::model::ClientInfo;
 use rmcp::model::ClientJsonRpcMessage;
-use rmcp::model::ClientNotification;
-use rmcp::model::ClientRequest;
 use rmcp::model::CustomRequest;
-use rmcp::model::DiscoverResult;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::RequestId;
@@ -86,7 +82,7 @@ async fn recovered_connections_accept_elicitations_with_previously_cancelled_ids
                 .await?;
         client
             .initialize(
-                ClientInfo::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
+                ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
                 Some(Duration::from_secs(/*secs*/ 5)),
                 Box::new(|_, _| {
                     Box::pin(async {
@@ -175,7 +171,7 @@ async fn ordinary_elicitations_release_pending_responses_on_cancellation() -> an
         let mut paused = pause_state.subscribe();
         let (route_tx, mut route_rx) = mpsc::unbounded_channel();
         let service = ElicitationClientService::new(
-            ClientInfo::default(),
+            ClientConfig::default(),
             Box::new(move |_, _| {
                 let (response_tx, response_rx) = oneshot::channel();
                 route_tx.send(response_tx).expect("observe elicitation");

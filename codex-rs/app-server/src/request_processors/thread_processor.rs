@@ -5858,6 +5858,7 @@ impl ThreadRequestProcessor {
 
         let fork_options = StartThreadOptions {
             thread_source,
+            attached_thread: attach_to_source,
             parent_trace,
             client_mcp_extensions,
             reserved_thread_id,

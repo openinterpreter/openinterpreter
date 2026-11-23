@@ -678,7 +678,7 @@ fn process_private_desktops() -> Result<BTreeSet<String>> {
     #[link(name = "ntdll")]
     unsafe extern "system" {
         fn NtQueryInformationProcess(
-            process: isize,
+            process: *mut c_void,
             class: u32,
             information: *mut c_void,
             length: u32,

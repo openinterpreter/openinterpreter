@@ -20,7 +20,6 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::into_persisted_rollout_items;
-use codex_rollout::persisted_rollout_items;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::AppendThreadItemsParams;
