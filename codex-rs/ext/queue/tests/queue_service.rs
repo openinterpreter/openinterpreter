@@ -35,6 +35,9 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput;
+use codex_queue_extension::QueueAdmissionCompletionProof;
+use codex_queue_extension::QueueAdmissionValidation;
+use codex_queue_extension::QueueAdmissionValidator;
 use codex_queue_extension::QueueServiceError;
 use codex_queue_extension::QueuedItemService;
 use codex_state::SqliteConfig;
@@ -195,6 +198,55 @@ fn loaded_thread_queue(test: &TestCodex) -> anyhow::Result<Arc<dyn QueueStore>> 
     Ok(Arc::new(LocalQueueStore::new(runtime)))
 }
 
+#[derive(Clone, Default)]
+struct CompletionProofValidator {
+    proof: Arc<Mutex<Option<QueueAdmissionCompletionProof>>>,
+}
+
+impl QueueAdmissionValidator for CompletionProofValidator {
+    fn validate<'a>(
+        &'a self,
+        _thread_id: ThreadId,
+        _admission_id: &'a str,
+        _goal_binding_json: &'a str,
+    ) -> ExtensionFuture<'a, QueueAdmissionValidation> {
+        Box::pin(async {
+            QueueAdmissionValidation {
+                accepted: true,
+                blocker: None,
+            }
+        })
+    }
+
+    fn completion_proof<'a>(
+        &'a self,
+        _thread_id: ThreadId,
+        _admission_id: &'a str,
+        goal_binding_json: &'a str,
+        _turn_id: &'a str,
+    ) -> ExtensionFuture<'a, Option<QueueAdmissionCompletionProof>> {
+        let proof = Arc::clone(&self.proof);
+        let goal_binding_json = goal_binding_json.to_string();
+        Box::pin(async move {
+            let current = proof
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let Some(current) = current else {
+                return None;
+            };
+            let binding: serde_json::Value = serde_json::from_str(&goal_binding_json).ok()?;
+            let goal_id = binding.get("goal_id")?.as_str()?;
+            let mission_revision = binding.get("mission_revision")?.as_i64()?;
+            let objective = binding.get("objective")?.as_str()?;
+            (goal_id == current.goal_id
+                && mission_revision == current.mission_revision
+                && objective == current.objective)
+                .then_some(current)
+        })
+    }
+}
+
 fn user_input(text: &str) -> TurnInput {
     TurnInput::UserInput {
         content: vec![UserInput::Text {
@@ -232,17 +284,304 @@ async fn emit_idle_with_cause(
     thread_id: ThreadId,
     cause: ThreadIdleCause,
 ) {
+    emit_idle_with_turn(service, thread_id, cause, None).await;
+}
+
+async fn emit_idle_with_turn(
+    service: &QueuedItemService,
+    thread_id: ThreadId,
+    cause: ThreadIdleCause,
+    turn_id: Option<&str>,
+) {
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new(thread_id.to_string());
     <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
         service,
         ThreadIdleInput {
             cause,
+            turn_id,
             session_store: &session_store,
             thread_store: &thread_store,
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn completed_admission_is_proven_at_native_continuation_idle_before_goal_replacement()
+-> anyhow::Result<()> {
+    let (queue, home) = test_queue().await?;
+    let validator = CompletionProofValidator::default();
+    let service =
+        QueuedItemService::new(queue.clone(), Weak::new(), Arc::new(NoopExtensionEventSink));
+    service.set_admission_validator(Arc::new(validator.clone()));
+    let thread_id = ThreadId::new();
+    let admission = service
+        .enqueue_admission(
+            thread_id,
+            user_input("mission A"),
+            "admission-a".to_string(),
+            r#"{"goal_id":"goal-a","mission_revision":1,"objective":"mission A","status":"active"}"#.to_string(),
+            None,
+        )
+        .await?;
+    queue
+        .mark_admission_starting(thread_id, admission.item.id.clone())
+        .await?;
+    queue
+        .mark_admission_started(thread_id, admission.item.id.clone(), "turn-a".to_string())
+        .await?;
+
+    *validator
+        .proof
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QueueAdmissionCompletionProof {
+        goal_id: "goal-a".to_string(),
+        mission_revision: 1,
+        lifecycle_revision: 2,
+        objective: "mission A".to_string(),
+    });
+    // Goal A remains active after the admission's first turn. Its native
+    // continuation gets a fresh turn outside the admission queue; no receipt
+    // read occurs before the continuation completes Goal A.
+    emit_idle_with_turn(
+        &service,
+        thread_id,
+        ThreadIdleCause::Completed,
+        Some("turn-a-continuation"),
+    )
+    .await;
+    let completed = service
+        .find_admission(thread_id, "admission-a")
+        .await?
+        .context("completed admission disappeared")?;
+    assert_eq!(Some("completed".to_string()), completed.terminal_outcome);
+    assert_eq!(Some("goal-a".to_string()), completed.terminal_goal_id);
+    assert_eq!(Some("turn-a".to_string()), completed.dispatch_turn_id);
+    assert_eq!(
+        Some("turn-a-continuation".to_string()),
+        completed.terminal_turn_id
+    );
+
+    // Goal B can complete after A, but a cold reconnect cannot overwrite the
+    // retained A proof or create a second execution.
+    *validator
+        .proof
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QueueAdmissionCompletionProof {
+        goal_id: "goal-b".to_string(),
+        mission_revision: 1,
+        lifecycle_revision: 3,
+        objective: "mission B".to_string(),
+    });
+    emit_idle_with_turn(
+        &service,
+        thread_id,
+        ThreadIdleCause::Completed,
+        Some("turn-b-continuation"),
+    )
+    .await;
+    let after_reconnect = service
+        .find_admission(thread_id, "admission-a")
+        .await?
+        .context("retained admission disappeared after reconnect")?;
+    assert_eq!(completed.terminal_goal_id, after_reconnect.terminal_goal_id);
+    assert_eq!(completed.terminal_turn_id, after_reconnect.terminal_turn_id);
+
+    drop(service);
+    drop(queue);
+    let sqlite = SqliteConfig::new_for_testing(home.path().abs());
+    let runtime = StateRuntime::init(sqlite, "test-provider".to_string()).await?;
+    let reconnected_queue: Arc<dyn QueueStore> = Arc::new(LocalQueueStore::new(runtime));
+    let reconnected = QueuedItemService::new(
+        reconnected_queue.clone(),
+        Weak::new(),
+        Arc::new(NoopExtensionEventSink),
+    );
+    reconnected.set_admission_validator(Arc::new(validator.clone()));
+    let after_restart = reconnected
+        .find_admission(thread_id, "admission-a")
+        .await?
+        .context("terminal proof disappeared after restart")?;
+    assert_eq!(
+        Some("completed".to_string()),
+        after_restart.terminal_outcome
+    );
+    assert_eq!(Some("goal-a".to_string()), after_restart.terminal_goal_id);
+    assert_eq!(
+        Some("turn-a-continuation".to_string()),
+        after_restart.terminal_turn_id
+    );
+
+    // An unfinished A has no terminal proof even if the coordinator later
+    // observes a different Goal B; it remains eligible only for reconciliation.
+    let unfinished = reconnected
+        .enqueue_admission(
+            thread_id,
+            user_input("mission A unfinished"),
+            "admission-unfinished".to_string(),
+            r#"{"goal_id":"goal-a","mission_revision":1,"objective":"mission A","status":"active"}"#.to_string(),
+            None,
+        )
+        .await?;
+    let goal_b = reconnected
+        .enqueue_admission(
+            thread_id,
+            user_input("mission B"),
+            "admission-b".to_string(),
+            r#"{"goal_id":"goal-b","mission_revision":1,"objective":"mission B","status":"active"}"#.to_string(),
+            None,
+        )
+        .await?;
+    reconnected_queue
+        .mark_admission_starting(thread_id, unfinished.item.id.clone())
+        .await?;
+    reconnected_queue
+        .mark_admission_started(thread_id, unfinished.item.id, "turn-unfinished".to_string())
+        .await?;
+    reconnected_queue
+        .mark_admission_starting(thread_id, goal_b.item.id.clone())
+        .await?;
+    reconnected_queue
+        .mark_admission_started(thread_id, goal_b.item.id, "turn-b".to_string())
+        .await?;
+    emit_idle_with_turn(
+        &reconnected,
+        thread_id,
+        ThreadIdleCause::Completed,
+        Some("turn-b-continuation"),
+    )
+    .await;
+    let unresolved = reconnected
+        .find_admission(thread_id, "admission-unfinished")
+        .await?
+        .context("unfinished admission disappeared")?;
+    assert_eq!(None, unresolved.terminal_outcome);
+    let completed_b = reconnected
+        .find_admission(thread_id, "admission-b")
+        .await?
+        .context("Goal B admission disappeared")?;
+    assert_eq!(Some("completed".to_string()), completed_b.terminal_outcome);
+    assert_eq!(
+        Some("turn-b-continuation".to_string()),
+        completed_b.terminal_turn_id
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_transition_capture_separates_task_and_steer_before_turn_idle_and_restart()
+-> anyhow::Result<()> {
+    let (queue, home) = test_queue().await?;
+    let validator = CompletionProofValidator::default();
+    let service =
+        QueuedItemService::new(queue.clone(), Weak::new(), Arc::new(NoopExtensionEventSink));
+    service.set_admission_validator(Arc::new(validator.clone()));
+    let thread_id = ThreadId::new();
+    let goal_a =
+        r#"{"goal_id":"goal-a","mission_revision":1,"objective":"mission A","status":"active"}"#;
+    let task = service
+        .enqueue_admission(
+            thread_id,
+            user_input("mission A"),
+            "task-a".to_string(),
+            goal_a.to_string(),
+            None,
+        )
+        .await?;
+    // Persist a control steer on the same native turn. It shares the existing
+    // durable ledger but is never eligible for Goal-task completion proof.
+    let steer = queue
+        .enqueue_admission(
+            thread_id,
+            serde_json::to_string(&user_input("useful steer"))?,
+            "control-u".to_string(),
+            goal_a.to_string(),
+            "steer".to_string(),
+            Some("turn-a".to_string()),
+        )
+        .await?;
+    queue
+        .mark_admission_starting(thread_id, task.item.id.clone())
+        .await?;
+    queue
+        .mark_admission_started(thread_id, task.item.id, "turn-a".to_string())
+        .await?;
+    queue
+        .mark_admission_starting(thread_id, steer.id.clone())
+        .await?;
+    queue
+        .mark_admission_started(thread_id, steer.id.clone(), "turn-a".to_string())
+        .await?;
+
+    // Goal A completes inside T1. This is the authoritative transition hook,
+    // before any receipt read and before a replacement Goal B exists.
+    let completed = service
+        .record_completed_admission_for_goal(thread_id, "goal-a", 1, 2, "mission A", Some("turn-a"))
+        .await?
+        .context("Goal transition should retain task A")?;
+    assert_eq!(Some("completed".to_string()), completed.terminal_outcome);
+    assert_eq!(Some("turn-a".to_string()), completed.dispatch_turn_id);
+    assert_eq!(Some("turn-a".to_string()), completed.terminal_turn_id);
+    let control_after_transition = service
+        .find_admission(thread_id, "control-u")
+        .await?
+        .context("control steer receipt disappeared")?;
+    assert_eq!(None, control_after_transition.terminal_outcome);
+    assert_eq!(
+        Some("turn-a".to_string()),
+        control_after_transition.dispatch_turn_id
+    );
+
+    // B becomes current before T1's successful idle boundary. The exact-turn
+    // lookup sees A plus U but must keep A's retained proof and never borrow B.
+    *validator
+        .proof
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QueueAdmissionCompletionProof {
+        goal_id: "goal-b".to_string(),
+        mission_revision: 1,
+        lifecycle_revision: 1,
+        objective: "mission B".to_string(),
+    });
+    emit_idle_with_turn(
+        &service,
+        thread_id,
+        ThreadIdleCause::Completed,
+        Some("turn-a"),
+    )
+    .await;
+
+    drop(service);
+    drop(queue);
+    let runtime = StateRuntime::init(
+        SqliteConfig::new_for_testing(home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    let reconnected: Arc<dyn QueueStore> = Arc::new(LocalQueueStore::new(runtime));
+    let first_task_receipt = reconnected
+        .find_admission(thread_id, "task-a".to_string())
+        .await?
+        .context("task A receipt disappeared after restart")?;
+    assert_eq!(
+        Some("completed".to_string()),
+        first_task_receipt.terminal_outcome
+    );
+    assert_eq!(
+        Some("goal-a".to_string()),
+        first_task_receipt.terminal_goal_id
+    );
+    assert_eq!(
+        Some("turn-a".to_string()),
+        first_task_receipt.terminal_turn_id
+    );
+    let steer_receipt = reconnected
+        .find_admission(thread_id, "control-u".to_string())
+        .await?
+        .context("control steer receipt disappeared after restart")?;
+    assert_eq!(None, steer_receipt.terminal_outcome);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

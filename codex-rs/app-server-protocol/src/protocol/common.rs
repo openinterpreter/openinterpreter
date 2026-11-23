@@ -525,6 +525,37 @@ client_request_definitions! {
         response: v2::UserVerificationStatusResponse,
     },
 
+    #[experimental("agent/inventory/list")]
+    AgentInventoryList => "agent/inventory/list" {
+        params: v2::AgentInventoryListParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentInventoryListResponse,
+    },
+    #[experimental("agent/goal/read")]
+    AgentGoalRead => "agent/goal/read" {
+        params: v2::AgentGoalReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentGoalReadResponse,
+    },
+    #[experimental("agent/task/admit")]
+    AgentTaskAdmit => "agent/task/admit" {
+        params: v2::AgentTaskAdmitParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentTaskAdmitResponse,
+    },
+    #[experimental("agent/task/receipt/read")]
+    AgentTaskReceiptRead => "agent/task/receipt/read" {
+        params: v2::AgentTaskReceiptReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentTaskReceiptReadResponse,
+    },
+    #[experimental("agent/session/status")]
+    AgentSessionStatus => "agent/session/status" {
+        params: v2::AgentSessionStatusParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentSessionStatusResponse,
+    },
+
     #[experimental("userVerification/enroll")]
     UserVerificationEnroll => "userVerification/enroll" {
         params: v2::UserVerificationEnrollParams,
@@ -618,10 +649,28 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalSetResponse,
     },
+    #[experimental("thread/goal/document/set")]
+    ThreadGoalDocumentSet => "thread/goal/document/set" {
+        params: v2::ThreadGoalDocumentSetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentSetResponse,
+    },
+    #[experimental("thread/goal/document/create")]
+    ThreadGoalDocumentCreate => "thread/goal/document/create" {
+        params: v2::ThreadGoalDocumentCreateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentCreateResponse,
+    },
     ThreadGoalGet => "thread/goal/get" {
         params: v2::ThreadGoalGetParams,
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalGetResponse,
+    },
+    #[experimental("thread/goal/document/get")]
+    ThreadGoalDocumentGet => "thread/goal/document/get" {
+        params: v2::ThreadGoalDocumentGetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalDocumentGetResponse,
     },
     ThreadGoalClear => "thread/goal/clear" {
         params: v2::ThreadGoalClearParams,
@@ -2545,6 +2594,10 @@ mod tests {
                 objective: Some("ship it".to_string()),
                 status: None,
                 token_budget: None,
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
         assert_eq!(
@@ -4481,6 +4534,10 @@ mod tests {
                 objective: Some("ship goal mode".to_string()),
                 status: Some(v2::ThreadGoalStatus::Active),
                 token_budget: Some(Some(10_000)),
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
         let get_request = ClientRequest::ThreadGoalGet {
@@ -4493,6 +4550,10 @@ mod tests {
             request_id: RequestId::Integer(3),
             params: v2::ThreadGoalClearParams {
                 thread_id: "thr_123".to_string(),
+                expected_goal_id: None,
+                expected_status: None,
+                expected_mission_revision: None,
+                expected_lifecycle_revision: None,
             },
         };
 

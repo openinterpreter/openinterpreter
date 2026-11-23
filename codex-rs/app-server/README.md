@@ -267,6 +267,21 @@ Read the selection from `threadSettings.disabledPluginIds` in
 across resume. Forks restore the selection from the history retained at the
 requested fork boundary.
 
+# Repeated turn input
+
+`turn/start` and `turn/steer` accept an optional `clientUserMessageId`. Within a
+thread, a repeated request with an id the thread already accepted is a no-op: it
+adds no input, starts no turn, applies no settings, and returns the id of the turn
+that holds the original input. This holds while the input is still pending, after
+it is recorded, after `thread/resume`, and when a repeated `turn/steer` names a
+different `expectedTurnId`. Ids are compared exactly; requests without an id are
+never deduplicated.
+
+An interrupted turn discards its pending input, and a turn that ends before
+recording its starting input (for example when a hook stops it) drops that input;
+in both cases a retry with the same id is accepted as new input. Each thread
+remembers its 4,096 most recent ids.
+
 # Loaded-thread shell environment rebind
 
 When `thread/resume` rejoins a loaded idle thread that cannot be cold-resumed

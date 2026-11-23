@@ -198,6 +198,17 @@ pub trait TurnLifecycleContributor: Send + Sync {
         false
     }
 
+    /// Performs a fail-closed admission check immediately before the host hands
+    /// a turn to model/tool execution.  A failure records the input without
+    /// running the turn, so a recoverable extension invariant cannot silently
+    /// narrow the mission visible to the model.
+    fn turn_start_gate<'a>(
+        &'a self,
+        _input: TurnStartInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     /// Called once in the selected phase, before task-specific work begins.
     /// Regular-task preparation may be cancelled before this callback completes;
     /// stop and abort callbacks must tolerate missing or partial initialization.

@@ -225,6 +225,21 @@ impl<C> TurnLifecycleContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
 {
+    fn turn_start_gate<'a>(
+        &'a self,
+        input: TurnStartInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let Some(runtime) = goal_runtime_handle(input.thread_store) else {
+                return Ok(());
+            };
+            if !runtime.is_enabled() {
+                return Ok(());
+            }
+            runtime.validate_managed_goal_document_for_turn().await
+        })
+    }
+
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
@@ -276,6 +291,22 @@ where
                         | codex_state::ThreadGoalStatus::BudgetLimited
                 )
             {
+                let active = goal.status == codex_state::ThreadGoalStatus::Active;
+                if active {
+                    if let Err(err) = runtime.inject_managed_goal_document_for_active_turn().await {
+                        // Do not attribute work to a Goal whose full mission document could not
+                        // be authenticated.  The persisted Goal/document remain untouched so a
+                        // later resume can retry the recoverable read instead of silently
+                        // running with a narrowed scope.
+                        tracing::warn!(
+                            thread_id = %runtime.thread_id(),
+                            turn_id = input.turn_id,
+                            %err,
+                            "managed Goal document unavailable; turn admission remains unscoped and is rejected before model execution"
+                        );
+                        return;
+                    }
+                }
                 accounting.mark_turn_goal_active(input.turn_id, goal.goal_id);
             }
         })
@@ -551,6 +582,7 @@ where
             GoalToolExecutor::get(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
+                Arc::clone(&self.goal_service),
                 runtime.accounting_state(),
                 self.analytics.clone(),
                 self.event_emitter.clone(),
@@ -559,6 +591,7 @@ where
             GoalToolExecutor::create(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
+                Arc::clone(&self.goal_service),
                 runtime.accounting_state(),
                 self.analytics.clone(),
                 self.event_emitter.clone(),
@@ -568,6 +601,7 @@ where
             GoalToolExecutor::update(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
+                Arc::clone(&self.goal_service),
                 runtime.accounting_state(),
                 self.analytics.clone(),
                 self.event_emitter.clone(),

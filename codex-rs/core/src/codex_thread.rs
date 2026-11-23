@@ -336,6 +336,16 @@ impl CodexThread {
         self.session.emit_thread_idle_lifecycle_if_idle(cause).await;
     }
 
+    pub async fn emit_thread_idle_lifecycle_if_idle_for_turn(
+        &self,
+        cause: ThreadIdleCause,
+        turn_id: Option<&str>,
+    ) {
+        self.session
+            .emit_thread_idle_lifecycle_if_idle_for_turn(cause, turn_id)
+            .await;
+    }
+
     #[doc(hidden)]
     pub async fn ensure_rollout_materialized(&self) {
         self.session
@@ -692,6 +702,11 @@ impl CodexThread {
 
     pub async fn agent_status(&self) -> AgentStatus {
         self.io.agent_status().await
+    }
+
+    /// Content-free active-turn identity for owner-bound receipt correlation.
+    pub async fn active_turn_id(&self) -> Option<String> {
+        self.session.active_turn_id().await
     }
 
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {

@@ -224,6 +224,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod accepted_client_ids;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod daemon_recovery;
@@ -1576,6 +1577,8 @@ impl Session {
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                // Repeats of input recorded before the resume stay no-ops.
+                self.input_queue.restore_accepted_client_ids(&rollout_items);
 
                 // If resuming, warn when the last recorded model differs from the current one.
                 let curr: &str = turn_context.model_info().slug.as_str();
@@ -2705,6 +2708,17 @@ impl Session {
             Arc::clone(&task.turn_context),
             task.cancellation_token.child_token(),
         ))
+    }
+
+    /// Returns the currently active root turn identity without exposing turn
+    /// content or mutation authority. Callers use this to avoid attributing a
+    /// different running turn to an older durable task receipt.
+    pub(crate) async fn active_turn_id(&self) -> Option<String> {
+        let active = self.active_turn.lock().await;
+        active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .map(|task| task.turn_context.sub_id.clone())
     }
 
     pub(crate) async fn persist_network_policy_amendment(

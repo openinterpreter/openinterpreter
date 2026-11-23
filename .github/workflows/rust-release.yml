@@ -136,6 +136,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
     defaults:
       run:
         working-directory: codex-rs
@@ -510,6 +512,14 @@ jobs:
             --entrypoint-dir "target/${TARGET}/release" \
             --archive-dir "dist/${TARGET}" \
             --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Attest Linux Open Interpreter package archives
+        if: ${{ matrix.bundle == 'primary' && contains(matrix.target, 'linux') }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            codex-rs/dist/${{ matrix.target }}/open-interpreter-package-${{ matrix.target }}.tar.gz
+            codex-rs/dist/${{ matrix.target }}/open-interpreter-package-${{ matrix.target }}.tar.zst
 
       - name: Build Python runtime wheel
         if: ${{ matrix.bundle == 'primary' && runner.os != 'macOS' }}
@@ -1829,6 +1839,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     outputs:
       version: ${{ steps.release_name.outputs.name }}
       tag: ${{ github.ref_name }}
@@ -1928,6 +1941,30 @@ jobs:
 
           mv "$tmp_manifest" "$manifest"
           cat "$manifest"
+
+      - name: Verify original Linux package provenance and prepare checksum manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          python3 .github/scripts/oix-release-provenance.py prepare \
+            --dist dist --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+            --commit "$commit" --run-id "$GITHUB_RUN_ID"
+
+      - name: Attest Open Interpreter package checksum manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/open-interpreter-package_SHA256SUMS
+
+      - name: Preserve original attested manifest for publish-existing
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: open-interpreter-release-provenance
+          path: dist/open-interpreter-package_SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Add config schema release asset
         run: |

@@ -48,6 +48,7 @@ use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadGoalClearResponse;
 use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalGetResponse;
+use codex_app_server_protocol::ThreadGoalRevision;
 use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -159,6 +160,15 @@ use super::analytics::wait_for_matching_analytics_event;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn goal_cas_fields(revision: &ThreadGoalRevision) -> serde_json::Value {
+    json!({
+        "expectedGoalId": revision.goal_id,
+        "expectedStatus": revision.status,
+        "expectedMissionRevision": revision.mission_revision,
+        "expectedLifecycleRevision": revision.lifecycle_revision,
+    })
+}
 
 #[tokio::test]
 async fn thread_resume_paginated_model_context_preserves_original_metadata() -> Result<()> {
@@ -2034,6 +2044,7 @@ async fn unloaded_thread_goal_mutations_respect_parent_ownership() -> Result<()>
             .await?;
         let original: ThreadGoalSetResponse =
             timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
+        let original_revision = original.revision.clone();
 
         // The initial header has no version, as in older rollouts. Later metadata
         // must take precedence, just as it does when the thread resumes.
@@ -2041,52 +2052,56 @@ async fn unloaded_thread_goal_mutations_respect_parent_ownership() -> Result<()>
         meta.meta.multi_agent_version = version;
         append_rollout_item_to_path(&path, &RolloutItem::SessionMeta(meta)).await?;
 
-        for (method, params) in [
-            (
-                "thread/goal/set",
-                json!({"threadId": thread_id, "objective": "Replacement goal", "status": "paused"}),
-            ),
-            ("thread/goal/clear", json!({"threadId": thread_id})),
-        ] {
-            let request_id = app.send_raw_request(method, Some(params)).await?;
-            if rejects_mutation {
-                let error = timeout(
-                    DEFAULT_READ_TIMEOUT,
-                    app.read_stream_until_error_message(RequestId::Integer(request_id)),
-                )
-                .await??;
-                assert_eq!(
-                    error.error,
-                    JSONRPCErrorError {
-                        code: -32600,
-                        message:
-                            "direct app-server input is not allowed for multi-agent v2 sub-agents"
-                                .to_string(),
-                        data: None,
+        let mut set_params = goal_cas_fields(&original_revision);
+        set_params["threadId"] = json!(thread_id);
+        set_params["objective"] = json!("Replacement goal");
+        set_params["status"] = json!("paused");
+        let request_id = app
+            .send_raw_request("thread/goal/set", Some(set_params))
+            .await?;
+        if rejects_mutation {
+            let error = timeout(
+                DEFAULT_READ_TIMEOUT,
+                app.read_stream_until_error_message(RequestId::Integer(request_id)),
+            )
+            .await??;
+            assert_eq!(
+                error.error,
+                JSONRPCErrorError {
+                    code: -32600,
+                    message: "direct app-server input is not allowed for multi-agent v2 sub-agents"
+                        .to_string(),
+                    data: None,
+                },
+            );
+            let retained: ThreadGoalGetResponse = app
+                .request(|request_id| ClientRequest::ThreadGoalGet {
+                    request_id,
+                    params: ThreadGoalGetParams {
+                        thread_id: thread_id.clone(),
                     },
-                );
-                let retained: ThreadGoalGetResponse = app
-                    .request(|request_id| ClientRequest::ThreadGoalGet {
-                        request_id,
-                        params: ThreadGoalGetParams {
-                            thread_id: thread_id.clone(),
-                        },
-                    })
-                    .await?;
-                assert_eq!(
-                    retained,
-                    ThreadGoalGetResponse {
-                        goal: Some(original.goal.clone()),
-                    },
-                );
-            } else if method == "thread/goal/set" {
-                let _: ThreadGoalSetResponse =
-                    timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
-            } else {
-                let cleared: ThreadGoalClearResponse =
-                    timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
-                assert_eq!(cleared, ThreadGoalClearResponse { cleared: true });
-            }
+                })
+                .await?;
+            assert_eq!(
+                retained,
+                ThreadGoalGetResponse {
+                    goal: Some(original.goal.clone()),
+                    revision: Some(original_revision.clone()),
+                },
+            );
+        } else {
+            let updated: ThreadGoalSetResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
+            let updated_revision = updated.revision.clone();
+            let mut clear_params = goal_cas_fields(&updated_revision);
+            clear_params["threadId"] = json!(thread_id);
+            let clear_request_id = app
+                .send_raw_request("thread/goal/clear", Some(clear_params))
+                .await?;
+            let cleared: ThreadGoalClearResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app.read_response(clear_request_id)).await??;
+            assert!(cleared.cleared);
+            assert!(cleared.revision.is_some());
         }
     }
 
@@ -2144,7 +2159,7 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
             })),
         )
         .await?;
-    let _: ThreadGoalSetResponse =
+    let created: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_id)).await??;
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -2163,13 +2178,10 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
     metadata.preview = Some("SQLite preview before goal clear".to_string());
     state_db.upsert_thread(&metadata).await?;
 
+    let mut clear_params = goal_cas_fields(&created.revision);
+    clear_params["threadId"] = json!(thread_id.to_string());
     let clear_id = mcp
-        .send_raw_request(
-            "thread/goal/clear",
-            Some(json!({
-                "threadId": thread_id.to_string(),
-            })),
-        )
+        .send_raw_request("thread/goal/clear", Some(clear_params))
         .await?;
     let cleared: ThreadGoalClearResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_id)).await??;
@@ -3130,24 +3142,21 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(creation_id)).await??;
     assert_eq!(creation.goal.token_budget, Some(100));
 
+    let mut clear_budget_params = goal_cas_fields(&creation.revision);
+    clear_budget_params["threadId"] = json!(thread.id);
+    clear_budget_params["tokenBudget"] = json!(null);
     let clear_budget_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({ "threadId": thread.id, "tokenBudget": null })),
-        )
+        .send_raw_request("thread/goal/set", Some(clear_budget_params))
         .await?;
     let clear_budget: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_budget_id)).await??;
     assert_eq!(clear_budget.goal.token_budget, Some(100));
 
+    let mut oversized_update_params = goal_cas_fields(&clear_budget.revision);
+    oversized_update_params["threadId"] = json!(thread.id);
+    oversized_update_params["tokenBudget"] = json!(101);
     let oversized_update_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "tokenBudget": 101,
-            })),
-        )
+        .send_raw_request("thread/goal/set", Some(oversized_update_params))
         .await?;
     let update_error: JSONRPCError = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -3228,14 +3237,11 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
     )
     .await??;
 
+    let mut replacement_params = goal_cas_fields(&goal.revision);
+    replacement_params["threadId"] = json!(thread.id);
+    replacement_params["objective"] = json!("keep polishing");
     let replacement_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "objective": "keep polishing",
-            })),
-        )
+        .send_raw_request("thread/goal/set", Some(replacement_params))
         .await?;
     let replacement: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(replacement_id)).await??;
@@ -3293,23 +3299,25 @@ async fn thread_goal_set_persists_resumable_stopped_statuses() -> Result<()> {
     )
     .await??;
 
+    let mut expected_revision = None;
     for (wire_status, expected_status) in [
         ("blocked", ThreadGoalStatus::Blocked),
         ("usageLimited", ThreadGoalStatus::UsageLimited),
     ] {
+        let mut params = expected_revision
+            .as_ref()
+            .map(goal_cas_fields)
+            .unwrap_or_else(|| json!({}));
+        params["threadId"] = json!(thread.id.clone());
+        params["objective"] = json!("keep polishing");
+        params["status"] = json!(wire_status);
         let goal_id = mcp
-            .send_raw_request(
-                "thread/goal/set",
-                Some(json!({
-                    "threadId": thread.id.clone(),
-                    "objective": "keep polishing",
-                    "status": wire_status,
-                })),
-            )
+            .send_raw_request("thread/goal/set", Some(params))
             .await?;
         let goal: ThreadGoalSetResponse =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_id)).await??;
         assert_eq!(goal.goal.status, expected_status);
+        expected_revision = Some(goal.revision.clone());
 
         let notification = timeout(
             DEFAULT_READ_TIMEOUT,
@@ -3394,16 +3402,26 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         )
         .await?;
 
-    let edit_id = mcp
+    let accounted_goal_id = mcp
         .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread_id.to_string(),
-                "objective": "keep polishing with clearer wording",
-                "status": "active",
-                "tokenBudget": 40,
-            })),
+            "thread/goal/get",
+            Some(json!({ "threadId": thread_id.to_string() })),
         )
+        .await?;
+    let accounted_goal: ThreadGoalGetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(accounted_goal_id)).await??;
+    let mut edit_params = goal_cas_fields(
+        accounted_goal
+            .revision
+            .as_ref()
+            .expect("accounted Goal returns a revision"),
+    );
+    edit_params["threadId"] = json!(thread_id.to_string());
+    edit_params["objective"] = json!("keep polishing with clearer wording");
+    edit_params["status"] = json!("active");
+    edit_params["tokenBudget"] = json!(40);
+    let edit_id = mcp
+        .send_raw_request("thread/goal/set", Some(edit_params))
         .await?;
     let edit: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(edit_id)).await??;
@@ -3550,15 +3568,22 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     )
     .await?;
 
+    let current_goal_id = mcp
+        .send_raw_request("thread/goal/get", Some(json!({ "threadId": thread.id })))
+        .await?;
+    let current_goal: ThreadGoalGetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(current_goal_id)).await??;
+    let mut edit_params = goal_cas_fields(
+        current_goal
+            .revision
+            .as_ref()
+            .expect("tool-created Goal returns a revision"),
+    );
+    edit_params["threadId"] = json!(thread.id);
+    edit_params["objective"] = json!("externally updated goal");
+    edit_params["status"] = json!("active");
     let edit_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "objective": "externally updated goal",
-                "status": "active",
-            })),
-        )
+        .send_raw_request("thread/goal/set", Some(edit_params))
         .await?;
     let edited_goal: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(edit_id)).await??;
@@ -3795,13 +3820,20 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
     responses::assert_root_turn(&goal_request_body, Some(causal_turn_id))?;
     responses::assert_parent_turn(&goal_request_body, /*expected*/ None)?;
 
+    let current_goal_id = mcp
+        .send_raw_request("thread/goal/get", Some(json!({ "threadId": thread.id })))
+        .await?;
+    let current_goal: ThreadGoalGetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(current_goal_id)).await??;
+    let mut clear_params = goal_cas_fields(
+        current_goal
+            .revision
+            .as_ref()
+            .expect("current Goal returns a revision"),
+    );
+    clear_params["threadId"] = json!(thread.id);
     let clear_id = mcp
-        .send_raw_request(
-            "thread/goal/clear",
-            Some(json!({
-                "threadId": thread.id,
-            })),
-        )
+        .send_raw_request("thread/goal/clear", Some(clear_params))
         .await?;
     let clear: ThreadGoalClearResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_id)).await??;

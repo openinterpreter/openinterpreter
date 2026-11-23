@@ -1,8 +1,56 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadGoalRevision": {
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "lifecycleRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "missionRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadGoalStatus"
+        }
+      },
+      "required": [
+        "goalId",
+        "lifecycleRevision",
+        "missionRevision",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ThreadGoalStatus": {
+      "enum": [
+        "active",
+        "paused",
+        "blocked",
+        "usageLimited",
+        "budgetLimited",
+        "complete"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "cleared": {
       "type": "boolean"
+    },
+    "revision": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadGoalRevision"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

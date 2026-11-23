@@ -1,0 +1,2 @@
+ALTER TABLE thread_goals
+ADD COLUMN mission_revision INTEGER NOT NULL DEFAULT 0;

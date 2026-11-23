@@ -6,7 +6,9 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use codex_core::CodexThread;
+use codex_core::NotSubmittedReason;
 use codex_core::StartIfIdleSubmission;
+use codex_core::SteerSubmission;
 use codex_core::ThreadManager;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
@@ -29,6 +31,7 @@ use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::MAX_QUEUE_ITEMS;
 use codex_thread_store::QueueStore;
+use codex_thread_store::QueuedAdmissionRecord;
 use codex_thread_store::QueuedUserSubmissionRecord;
 use codex_thread_store::ThreadStoreError;
 use thiserror::Error;
@@ -42,6 +45,77 @@ use uuid::Uuid;
 pub struct QueuedItem {
     pub id: String,
     pub input: TurnInput,
+}
+
+/// Content-free dispatch decision for a persisted agent admission. The
+/// validator runs at the durable queue dispatch boundary, not only at request
+/// admission time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueAdmissionValidation {
+    pub accepted: bool,
+    pub blocker: Option<String>,
+}
+
+/// Content-free proof returned by the owning Goal layer when a native turn
+/// completed the mission captured by a durable admission. The turn may be the
+/// admission's dispatch turn or a later Goal-continuation turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueAdmissionCompletionProof {
+    pub goal_id: String,
+    pub mission_revision: i64,
+    pub lifecycle_revision: i64,
+    pub objective: String,
+}
+
+pub trait QueueAdmissionValidator: Send + Sync {
+    fn validate<'a>(
+        &'a self,
+        thread_id: ThreadId,
+        admission_id: &'a str,
+        goal_binding_json: &'a str,
+    ) -> ExtensionFuture<'a, QueueAdmissionValidation>;
+
+    /// Resolve a terminal proof at the native completion boundary. Returning
+    /// `None` is fail-closed: the current Goal is unavailable, changed, or is
+    /// not a completed match for this exact admission and completion turn.
+    fn completion_proof<'a>(
+        &'a self,
+        _thread_id: ThreadId,
+        _admission_id: &'a str,
+        _goal_binding_json: &'a str,
+        _turn_id: &'a str,
+    ) -> ExtensionFuture<'a, Option<QueueAdmissionCompletionProof>> {
+        Box::pin(std::future::ready(None))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueAdmissionState {
+    Pending,
+    Starting,
+    Dispatched,
+    Blocked,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueuedAdmission {
+    pub item: QueuedItem,
+    pub admission_id: String,
+    pub goal_binding_json: String,
+    pub dispatch_mode: String,
+    pub expected_turn_id: Option<String>,
+    pub state: QueueAdmissionState,
+    pub blocker: Option<String>,
+    pub dispatched_at_ms: Option<i64>,
+    pub dispatch_attempt_at_ms: Option<i64>,
+    pub dispatch_turn_id: Option<String>,
+    pub terminal_outcome: Option<String>,
+    pub terminal_turn_id: Option<String>,
+    pub terminal_goal_id: Option<String>,
+    pub terminal_mission_revision: Option<i64>,
+    pub terminal_lifecycle_revision: Option<i64>,
+    pub terminal_objective: Option<String>,
+    pub terminal_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +143,7 @@ pub struct QueuedItemService {
     event_sink: Arc<dyn ExtensionEventSink>,
     dispatch_locks: Arc<StdMutex<HashMap<ThreadId, Weak<Mutex<()>>>>>,
     resumed_threads: Arc<StdMutex<HashSet<ThreadId>>>,
+    admission_validator: Arc<StdMutex<Option<Arc<dyn QueueAdmissionValidator>>>>,
 }
 
 impl QueuedItemService {
@@ -83,7 +158,15 @@ impl QueuedItemService {
             event_sink,
             dispatch_locks: Arc::new(StdMutex::new(HashMap::new())),
             resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
+            admission_validator: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    pub fn set_admission_validator(&self, validator: Arc<dyn QueueAdmissionValidator>) {
+        *self
+            .admission_validator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(validator);
     }
 
     // Check SQLite's inexpensive data version every 10 seconds, then use the
@@ -279,6 +362,437 @@ impl QueuedItemService {
         Ok(item)
     }
 
+    /// Claim or reconcile one logical admission in the existing durable queue.
+    /// A unique-index conflict is resolved by reading the retained row; it is
+    /// never treated as permission to enqueue a second effect.
+    pub async fn enqueue_admission(
+        &self,
+        thread_id: ThreadId,
+        input: TurnInput,
+        admission_id: String,
+        goal_binding_json: String,
+        expected_turn_id: Option<String>,
+    ) -> Result<QueuedAdmission, QueueServiceError> {
+        let input = prepare_queued_user_input(input).await?;
+        let payload = serde_json::to_string(&input)?;
+        let admission = {
+            let _dispatch_guard = self.dispatch_guard(thread_id).await;
+            let record = match self
+                .queue
+                .enqueue_admission(
+                    thread_id,
+                    payload,
+                    admission_id.clone(),
+                    goal_binding_json,
+                    if expected_turn_id.is_some() {
+                        "steer".to_string()
+                    } else {
+                        "queue".to_string()
+                    },
+                    expected_turn_id.clone(),
+                )
+                .await
+            {
+                Ok(record) => record,
+                Err(ThreadStoreError::Conflict { .. }) => self
+                    .queue
+                    .find_admission(thread_id, admission_id.clone())
+                    .await?
+                    .ok_or_else(|| ThreadStoreError::Conflict {
+                        message: "admission claim conflicted without a readable receipt"
+                            .to_string(),
+                    })?,
+                Err(error) => return Err(error.into()),
+            };
+            let admission = queued_admission_from_record(record)?;
+            if admission.state == QueueAdmissionState::Pending && admission.dispatch_mode == "queue"
+            {
+                self.emit_changed(thread_id);
+            }
+            if admission.state == QueueAdmissionState::Pending && admission.dispatch_mode == "steer"
+            {
+                let Some(expected_turn_id) = admission.expected_turn_id.clone() else {
+                    return Err(QueueServiceError::InvalidInput);
+                };
+                let _ = self
+                    .steer_admission_locked(
+                        thread_id,
+                        &admission.item.id,
+                        &expected_turn_id,
+                        admission.item.input.clone(),
+                    )
+                    .await?;
+                let receipt = self
+                    .find_admission(thread_id, admission.admission_id.as_str())
+                    .await?
+                    .ok_or_else(|| {
+                        QueueServiceError::Storage(ThreadStoreError::Internal {
+                            message: "steer admission receipt disappeared".to_string(),
+                        })
+                    })?;
+                return Ok(receipt);
+            }
+            admission
+        };
+        if admission.state == QueueAdmissionState::Pending {
+            self.wake_if_loaded(thread_id).await;
+        }
+        Ok(admission)
+    }
+
+    pub async fn find_admission(
+        &self,
+        thread_id: ThreadId,
+        admission_id: &str,
+    ) -> Result<Option<QueuedAdmission>, QueueServiceError> {
+        self.queue
+            .find_admission(thread_id, admission_id.to_string())
+            .await?
+            .map(queued_admission_from_record)
+            .transpose()
+    }
+
+    /// Persist and return a terminal proof for an exact dispatched turn. The
+    /// queue-store transition is one-shot and the dispatch guard prevents a
+    /// concurrent queue transition from being mistaken for this proof.
+    pub async fn record_admission_completed(
+        &self,
+        thread_id: ThreadId,
+        admission_id: &str,
+        turn_id: &str,
+        goal_id: &str,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: &str,
+    ) -> Result<Option<QueuedAdmission>, QueueServiceError> {
+        let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        self.queue
+            .mark_admission_completed(
+                thread_id,
+                admission_id.to_string(),
+                turn_id.to_string(),
+                goal_id.to_string(),
+                mission_revision,
+                lifecycle_revision,
+                objective.to_string(),
+            )
+            .await?
+            .map(queued_admission_from_record)
+            .transpose()
+    }
+
+    /// Capture a completion at the authoritative Goal transition, before a
+    /// later create/replace operation can make another Goal current. The
+    /// transition itself supplies the exact mission identity; the native
+    /// runtime supplies the completing turn when the transition occurred in a
+    /// live task. Control-input admissions are deliberately excluded.
+    pub async fn record_completed_admission_for_goal(
+        &self,
+        thread_id: ThreadId,
+        goal_id: &str,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: &str,
+        completion_turn_id: Option<&str>,
+    ) -> Result<Option<QueuedAdmission>, QueueServiceError> {
+        let Some(completion_turn_id) = completion_turn_id else {
+            return Ok(None);
+        };
+        let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        let mut matched = None;
+        for record in self.queue.list_dispatched_admissions(thread_id).await? {
+            if record.dispatch_mode != "queue"
+                || !goal_binding_matches(
+                    &record.goal_binding_json,
+                    goal_id,
+                    mission_revision,
+                    objective,
+                )
+            {
+                continue;
+            }
+            let admission = queued_admission_from_record(record)?;
+            if matched.is_some() {
+                tracing::warn!(
+                    %thread_id,
+                    %goal_id,
+                    "multiple task admissions matched one Goal transition; retaining reconciliation state"
+                );
+                return Ok(None);
+            }
+            matched = Some(admission);
+        }
+        let Some(admission) = matched else {
+            return Ok(None);
+        };
+        self.queue
+            .mark_admission_completed_from_continuation(
+                thread_id,
+                admission.admission_id,
+                completion_turn_id.to_string(),
+                goal_id.to_string(),
+                mission_revision,
+                lifecycle_revision,
+                objective.to_string(),
+            )
+            .await?
+            .map(queued_admission_from_record)
+            .transpose()
+    }
+
+    /// Capture a terminal proof from the native idle boundary, before a
+    /// disconnected coordinator can observe the receipt or a later Goal can
+    /// replace the current one. A normal admission completes on its dispatch
+    /// turn. A native Goal continuation completes outside the admission queue,
+    /// so that path selects exactly one unfinished admission by its current
+    /// Goal proof and records the continuation turn as terminal lineage.
+    pub async fn record_completed_admission_for_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: &str,
+    ) -> Result<Option<QueuedAdmission>, QueueServiceError> {
+        let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        let exact_admissions = self
+            .queue
+            .list_admissions_by_turn(thread_id, turn_id.to_string())
+            .await?
+            .into_iter()
+            .map(queued_admission_from_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        let validator = self
+            .admission_validator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(validator) = validator else {
+            return Ok(None);
+        };
+
+        // A dispatch turn may contain both a Goal task and one or more
+        // user/peer/timer control steers. Only queue-mode admissions are
+        // eligible for Goal completion proof; every steer keeps its own
+        // receipt and must never be selected by a first-row lookup.
+        let exact_task_admissions = exact_admissions
+            .iter()
+            .filter(|admission| admission.dispatch_mode == "queue")
+            .collect::<Vec<_>>();
+        if exact_task_admissions.len() > 1 {
+            tracing::warn!(
+                %thread_id,
+                %turn_id,
+                "multiple task admissions share one native turn; retaining reconciliation state"
+            );
+            return Ok(None);
+        }
+        if let Some(admission) = exact_task_admissions.into_iter().next() {
+            if admission.terminal_outcome.is_some() {
+                return Ok(Some(admission.clone()));
+            }
+            let Some(proof) = validator
+                .completion_proof(
+                    thread_id,
+                    admission.admission_id.as_str(),
+                    admission.goal_binding_json.as_str(),
+                    turn_id,
+                )
+                .await
+            else {
+                return Ok(None);
+            };
+            return self
+                .queue
+                .mark_admission_completed(
+                    thread_id,
+                    admission.admission_id.clone(),
+                    turn_id.to_string(),
+                    proof.goal_id,
+                    proof.mission_revision,
+                    proof.lifecycle_revision,
+                    proof.objective,
+                )
+                .await?
+                .map(queued_admission_from_record)
+                .transpose();
+        }
+        if !exact_admissions.is_empty() {
+            // This was a control-input completion, not an unassociated Goal
+            // continuation. Do not let it borrow a separate task's Goal proof.
+            return Ok(None);
+        }
+
+        // A Goal continuation gets a fresh native turn and therefore has no
+        // dispatch row of its own. Prove the current completed Goal against
+        // every unfinished dispatched admission, but fail closed if more than
+        // one row could claim that Goal rather than guessing task identity.
+        let candidates = self
+            .queue
+            .list_dispatched_admissions(thread_id)
+            .await?
+            .into_iter()
+            .filter(|record| record.dispatch_mode == "queue")
+            .collect::<Vec<_>>();
+        let mut matched = None;
+        for record in candidates {
+            let admission = queued_admission_from_record(record)?;
+            let Some(proof) = validator
+                .completion_proof(
+                    thread_id,
+                    admission.admission_id.as_str(),
+                    admission.goal_binding_json.as_str(),
+                    turn_id,
+                )
+                .await
+            else {
+                continue;
+            };
+            if matched.is_some() {
+                tracing::warn!(
+                    %thread_id,
+                    %turn_id,
+                    "multiple admissions matched one native Goal continuation; retaining reconciliation state"
+                );
+                return Ok(None);
+            }
+            matched = Some((admission, proof));
+        }
+        let Some((admission, proof)) = matched else {
+            return Ok(None);
+        };
+        self.queue
+            .mark_admission_completed_from_continuation(
+                thread_id,
+                admission.admission_id,
+                turn_id.to_string(),
+                proof.goal_id,
+                proof.mission_revision,
+                proof.lifecycle_revision,
+                proof.objective,
+            )
+            .await?
+            .map(queued_admission_from_record)
+            .transpose()
+    }
+
+    /// Finish a previously persisted active-steer admission after a caller
+    /// crash before the native call. Only a still-pending steer row may enter
+    /// Core; `starting` is treated as unknown and is never retried here.
+    pub async fn resume_pending_steer(
+        &self,
+        thread_id: ThreadId,
+        admission_id: &str,
+        expected_turn_id: &str,
+    ) -> Result<Option<QueuedAdmission>, QueueServiceError> {
+        let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        let Some(admission) = self.find_admission(thread_id, admission_id).await? else {
+            return Ok(None);
+        };
+        if admission.dispatch_mode != "steer"
+            || admission.state != QueueAdmissionState::Pending
+            || admission.expected_turn_id.as_deref() != Some(expected_turn_id)
+        {
+            return Ok(Some(admission));
+        }
+        let _ = self
+            .steer_admission_locked(
+                thread_id,
+                &admission.item.id,
+                expected_turn_id,
+                admission.item.input,
+            )
+            .await?;
+        self.find_admission(thread_id, admission_id).await
+    }
+
+    async fn mark_admission_starting(
+        &self,
+        thread_id: ThreadId,
+        item_id: &str,
+    ) -> Result<bool, QueueServiceError> {
+        Ok(self
+            .queue
+            .mark_admission_starting(thread_id, item_id.to_string())
+            .await?)
+    }
+
+    async fn mark_admission_started(
+        &self,
+        thread_id: ThreadId,
+        item_id: &str,
+        turn_id: &str,
+    ) -> Result<bool, QueueServiceError> {
+        Ok(self
+            .queue
+            .mark_admission_started(thread_id, item_id.to_string(), turn_id.to_string())
+            .await?)
+    }
+
+    async fn reset_admission_pending(
+        &self,
+        thread_id: ThreadId,
+        item_id: &str,
+    ) -> Result<bool, QueueServiceError> {
+        Ok(self
+            .queue
+            .reset_admission_pending(thread_id, item_id.to_string())
+            .await?)
+    }
+
+    async fn steer_admission_locked(
+        &self,
+        thread_id: ThreadId,
+        item_id: &str,
+        expected_turn_id: &str,
+        input: TurnInput,
+    ) -> Result<SteerSubmission, QueueServiceError> {
+        // Active steering is a durable admission too. Revalidate the captured
+        // mission/lifecycle binding before claiming the row, including the
+        // crash-recovery path, so an objective edit cannot steer the old task
+        // into the new mission. A `starting` row is deliberately not retried:
+        // its native outcome is still uncertain and must be reconciled.
+        if !self
+            .validate_admission_before_dispatch(thread_id, &input, item_id)
+            .await?
+        {
+            return Ok(SteerSubmission::NotSubmitted {
+                reason: NotSubmittedReason::NoActiveTurn,
+            });
+        }
+        if !self.mark_admission_starting(thread_id, item_id).await? {
+            return Ok(SteerSubmission::NotSubmitted {
+                reason: NotSubmittedReason::NoActiveTurn,
+            });
+        }
+        let Some(manager) = self.thread_manager.upgrade() else {
+            return Err(QueueServiceError::Storage(ThreadStoreError::Internal {
+                message: "thread manager unavailable during steer admission".to_string(),
+            }));
+        };
+        let thread = manager.get_thread(thread_id).await.map_err(|error| {
+            QueueServiceError::Storage(ThreadStoreError::Internal {
+                message: format!("thread unavailable during steer admission: {error}"),
+            })
+        })?;
+        let submission = thread
+            .steer_turn(TurnInputRequest::new(input), expected_turn_id.to_string())
+            .await?;
+        match &submission {
+            SteerSubmission::Steered { turn_id } => {
+                self.mark_admission_started(thread_id, item_id, turn_id)
+                    .await?;
+            }
+            SteerSubmission::NotSubmitted { reason } => {
+                self.queue
+                    .mark_admission_blocked(
+                        thread_id,
+                        item_id.to_string(),
+                        format!("steer_not_submitted:{reason:?}"),
+                    )
+                    .await?;
+            }
+        }
+        Ok(submission)
+    }
+
     pub async fn list(&self, thread_id: ThreadId) -> Result<Vec<QueuedItem>, QueueServiceError> {
         self.list_page(thread_id, /*offset*/ 0, MAX_QUEUE_ITEMS)
             .await
@@ -388,18 +902,53 @@ impl QueuedItemService {
         let input @ TurnInput::UserInput { .. } = item.input else {
             return Err(QueueServiceError::InvalidInput);
         };
-        let submission = thread
-            .start_turn_if_idle(TurnInputRequest::new(input).with_trace(trace).on_start(
-                TurnStartOptions {
-                    turn_trigger: Some("queue".to_string()),
-                    ..Default::default()
-                },
-            ))
-            .await?;
-        if matches!(submission, StartIfIdleSubmission::Started { .. }) {
-            self.delete_locked(thread_id, queued_item_id).await?;
+        if !self
+            .validate_admission_before_dispatch(thread_id, &input, &queued_item_id)
+            .await?
+        {
+            return Ok(StartIfIdleSubmission::NotSubmitted {
+                reason: NotSubmittedReason::NotIdle,
+            });
         }
-        Ok(submission)
+        let admission_claimed = self.is_durable_admission(thread_id, &input).await?;
+        if admission_claimed
+            && !self
+                .mark_admission_starting(thread_id, &queued_item_id)
+                .await?
+        {
+            return Ok(StartIfIdleSubmission::NotSubmitted {
+                reason: NotSubmittedReason::NotIdle,
+            });
+        }
+        let submission = thread
+            .start_turn_if_idle(
+                TurnInputRequest::new(input.clone())
+                    .with_trace(trace)
+                    .on_start(TurnStartOptions {
+                        turn_trigger: Some("queue".to_string()),
+                        ..Default::default()
+                    }),
+            )
+            .await?;
+        match submission {
+            StartIfIdleSubmission::Started { turn_id } if admission_claimed => {
+                self.mark_admission_started(thread_id, &queued_item_id, &turn_id)
+                    .await?;
+                return Ok(StartIfIdleSubmission::Started { turn_id });
+            }
+            StartIfIdleSubmission::Started { turn_id } => {
+                self.delete_locked(thread_id, queued_item_id).await?;
+                return Ok(StartIfIdleSubmission::Started { turn_id });
+            }
+            StartIfIdleSubmission::NotSubmitted { reason } if admission_claimed => {
+                self.reset_admission_pending(thread_id, &queued_item_id)
+                    .await?;
+                return Ok(StartIfIdleSubmission::NotSubmitted { reason });
+            }
+            StartIfIdleSubmission::NotSubmitted { reason } => {
+                return Ok(StartIfIdleSubmission::NotSubmitted { reason });
+            }
+        }
     }
 
     async fn dispatch_if_idle(&self, thread_id: ThreadId) -> Result<(), QueueServiceError> {
@@ -436,18 +985,45 @@ impl QueuedItemService {
                 continue;
             }
 
+            if !self
+                .validate_admission_before_dispatch(thread_id, &input, &queued_item_id)
+                .await?
+            {
+                return Ok(());
+            }
+
+            let admission_claimed = self.is_durable_admission(thread_id, &input).await?;
+            if admission_claimed
+                && !self
+                    .mark_admission_starting(thread_id, &queued_item_id)
+                    .await?
+            {
+                return Ok(());
+            }
+
             match thread
-                .start_turn_if_idle(TurnInputRequest::new(input).on_start(TurnStartOptions {
-                    turn_trigger: Some("queue".to_string()),
-                    ..Default::default()
-                }))
+                .start_turn_if_idle(TurnInputRequest::new(input.clone()).on_start(
+                    TurnStartOptions {
+                        turn_trigger: Some("queue".to_string()),
+                        ..Default::default()
+                    },
+                ))
                 .await
             {
+                Ok(StartIfIdleSubmission::Started { turn_id }) if admission_claimed => {
+                    self.mark_admission_started(thread_id, &queued_item_id, &turn_id)
+                        .await?;
+                    return Ok(());
+                }
                 Ok(StartIfIdleSubmission::Started { .. }) => {
                     self.delete_locked(thread_id, queued_item_id).await?;
                     return Ok(());
                 }
                 Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
+                    if admission_claimed {
+                        self.reset_admission_pending(thread_id, &queued_item_id)
+                            .await?;
+                    }
                     tracing::warn!(
                         %thread_id,
                         %queued_item_id,
@@ -467,6 +1043,67 @@ impl QueuedItemService {
                 }
             }
         }
+    }
+
+    async fn validate_admission_before_dispatch(
+        &self,
+        thread_id: ThreadId,
+        input: &TurnInput,
+        queued_item_id: &str,
+    ) -> Result<bool, QueueServiceError> {
+        let Some(admission_id) = input_client_id(input) else {
+            return Ok(true);
+        };
+        let Some(record) = self
+            .queue
+            .find_admission(thread_id, admission_id.to_string())
+            .await?
+        else {
+            return Ok(true);
+        };
+        if record.state != "pending" {
+            return Ok(false);
+        }
+        let validator = self
+            .admission_validator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(validator) = validator else {
+            return Ok(true);
+        };
+        let decision = validator
+            .validate(thread_id, admission_id, &record.goal_binding_json)
+            .await;
+        if decision.accepted {
+            return Ok(true);
+        }
+        self.queue
+            .mark_admission_blocked(
+                thread_id,
+                queued_item_id.to_string(),
+                decision
+                    .blocker
+                    .unwrap_or_else(|| "goal_binding_rejected".to_string()),
+            )
+            .await?;
+        self.emit_changed(thread_id);
+        Ok(false)
+    }
+
+    async fn is_durable_admission(
+        &self,
+        thread_id: ThreadId,
+        input: &TurnInput,
+    ) -> Result<bool, QueueServiceError> {
+        let Some(admission_id) = input_client_id(input) else {
+            return Ok(false);
+        };
+        Ok(self
+            .queue
+            .find_admission(thread_id, admission_id.to_string())
+            .await?
+            .is_some())
     }
 
     async fn wake_if_loaded(&self, thread_id: ThreadId) {
@@ -559,6 +1196,22 @@ where
                 return;
             };
             let _guard = self.dispatch_guard(thread_id).await;
+            if input.cause == ThreadIdleCause::Completed
+                && let Some(turn_id) = input.turn_id
+            {
+                drop(_guard);
+                if let Err(error) = self
+                    .record_completed_admission_for_turn(thread_id, turn_id)
+                    .await
+                {
+                    tracing::warn!(%thread_id, %turn_id, %error, "failed to persist terminal agent admission proof");
+                }
+                let _guard = self.dispatch_guard(thread_id).await;
+                if let Err(error) = self.dispatch_if_idle(thread_id).await {
+                    tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
+                }
+                return;
+            }
             if let Err(error) = self.dispatch_if_idle(thread_id).await {
                 tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
             }
@@ -573,4 +1226,68 @@ fn queued_item_from_record(
         id: record.id,
         input: serde_json::from_str::<TurnInput>(&record.payload)?,
     })
+}
+
+fn queued_admission_from_record(
+    record: QueuedAdmissionRecord,
+) -> Result<QueuedAdmission, QueueServiceError> {
+    let state = match record.state.as_str() {
+        "pending" => QueueAdmissionState::Pending,
+        "starting" => QueueAdmissionState::Starting,
+        "dispatched" => QueueAdmissionState::Dispatched,
+        "blocked" => QueueAdmissionState::Blocked,
+        _ => {
+            return Err(QueueServiceError::InvalidAttachment(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid admission state",
+            )));
+        }
+    };
+    Ok(QueuedAdmission {
+        item: queued_item_from_record(QueuedUserSubmissionRecord {
+            id: record.id,
+            thread_id: record.thread_id,
+            payload: record.payload,
+        })?,
+        admission_id: record.admission_id,
+        goal_binding_json: record.goal_binding_json,
+        state,
+        blocker: record.blocker,
+        dispatched_at_ms: record.dispatched_at_ms,
+        dispatch_attempt_at_ms: record.dispatch_attempt_at_ms,
+        dispatch_turn_id: record.dispatch_turn_id,
+        dispatch_mode: record.dispatch_mode,
+        expected_turn_id: record.expected_turn_id,
+        terminal_outcome: record.terminal_outcome,
+        terminal_turn_id: record.terminal_turn_id,
+        terminal_goal_id: record.terminal_goal_id,
+        terminal_mission_revision: record.terminal_mission_revision,
+        terminal_lifecycle_revision: record.terminal_lifecycle_revision,
+        terminal_objective: record.terminal_objective,
+        terminal_at_ms: record.terminal_at_ms,
+    })
+}
+
+fn goal_binding_matches(
+    goal_binding_json: &str,
+    goal_id: &str,
+    mission_revision: i64,
+    objective: &str,
+) -> bool {
+    let Ok(binding) = serde_json::from_str::<serde_json::Value>(goal_binding_json) else {
+        return false;
+    };
+    binding.get("goal_id").and_then(serde_json::Value::as_str) == Some(goal_id)
+        && binding
+            .get("mission_revision")
+            .and_then(serde_json::Value::as_i64)
+            == Some(mission_revision)
+        && binding.get("objective").and_then(serde_json::Value::as_str) == Some(objective)
+}
+
+fn input_client_id(input: &TurnInput) -> Option<&str> {
+    match input {
+        TurnInput::UserInput { client_id, .. } => client_id.as_deref(),
+        _ => None,
+    }
 }

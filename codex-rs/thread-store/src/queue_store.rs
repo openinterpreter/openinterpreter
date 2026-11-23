@@ -3,6 +3,7 @@ use std::future::Future;
 
 use codex_protocol::ThreadId;
 use codex_rollout::StateDbHandle;
+use codex_state::QueuedAdmissionRecord;
 use codex_state::QueuedUserSubmissionRecord;
 use codex_state::SqliteQueueStore;
 
@@ -27,6 +28,119 @@ pub trait QueueStore: Send + Sync {
         thread_id: ThreadId,
         payload: String,
     ) -> ThreadStoreFuture<'_, QueuedUserSubmissionRecord>;
+
+    /// Persist one agent-contract admission with its idempotency key and
+    /// caller-supplied goal precondition. The unique (thread, admission_id)
+    /// index is the cross-process claim; callers must reconcile a conflict
+    /// through [`Self::find_admission`] rather than enqueue again.
+    fn enqueue_admission(
+        &self,
+        thread_id: ThreadId,
+        payload: String,
+        admission_id: String,
+        goal_binding_json: String,
+        dispatch_mode: String,
+        expected_turn_id: Option<String>,
+    ) -> ThreadStoreFuture<'_, QueuedAdmissionRecord>;
+
+    fn find_admission(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>>;
+
+    /// Find the durable admission retained for one exact native turn.
+    fn find_admission_by_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>>;
+
+    /// List all admissions attached to one native turn so task and control
+    /// steer identities are not collapsed by a first-row lookup.
+    fn list_admissions_by_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<QueuedAdmissionRecord>>;
+
+    /// List unfinished dispatched admissions for a native Goal-continuation
+    /// completion lookup. Callers must prove one current Goal binding before
+    /// marking any row terminal.
+    fn list_dispatched_admissions(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Vec<QueuedAdmissionRecord>>;
+
+    /// Mark an admission as dispatched, retaining the row as the durable
+    /// receipt. Returns false when it was already terminally marked.
+    fn mark_admission_dispatched(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool>;
+
+    /// Claim the durable dispatch transition before invoking Core. A
+    /// `starting` row is recoverable evidence and is never returned to the
+    /// pending dispatcher after a crash.
+    fn mark_admission_starting(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool>;
+
+    /// Attach the native turn identity after Core accepts a claimed dispatch.
+    fn mark_admission_started(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, bool>;
+
+    /// Persist a one-shot terminal completion proof bound to the exact native
+    /// turn and mission identity. A conflict returns the retained admission
+    /// row for reconciliation rather than creating another effect.
+    fn mark_admission_completed(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+        turn_id: String,
+        goal_id: String,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>>;
+
+    /// Persist terminal lineage when a later native Goal continuation turn
+    /// completes an admission dispatched by an earlier turn.
+    fn mark_admission_completed_from_continuation(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+        completion_turn_id: String,
+        goal_id: String,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>>;
+
+    /// Return a claim to pending only when Core explicitly reports that no
+    /// submission was made. Unknown storage/core errors keep `starting`.
+    fn reset_admission_pending(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool>;
+
+    /// Fail closed at queue dispatch when the persisted Goal precondition no
+    /// longer matches. The row remains as a receipt and is removed from the
+    /// pending dispatch view.
+    fn mark_admission_blocked(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+        blocker: String,
+    ) -> ThreadStoreFuture<'_, bool>;
 
     fn list_page(
         &self,
@@ -112,6 +226,232 @@ impl QueueStore for LocalQueueStore {
                     _ => ThreadStoreError::Internal {
                         message: format!("queue storage failed: {error}"),
                     },
+                })
+        })
+    }
+
+    fn enqueue_admission(
+        &self,
+        thread_id: ThreadId,
+        payload: String,
+        admission_id: String,
+        goal_binding_json: String,
+        dispatch_mode: String,
+        expected_turn_id: Option<String>,
+    ) -> ThreadStoreFuture<'_, QueuedAdmissionRecord> {
+        Box::pin(async move {
+            self.queue()
+                .enqueue_admission(
+                    thread_id,
+                    &payload,
+                    &admission_id,
+                    &goal_binding_json,
+                    &dispatch_mode,
+                    expected_turn_id.as_deref(),
+                )
+                .await
+                .map_err(|error| {
+                    if matches!(error.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::Database(db)) if db.message().contains("queued_items_thread_admission_idx")) {
+                        ThreadStoreError::Conflict {
+                            message: "agent admission already exists".to_string(),
+                        }
+                    } else {
+                        ThreadStoreError::Internal {
+                            message: format!("queue storage failed: {error}"),
+                        }
+                    }
+                })
+        })
+    }
+
+    fn find_admission(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .find_admission(thread_id, &admission_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn find_admission_by_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .find_admission_by_turn(thread_id, &turn_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn list_admissions_by_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .list_admissions_by_turn(thread_id, &turn_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn list_dispatched_admissions(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Vec<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .list_dispatched_admissions(thread_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_dispatched(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_dispatched(thread_id, &item_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_starting(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_starting(thread_id, &item_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_started(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_started(thread_id, &item_id, &turn_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_completed(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+        turn_id: String,
+        goal_id: String,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_completed(
+                    thread_id,
+                    &admission_id,
+                    &turn_id,
+                    &goal_id,
+                    mission_revision,
+                    lifecycle_revision,
+                    &objective,
+                )
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_completed_from_continuation(
+        &self,
+        thread_id: ThreadId,
+        admission_id: String,
+        completion_turn_id: String,
+        goal_id: String,
+        mission_revision: i64,
+        lifecycle_revision: i64,
+        objective: String,
+    ) -> ThreadStoreFuture<'_, Option<QueuedAdmissionRecord>> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_completed_from_continuation(
+                    thread_id,
+                    &admission_id,
+                    &completion_turn_id,
+                    &goal_id,
+                    mission_revision,
+                    lifecycle_revision,
+                    &objective,
+                )
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn reset_admission_pending(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.queue()
+                .reset_admission_pending(thread_id, &item_id)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
+    }
+
+    fn mark_admission_blocked(
+        &self,
+        thread_id: ThreadId,
+        item_id: String,
+        blocker: String,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.queue()
+                .mark_admission_blocked(thread_id, &item_id, &blocker)
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
                 })
         })
     }
