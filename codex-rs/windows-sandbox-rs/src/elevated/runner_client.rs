@@ -38,7 +38,6 @@ use windows_sys::Win32::Foundation::ERROR_ACCOUNT_DISABLED;
 use windows_sys::Win32::Foundation::ERROR_LOGON_FAILURE;
 use windows_sys::Win32::Foundation::ERROR_NO_SUCH_LOGON_SESSION;
 use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
-use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Diagnostics::Debug::SetErrorMode;
@@ -428,8 +427,7 @@ pub(crate) fn spawn_runner_transport(
     unsafe {
         SetErrorMode(previous_error_mode);
     }
-    if spawn_res == 0 {
-        let err = unsafe { GetLastError() };
+    if let Some(err) = spawn_error {
         return Err(RunnerLogonError { code: err }.into());
     }
     // Keep the process pinned through the entire startup handshake. Pipes close

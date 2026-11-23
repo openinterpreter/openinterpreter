@@ -54,6 +54,10 @@ impl ServiceStopReason {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "retained stopped-service diagnostic for service lifecycle"
+)]
 pub(crate) fn record_stopped(status: &SERVICE_STATUS_PROCESS, service: services::SC_HANDLE) {
     let Some(metrics) = codex_otel::global() else {
         return;

@@ -26,7 +26,6 @@ use windows_sys::Win32::Foundation::ERROR_NO_DATA;
 use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 use windows_sys::Win32::Foundation::ERROR_PIPE_NOT_CONNECTED;
 use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
-use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
 use windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
 use windows_sys::Win32::Foundation::ERROR_SERVICE_MARKED_FOR_DELETE;
 use windows_sys::Win32::Foundation::HANDLE;

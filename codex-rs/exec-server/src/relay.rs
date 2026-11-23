@@ -628,7 +628,7 @@ where
                         else {
                             continue;
                         };
-                        if let Err((reason, registry_status)) = validation_result.result {
+                        if let Err((_reason, _registry_status)) = validation_result.result {
                             // Validator errors may contain authorization details.
                             warn!(
                                 noise_event = "authorization",

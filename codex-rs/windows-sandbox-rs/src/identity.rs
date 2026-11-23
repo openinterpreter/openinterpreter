@@ -33,9 +33,6 @@ use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
-use windows_sys::Win32::Foundation::ERROR_LOGON_FAILURE;
-use windows_sys::Win32::Foundation::ERROR_PASSWORD_EXPIRED;
-use windows_sys::Win32::Foundation::ERROR_PASSWORD_MUST_CHANGE;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_ACCOUNTDISABLE;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
 use windows_sys::Win32::Security::LOGON32_LOGON_INTERACTIVE;
@@ -59,6 +56,10 @@ pub struct SandboxCreds {
 }
 
 /// Windows rejected the stored sandbox password; credential-file and policy errors are distinct.
+#[expect(
+    dead_code,
+    reason = "preserved typed credential mismatch for sandbox callers"
+)]
 #[derive(Debug)]
 pub struct SandboxAccountCredentialMismatch;
 

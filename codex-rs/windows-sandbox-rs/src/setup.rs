@@ -1031,7 +1031,7 @@ fn run_setup_exe_payload(
     }
 
     let exe_w = crate::winutil::to_wide(&exe);
-    let params = quote_arg(&payload_b64);
+    let params = quote_arg(payload_b64);
     let params_w = crate::winutil::to_wide(params);
     let verb_w = crate::winutil::to_wide("runas");
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };

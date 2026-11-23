@@ -236,6 +236,7 @@ impl PendingResponderHandshake {
 
     /// Authenticate a terminal registry 401 to the harness without authorizing
     /// its key or constructing a transport. Older peers reject nonempty payloads.
+    #[cfg(test)]
     pub(crate) fn reject_registry_authentication(mut self) -> Result<Vec<u8>, NoiseChannelError> {
         let overhead = self.handshake.get_next_message_overhead()?;
         let mut response = vec![0u8; overhead + REGISTRY_AUTH_REJECTED.len()];
