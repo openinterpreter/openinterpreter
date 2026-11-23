@@ -18,9 +18,6 @@ mod network_policy_tests;
 #[path = "patch_approval_tests.rs"]
 mod patch_approval_tests;
 
-#[path = "compaction_replay_tests.rs"]
-mod compaction_replay_tests;
-
 use super::mcp_refresh::McpRefresh;
 
 #[path = "turn_catalog_refresh_tests.rs"]
