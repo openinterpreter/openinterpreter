@@ -17,6 +17,7 @@ pub(crate) enum SelectedCatalog<'a> {
 }
 
 impl<'a> SelectedCatalog<'a> {
+    #[expect(dead_code, reason = "retain the owned/borrowed selection interface")]
     pub fn into_models(self) -> Cow<'a, [ModelInfo]> {
         match self {
             Self::CurrentSnapshot(models) | Self::Fallback(models) => models,
@@ -42,6 +43,7 @@ impl CatalogState {
         }
     }
 
+    #[expect(dead_code, reason = "retain the unmerged provider-catalog constructor")]
     pub fn provider(entry: ModelsCacheEntry) -> Self {
         // Capture raw response IDs before merging, including when loading from disk cache.
         let provider_model_ids = entry
