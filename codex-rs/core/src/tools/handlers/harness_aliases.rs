@@ -3701,7 +3701,7 @@ fn collect_glob_matches(
     include_dirs: bool,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
-    let pattern = SimpleGlob::new(pattern);
+    let pattern = SimpleGlob::new(pattern)?;
     for entry in harness_fs::bounded_walk(root)? {
         let path = entry.path;
         let relative = path.strip_prefix(root).unwrap_or(path.as_path());
@@ -3720,7 +3720,7 @@ fn collect_grep_matches(
     glob: Option<&str>,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
-    let glob = glob.map(SimpleGlob::new);
+    let glob = glob.map(SimpleGlob::new).transpose()?;
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3763,7 +3763,7 @@ fn collect_zcode_grep_content_matches(
         );
         return Ok(());
     }
-    let glob = glob.map(SimpleGlob::new);
+    let glob = glob.map(SimpleGlob::new).transpose()?;
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3829,7 +3829,7 @@ fn collect_zcode_grep_count_matches(
     glob: Option<&str>,
     matches: &mut Vec<String>,
 ) -> std::io::Result<()> {
-    let glob = glob.map(SimpleGlob::new);
+    let glob = glob.map(SimpleGlob::new).transpose()?;
     for entry in harness_fs::bounded_walk(path)? {
         if entry.kind != WalkEntryKind::File {
             continue;
@@ -3917,6 +3917,9 @@ fn count_searchable_files(root: &Path) -> usize {
 /// path component, `**/` spans zero or more directories and `{a,b}` is an
 /// alternative. Matching runs the pattern as an NFA, so a path costs at most
 /// `states × path length` steps and brace groups are never expanded.
+/// Parsing recurses once per nested brace group and the state count grows with
+/// the pattern, so patterns longer than `MAX_GLOB_PATTERN_CHARS` or nested
+/// deeper than `MAX_GLOB_BRACE_DEPTH` are rejected.
 struct SimpleGlob {
     states: Vec<GlobState>,
     start: usize,
@@ -3940,14 +3943,33 @@ enum GlobToken {
     Alternatives(Vec<Vec<GlobToken>>),
 }
 
+const MAX_GLOB_PATTERN_CHARS: usize = 256;
+const MAX_GLOB_BRACE_DEPTH: usize = 32;
+
 impl SimpleGlob {
-    fn new(pattern: &str) -> Self {
+    fn new(pattern: &str) -> std::io::Result<Self> {
         let chars = pattern.chars().collect::<Vec<_>>();
+        if chars.len() > MAX_GLOB_PATTERN_CHARS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("glob pattern is longer than {MAX_GLOB_PATTERN_CHARS} characters"),
+            ));
+        }
         let mut closing_braces = vec![None; chars.len()];
         let mut open_braces = Vec::new();
         for (index, ch) in chars.iter().enumerate() {
             match ch {
-                '{' => open_braces.push(index),
+                '{' => {
+                    open_braces.push(index);
+                    if open_braces.len() > MAX_GLOB_BRACE_DEPTH {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "glob pattern nests `{{` deeper than {MAX_GLOB_BRACE_DEPTH} levels"
+                            ),
+                        ));
+                    }
+                }
                 '}' => {
                     if let Some(open) = open_braces.pop() {
                         closing_braces[open] = Some(index);
@@ -3959,12 +3981,12 @@ impl SimpleGlob {
         let tokens = parse_glob_tokens(&chars, 0, chars.len(), &closing_braces);
         let mut states = vec![GlobState::Accept];
         let start = build_glob_states(&tokens, 0, &mut states);
-        Self {
+        Ok(Self {
             states,
             start,
             // A pattern without `/` matches the file name at any depth.
             matches_file_name: !pattern.contains('/'),
-        }
+        })
     }
 
     fn is_match(&self, relative_path: &str) -> bool {
@@ -4899,6 +4921,57 @@ mod tests {
         .expect("grep succeeds");
 
         assert_eq!(output, name);
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_aliases_reject_deeply_nested_braces() {
+        let workspace = write_glob_workspace();
+        let pattern = format!("{}a{}", "{".repeat(100), "}".repeat(100));
+
+        let glob_err = handle_text(
+            &workspace,
+            HarnessAliasHandler::Glob,
+            "Glob",
+            json!({ "pattern": &pattern }),
+        )
+        .await
+        .expect_err("deeply nested glob should fail");
+        let grep_err = handle_text(
+            &workspace,
+            HarnessAliasHandler::Grep,
+            "Grep",
+            json!({ "pattern": "NEEDLE", "glob": &pattern }),
+        )
+        .await
+        .expect_err("deeply nested grep glob should fail");
+
+        assert!(
+            matches!(&glob_err, FunctionCallError::RespondToModel(message) if message.contains("deeper than 32 levels")),
+            "unexpected error: {glob_err:?}"
+        );
+        assert!(
+            matches!(&grep_err, FunctionCallError::RespondToModel(message) if message.contains("deeper than 32 levels")),
+            "unexpected error: {grep_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_alias_rejects_overlong_pattern() {
+        let workspace = write_glob_workspace();
+
+        let err = handle_text(
+            &workspace,
+            HarnessAliasHandler::Glob,
+            "Glob",
+            json!({ "pattern": format!("{}Z", "*".repeat(256)) }),
+        )
+        .await
+        .expect_err("overlong glob should fail");
+
+        assert!(
+            matches!(&err, FunctionCallError::RespondToModel(message) if message.contains("longer than 256 characters")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]
