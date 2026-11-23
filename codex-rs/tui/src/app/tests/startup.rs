@@ -841,6 +841,25 @@ async fn unattended_modals_survive_unfinished_terminal_input() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    // A rewind must not advertise an editable prompt while typeahead is still draining.
+    crossterm::event::buffer_input(b"\x1b[200~unfinished")?;
+    let transition = ThreadTransition::PromptReverted(thread_id);
+    app.finish_thread_input_drain(&mut tui, transition);
+    assert!(!app.can_read_terminal_after_thread_switch(&tui, &app_event_rx));
+    assert!(
+        !std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::InsertHistoryCell(_))),
+        "premature rewind notice"
+    );
+    crossterm::event::buffer_input(b"\x1b[201~\r")?;
+    app.finish_thread_input_drain(&mut tui, transition);
+    assert!(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::InsertHistoryCell(_))),
+        "missing rewind notice"
+    );
+    assert!(app.can_read_terminal_after_thread_switch(&tui, &app_event_rx));
+
     crossterm::event::buffer_input(b"\x1b]10;")?;
     let request = exec_approval_request(thread_id, "turn-1", "call-1", /*approval_id*/ None);
     let _ = app
@@ -1073,7 +1092,7 @@ async fn auto_declined_mcp_elicitations_do_not_leave_startup_quarantine_armed() 
 }
 
 #[tokio::test]
-async fn startup_draft_handoff_recognizes_late_user_input_as_new_protected_view() -> Result<()> {
+async fn startup_draft_handoff_protects_delayed_question_until_resolved() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
     app.enqueue_primary_thread_session(
@@ -1117,12 +1136,25 @@ async fn startup_draft_handoff_recognizes_late_user_input_as_new_protected_view(
     assert!(!app.chat_widget.has_active_view());
     app.handle_thread_event_now(event);
 
-    assert!(app.chat_widget.has_active_view());
+    assert!(!app.chat_widget.has_active_view());
+    assert!(app.chat_widget.has_pending_protected_request());
+    app.chat_widget.dismiss_app_server_request(
+        &crate::app::app_server_requests::ResolvedAppServerRequest::UserInput {
+            call_id: "call-1".to_string(),
+        },
+    );
+    assert!(!app.chat_widget.has_pending_protected_request());
     assert_eq!(app.chat_widget.composer_text_with_pending(), "x");
     while let Ok(event) = app_event_rx.try_recv() {
         assert!(
-            !matches!(event, AppEvent::CodexOp(Op::UserInputAnswer { .. })),
-            "showing the protected user input request must not submit an answer: {event:?}"
+            !matches!(
+                event,
+                AppEvent::SubmitThreadOp {
+                    op: Op::UserInputAnswer { .. },
+                    ..
+                }
+            ),
+            "dismissing the delayed question must not submit an answer: {event:?}"
         );
     }
 

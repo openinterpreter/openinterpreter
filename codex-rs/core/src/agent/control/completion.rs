@@ -104,15 +104,25 @@ impl LocalAgentControl {
             /*trigger_turn*/ false,
         );
         communication.id = Some(ResponseItemId::with_suffix("amsg", uuid::Uuid::now_v7()));
-        if let Err(err) = self
+        let delivery = self
             .send_inter_agent_communication(
                 parent_thread_id,
                 communication,
                 AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id),
                 TurnStartOptions::default(),
             )
-            .await
-        {
+            .await;
+        if let Some(metrics) = codex_otel::global() {
+            let _ = metrics.counter(
+                "codex.multi_agent.result_delivery",
+                /*inc*/ 1,
+                &[(
+                    "outcome",
+                    if delivery.is_ok() { "queued" } else { "failed" },
+                )],
+            );
+        }
+        if let Err(err) = delivery {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
             return;
         }

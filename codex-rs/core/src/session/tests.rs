@@ -7,6 +7,8 @@ use codex_protocol::ContextWindowId;
 use codex_protocol::RequestCountry;
 use codex_thread_store::ThreadPersistenceMetadata;
 
+#[path = "compaction_replay_tests.rs"]
+mod compaction_replay_tests;
 #[path = "mailbox_prewarm_tests.rs"]
 mod mailbox_prewarm_tests;
 

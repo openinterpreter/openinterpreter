@@ -4,12 +4,15 @@
 use crate::AppServerEvent;
 use crate::RequestResult;
 use crate::TypedRequestError;
+use crate::cloud_backend::CloudTitleClient;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
+use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStartParams;
 use std::collections::HashMap;
@@ -18,8 +21,17 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+
+/// Rejection from the original network policy during Cloud recovery.
+pub const CLOUD_RECOVERY_NETWORK_BLOCKED: &str =
+    "The current network policy blocks cloud reconnection.";
+
+pub(super) const MAX_RECOVERY_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Operations the cloud worker must handle without forwarding to another backend.
 /// Unsupported operations must return an explicit error; they must not claim success.
@@ -40,6 +52,15 @@ pub enum CloudOperation {
         project: codex_cloud_client::ProjectEnvironment,
     },
     SubmitUserMessage(Box<TurnStartParams>),
+    ResumeDisconnectedThread {
+        thread_id: String,
+        require_history: bool,
+        timeout: Duration,
+        dispatched: oneshot::Sender<()>,
+        release: oneshot::Receiver<oneshot::Sender<io::Result<()>>>,
+    },
+    /// Apply the result of a name write that already succeeded outside the command queue.
+    ThreadNameSaved(ThreadSetNameParams),
     Notify(ClientNotification),
     Resolve {
         request_id: RequestId,
@@ -68,6 +89,29 @@ pub struct CloudCommand {
     pub response: oneshot::Sender<io::Result<RequestResult>>,
 }
 
+/// Allows the worker to install a held stream after the caller reads its history.
+/// Dropping the token cancels that replacement.
+pub struct CloudRecoveryRelease {
+    release: oneshot::Sender<oneshot::Sender<io::Result<()>>>,
+    timeout: Duration,
+}
+
+impl CloudRecoveryRelease {
+    pub async fn install(self) -> io::Result<()> {
+        let (ack, mut installed) = oneshot::channel();
+        let closed = || io::Error::new(io::ErrorKind::BrokenPipe, "Cloud reconnection expired.");
+        self.release.send(ack).map_err(|_| closed())?;
+        let response = match tokio::time::timeout(self.timeout, &mut installed).await {
+            Ok(result) => return result.map_err(|_| closed())?,
+            Err(_) => {
+                installed.close();
+                installed.try_recv().ok()
+            }
+        };
+        response.unwrap_or_else(|| Err(io::ErrorKind::TimedOut.into()))
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) enum IdleReconnect {
     #[default]
@@ -81,7 +125,8 @@ pub(super) enum IdleReconnect {
 pub struct CloudRequestHandle {
     pub(super) reconnect: tokio::sync::watch::Sender<IdleReconnect>,
     commands: mpsc::Sender<CloudCommand>,
-    catalog: Option<Arc<codex_cloud_client::Client>>,
+    native: Option<Arc<codex_cloud_client::Client>>,
+    title_client: Option<Arc<CloudTitleClient>>,
 }
 
 /// Tracks only losses queued for delivery. The worker remains the sole owner
@@ -147,12 +192,13 @@ impl CloudClient {
         mpsc::Receiver<CloudCommand>,
         mpsc::UnboundedSender<AppServerEvent>,
     ) {
-        Self::channel_with_catalog(capacity, /*catalog*/ None)
+        Self::channel_with_native(capacity, /*native*/ None, /*title_client*/ None)
     }
 
-    pub(super) fn channel_with_catalog(
+    pub(super) fn channel_with_native(
         capacity: usize,
-        catalog: Option<codex_cloud_client::Client>,
+        native: Option<codex_cloud_client::Client>,
+        title_client: Option<CloudTitleClient>,
     ) -> (
         Self,
         mpsc::Receiver<CloudCommand>,
@@ -166,7 +212,8 @@ impl CloudClient {
                 handle: CloudRequestHandle {
                     commands,
                     reconnect: Default::default(),
-                    catalog: catalog.map(Arc::new),
+                    native: native.map(Arc::new),
+                    title_client: title_client.map(Arc::new),
                 },
                 events: event_receiver,
             },
@@ -237,6 +284,47 @@ impl CloudClient {
 }
 
 impl CloudRequestHandle {
+    /// Generate metadata with Cloud's own account, outside its conversation command queue.
+    pub async fn generate_thread_title(
+        &self,
+        model: &str,
+        effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+        prompt: String,
+        schema: serde_json::Value,
+    ) -> color_eyre::Result<String> {
+        let client = self
+            .title_client
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Cloud title generation is unavailable"))?;
+        client.generate(model, effort, prompt, schema).await
+    }
+
+    /// Read the saved title even when another Cloud conversation owns the attachment.
+    pub async fn read_native_thread_name(
+        &self,
+        thread_id: &str,
+    ) -> Option<Result<Option<String>, codex_cloud_client::Error>> {
+        Some(self.native.as_ref()?.read_thread_name(thread_id).await)
+    }
+
+    /// Save an automatic name without occupying the conversation command queue.
+    pub async fn save_native_thread_name(
+        &self,
+        params: ThreadSetNameParams,
+    ) -> Option<color_eyre::Result<()>> {
+        let client = self.native.as_ref()?;
+        Some(
+            async {
+                client
+                    .set_thread_name(&params.thread_id, &params.name)
+                    .await?;
+                self.unit(CloudOperation::ThreadNameSaved(params)).await?;
+                Ok(())
+            }
+            .await,
+        )
+    }
+
     /// Accept a quiet Attach only for the conversation displayed by the caller.
     pub fn reconnect_idle_thread(&self, thread_id: &str) -> bool {
         self.reconnect.send_if_modified(|state| {
@@ -250,9 +338,41 @@ impl CloudRequestHandle {
         })
     }
 
+    pub async fn resume_disconnected_thread(
+        &self,
+        thread_id: String,
+        require_history: bool,
+        timeout: Duration,
+    ) -> Result<(Option<ThreadResumeResponse>, CloudRecoveryRelease), TypedRequestError> {
+        let (release, held) = oneshot::channel();
+        let (dispatched, dispatch) = oneshot::channel();
+        let request = self.send(CloudOperation::ResumeDisconnectedThread {
+            thread_id,
+            require_history,
+            timeout,
+            dispatched,
+            release: held,
+        });
+        // Bound time in the queue separately so it cannot eat into the
+        // worker's backoff and Attach budget. Prefer a ready response on expiry.
+        let watchdog = async {
+            if tokio::time::timeout(timeout, dispatch).await.is_ok() {
+                tokio::time::sleep(timeout.saturating_add(MAX_RECOVERY_BACKOFF)).await;
+            }
+        };
+        let response = tokio::select! {
+            biased;
+            result = request => result,
+            () = watchdog => Err(io::ErrorKind::TimedOut.into()),
+        };
+        let settings: Option<ThreadResumeResponse> =
+            crate::decode_typed_response("thread/resume", response)?;
+        Ok((settings, CloudRecoveryRelease { release, timeout }))
+    }
+
     /// Whether a completed model read still belongs to the bound Cloud account.
     pub fn model_catalog_is_current(&self) -> bool {
-        self.catalog
+        self.native
             .as_ref()
             .is_none_or(|catalog| catalog.model_catalog_is_current())
     }
@@ -338,7 +458,8 @@ impl CloudRequestHandle {
             Self {
                 commands,
                 reconnect: self.reconnect.clone(),
-                catalog: None,
+                native: None,
+                title_client: None,
             },
         ))
     }
@@ -375,8 +496,7 @@ impl CloudRequestHandle {
 
     pub(crate) async fn request(&self, request: ClientRequest) -> io::Result<RequestResult> {
         // Catalog reads must not occupy the serialized send and attachment lane.
-        if let (Some(catalog), ClientRequest::ModelList { params, .. }) = (&self.catalog, &request)
-        {
+        if let (Some(catalog), ClientRequest::ModelList { params, .. }) = (&self.native, &request) {
             // Keep the catalog HTTP state out of the shared request future.
             return Ok(Box::pin(Self::model_list(catalog, params)).await);
         }

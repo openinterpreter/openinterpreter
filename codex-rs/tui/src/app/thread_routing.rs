@@ -165,13 +165,14 @@ impl App {
         }
     }
 
-    pub(super) fn retain_subscriptions_for_fork(&mut self) {
-        // Tasks can start while the fork RPC is pending.
+    pub(super) fn retain_thread_subscriptions(&mut self) {
+        // Keep approvals routable while leaving the current task.
         for id in self
             .thread_event_channels
             .keys()
             .copied()
             .chain(self.agent_navigation.tracked_thread_ids())
+            .chain(self.current_displayed_thread_id())
             .filter(|id| {
                 !self.side_threads.contains_key(id)
                     && !self
@@ -879,7 +880,11 @@ impl App {
             }
             AppCommand::SetThreadName { name } => {
                 let name = name.to_string();
-                app_server.thread_set_name(thread_id, name.clone()).await?;
+                if let Err(error) = app_server.thread_set_name(thread_id, name.clone()).await {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to rename thread: {error}"));
+                    return Ok(true);
+                }
                 self.chat_widget.expect_manual_thread_name(thread_id, name);
                 self.cancel_thread_title_generation(thread_id);
                 Ok(true)
@@ -1117,11 +1122,51 @@ impl App {
     pub(super) async fn enqueue_thread_notification(
         &mut self,
         thread_id: ThreadId,
-        notification: ServerNotification,
+        mut notification: ServerNotification,
     ) -> Result<()> {
         self.deliver_background_voice_notification(thread_id, &notification);
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
+        }
+        // Cloud attaches before reading history. The live stream can repeat events
+        // from the snapshot, including a completion that would release queued input.
+        if matches!(self.app_server_target, AppServerTarget::Cloud)
+            && matches!(
+                notification,
+                ServerNotification::TurnStarted(_)
+                    | ServerNotification::TurnCompleted(_)
+                    | ServerNotification::ItemCompleted(_)
+            )
+            && self.active_thread_id == Some(thread_id)
+            && let Some(channel) = self.thread_event_channels.get(&thread_id)
+            && channel.recovered_cloud_history
+        {
+            let store = channel.store.lock().await;
+            if store.turns.iter().any(|turn| match &mut notification {
+                ServerNotification::TurnStarted(event) => turn.id == event.turn.id,
+                ServerNotification::TurnCompleted(event) => {
+                    turn.id == event.turn.id
+                        && turn.status != TurnStatus::InProgress
+                        && turn.status == event.turn.status
+                }
+                ServerNotification::ItemCompleted(event) if turn.id == event.turn_id => {
+                    match &mut event.item.payload {
+                        ThreadItemPayload::UserMessage { .. } => {
+                            turn.items.iter().any(|item| item.id() == event.item.id())
+                        }
+                        ThreadItemPayload::AgentMessage { questions, .. }
+                            if turn.status != TurnStatus::InProgress =>
+                        {
+                            *questions = None;
+                            false
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            }) {
+                return Ok(());
+            }
         }
         self.track_side_chat_title(thread_id, &notification);
         if self.current_displayed_thread_id() == Some(thread_id)
@@ -1423,6 +1468,9 @@ impl App {
                 .unwrap_or_default(),
         );
         session.thread_id = thread_id;
+        // The primary session supplies defaults. The new thread supplies its own fork parent.
+        session.set_fork_parent(notification.thread.forked_from_id.as_deref());
+        session.daybreak_enabled = notification.thread.daybreak_enabled.unwrap_or(false);
         session.windows_sandbox_host = crate::windows_sandbox::host_from_environments(
             notification.thread.environments.as_deref(),
         );

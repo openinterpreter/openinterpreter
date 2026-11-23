@@ -1226,6 +1226,7 @@ pub async fn run_main(
                 token_usage: TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                archive_warnings: Vec::new(),
                 disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::UserRequested,
@@ -1310,6 +1311,7 @@ async fn run_ratatui_app(
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
                         resume_hint: None,
+                        archive_warnings: Vec::new(),
                         disconnect_info: None,
                         update_action: Some(action),
                         exit_reason: ExitReason::UserRequested,
@@ -1488,6 +1490,7 @@ async fn run_ratatui_app(
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                archive_warnings: Vec::new(),
                 disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::UserRequested,
@@ -1554,6 +1557,7 @@ async fn run_ratatui_app(
             token_usage: crate::token_usage::TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(format!(
@@ -1652,6 +1656,7 @@ async fn run_ratatui_app(
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
                         resume_hint: None,
+                        archive_warnings: Vec::new(),
                         disconnect_info: None,
                         update_action: None,
                         exit_reason: ExitReason::UserRequested,
@@ -1736,6 +1741,7 @@ async fn run_ratatui_app(
                     token_usage: crate::token_usage::TokenUsage::default(),
                     thread_id: None,
                     resume_hint: None,
+                    archive_warnings: Vec::new(),
                     disconnect_info: None,
                     update_action: None,
                     exit_reason: ExitReason::UserRequested,
@@ -1769,6 +1775,7 @@ async fn run_ratatui_app(
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                archive_warnings: Vec::new(),
                 disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::UserRequested,
@@ -1959,10 +1966,19 @@ async fn run_ratatui_app(
                     token_usage: crate::token_usage::TokenUsage::default(),
                     thread_id: None,
                     resume_hint: None,
+                    archive_warnings: Vec::new(),
                     disconnect_info: None,
                     update_action: None,
                     exit_reason: ExitReason::UserRequested,
                 });
+            }
+            // Startup cannot return to the overview's reconnect loop until bootstrap completes.
+            if let codex_app_server_client::AppServerRequestHandle::Remote(handle) =
+                app_server.request_handle()
+                && handle.is_closed()
+            {
+                shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
+                color_eyre::eyre::bail!(onboarding::SETUP_CONNECTION_LOST);
             }
             if !uses_remote_workspace {
                 config = load_config_or_exit_with_fallback_cwd(

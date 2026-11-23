@@ -17,6 +17,35 @@ pub(crate) struct ThreadIdRequest {
 }
 
 #[derive(Clone, prost::Message)]
+pub(crate) struct SetThreadNameRequest {
+    #[prost(string, tag = "1")]
+    pub thread_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct ReadThreadResponse {
+    #[prost(message, optional, tag = "1")]
+    pub thread: Option<ThreadName>,
+}
+
+#[derive(Clone, prost::Message)]
+#[prost(skip_debug)]
+pub(crate) struct ThreadName {
+    #[prost(string, optional, tag = "14")]
+    pub id: Option<String>,
+    #[prost(string, optional, tag = "17")]
+    pub name: Option<String>,
+}
+
+impl std::fmt::Debug for ThreadName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThreadName([redacted])")
+    }
+}
+
+#[derive(Clone, prost::Message)]
 pub(crate) struct UnarchiveResponse {
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub thread: Option<Bytes>,

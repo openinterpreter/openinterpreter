@@ -2106,6 +2106,9 @@ pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    ApiKeySpendLimitExceeded,
+    ProjectSpendLimitExceeded,
+    OrganizationSpendLimitExceeded,
     RateLimitExceeded,
     FlexUnavailable,
     ServerOverloaded,
@@ -2149,6 +2152,16 @@ pub enum CodexErrorInfo {
 }
 
 impl CodexErrorInfo {
+    pub fn is_usage_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::UsageLimitExceeded
+                | Self::ApiKeySpendLimitExceeded
+                | Self::ProjectSpendLimitExceeded
+                | Self::OrganizationSpendLimitExceeded
+        )
+    }
+
     /// Whether this error should mark the current turn as failed when replaying history.
     pub fn affects_turn_status(&self) -> bool {
         match self {
@@ -2156,6 +2169,9 @@ impl CodexErrorInfo {
             Self::ContextWindowExceeded
             | Self::SessionBudgetExceeded
             | Self::UsageLimitExceeded
+            | Self::ApiKeySpendLimitExceeded
+            | Self::ProjectSpendLimitExceeded
+            | Self::OrganizationSpendLimitExceeded
             | Self::RateLimitExceeded
             | Self::FlexUnavailable
             | Self::ServerOverloaded

@@ -9142,6 +9142,7 @@ async fn make_test_app() -> Box<App> {
         transcript_reflow: TranscriptReflowState::default(),
         initial_history_replay_buffer: None,
         pending_thread_switch_resets: 0,
+        pending_input_drain: None,
         scrollback_has_older_history: false,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -9179,6 +9180,7 @@ async fn make_test_app() -> Box<App> {
         background_voice: None,
         background_voice_error: None,
         temporary_structured_requests: HashMap::new(),
+        cloud_title_shutdown: Default::default(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
@@ -9285,6 +9287,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             pending_thread_switch_resets: 0,
+            pending_input_drain: None,
             scrollback_has_older_history: false,
             enhanced_keys_supported: false,
             keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -9322,6 +9325,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             background_voice: None,
             background_voice_error: None,
             temporary_structured_requests: HashMap::new(),
+            cloud_title_shutdown: Default::default(),
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
@@ -10194,6 +10198,7 @@ async fn directive_only_completion_removes_streamed_directive() -> Result<()> {
     app.handle_consolidate_agent_message(
         &mut tui,
         AgentMarkdownCell::new(String::new(), Path::new("/tmp")),
+        /*emitted_cells*/ 1,
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;
@@ -10241,6 +10246,7 @@ async fn required_stream_reflow_during_capped_initial_replay_survives_transcript
                 .into(),
             Path::new("/tmp"),
         ),
+        /*emitted_cells*/ 1,
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;

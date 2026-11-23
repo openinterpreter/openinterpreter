@@ -2563,7 +2563,17 @@ fn websocket_error_detail(err: &ApiError) -> String {
             "handshake error: incomplete response: [redacted]".to_string()
         }
         // Provider-supplied messages and immediate-close reasons may contain
-        // credentials or request data. Retain the error category, not its text.
+        // credentials or request data. Only these fixed variants may be formatted.
+        ApiError::ContentFilter
+        | ApiError::WebsocketMessageTooLarge
+        | ApiError::ContextWindowExceeded
+        | ApiError::SpendLimitExceeded(_)
+        | ApiError::QuotaExceeded
+        | ApiError::UsageNotIncluded
+        | ApiError::SessionBudgetExceeded
+        | ApiError::FlexUnavailable
+        | ApiError::ServerOverloaded { .. }
+        | ApiError::PolicyCapacityUnavailable { .. } => format!("handshake error: {err}"),
         ApiError::Retryable { .. } => "handshake error: retryable error: [redacted]".to_string(),
         ApiError::RateLimitExceeded { .. } => {
             "handshake error: rate limit exceeded: [redacted]".to_string()

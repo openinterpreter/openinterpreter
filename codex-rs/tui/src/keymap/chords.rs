@@ -43,29 +43,45 @@ const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
 
 /// Compact set of keymap contexts that share one active input path.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct KeymapContextSet(u32);
+pub(crate) struct KeymapContextSet(u64);
 
-const ACTIVITY_FOCUS: u32 = 1 << 13;
-const TRANSCRIPT_CLOSE: u32 = 1 << 15;
-const WARNINGS_FOCUS: u32 = 1 << 16;
-const VOICE_TOGGLE: u32 = 1 << 17;
-const RAW_KEY_CAPTURE: u32 = 1 << 18;
-const VOICE_TOGGLE_BLOCKED: u32 = 1 << 19;
-const TRANSCRIPT_ACTIONS: u32 = 1 << 20;
-const BACKEND_CYCLING: u32 = 1 << 21;
-const SIDE_PANE: u32 = 1 << 22;
-const MAIN_COMPOSER_FOCUS: u32 = 1 << 23;
-const PANE_DIRECTION: u32 = 1 << 24;
-const OPEN_PANE: u32 = 1 << 25;
-const FOCUSED_SIDE_PANE: u32 = 1 << 26;
-const SIDEBAR_CHOOSER: u32 = 1 << 27;
-const SIDEBAR_RESIZE: u32 = 1 << 28;
-const FOCUSED_SIDEBAR: u32 = 1 << 29;
-const TRANSCRIPT_SELECT: u32 = 1 << 30;
+const ACTIVITY_FOCUS: u64 = 1 << 13;
+const TRANSCRIPT_CLOSE: u64 = 1 << 15;
+const WARNINGS_FOCUS: u64 = 1 << 16;
+const VOICE_TOGGLE: u64 = 1 << 17;
+const RAW_KEY_CAPTURE: u64 = 1 << 18;
+const VOICE_TOGGLE_BLOCKED: u64 = 1 << 19;
+const TRANSCRIPT_ACTIONS: u64 = 1 << 20;
+const BACKEND_CYCLING: u64 = 1 << 21;
+const SIDE_PANE: u64 = 1 << 22;
+const MAIN_COMPOSER_FOCUS: u64 = 1 << 23;
+const PANE_DIRECTION: u64 = 1 << 24;
+const OPEN_PANE: u64 = 1 << 25;
+const FOCUSED_SIDE_PANE: u64 = 1 << 26;
+const SIDEBAR_CHOOSER: u64 = 1 << 27;
+const SIDEBAR_RESIZE: u64 = 1 << 28;
+const FOCUSED_SIDEBAR: u64 = 1 << 29;
+const TRANSCRIPT_SELECT: u64 = 1 << 30;
+const COMPOSER_EDIT_ONLY: u64 = 1 << 31;
+const CLOUD_ENVIRONMENT_SELECTION: u64 = 1 << 32;
+const COMPOSER_SUBMIT: u64 = 1 << 33;
 
-const TRANSCRIPT_BROWSING: u32 = 1 << 14;
+const TRANSCRIPT_BROWSING: u64 = 1 << 14;
 
 impl KeymapContextSet {
+    /// Retain submission while an argument suggestion is open.
+    pub(crate) const fn with_composer_submit(self) -> Self {
+        Self(self.0 | COMPOSER_SUBMIT)
+    }
+
+    pub(crate) const fn composer_edit_only() -> Self {
+        Self(COMPOSER_EDIT_ONLY)
+    }
+
+    pub(crate) const fn without_composer_edits(self) -> Self {
+        Self(self.0 | COMPOSER_EDIT_ONLY)
+    }
+
     pub(crate) const fn new(context: KeymapContext) -> Self {
         Self(context_bit(context))
     }
@@ -197,6 +213,19 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if self.0 & COMPOSER_SUBMIT != 0
+            && action.context == KeymapContext::Composer
+            && action.action == "submit"
+        {
+            return true;
+        }
+        if self.0 & COMPOSER_EDIT_ONLY != 0 && action.context == KeymapContext::Composer {
+            let edit = matches!(action.action, "undo" | "redo");
+            return edit != self.contains(KeymapContext::Composer);
+        }
+        if action.context == KeymapContext::Composer && matches!(action.action, "undo" | "redo") {
+            return self.contains(KeymapContext::Composer) && self.contains(KeymapContext::Editor);
+        }
         if action.context == KeymapContext::Pager && action.action == "mark_markdown" {
             return self.0 & TRANSCRIPT_SELECT != 0;
         }
@@ -261,7 +290,7 @@ impl KeymapContextSet {
     }
 }
 
-const fn context_bit(context: KeymapContext) -> u32 {
+const fn context_bit(context: KeymapContext) -> u64 {
     1 << match context {
         KeymapContext::Global => 0,
         KeymapContext::Chat => 1,

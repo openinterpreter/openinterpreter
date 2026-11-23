@@ -83,6 +83,7 @@ pub(crate) fn primary_environment_cwd(
 impl ThreadSessionState {
     pub(crate) fn set_fork_parent(&mut self, parent: Option<&str>) {
         let parent = parent.and_then(|id| ThreadId::from_string(id).ok());
+        // The cached title belongs to the old parent. Drop it if the parent changes or is absent.
         if self.forked_from_id != parent {
             self.fork_parent_title = None;
         }

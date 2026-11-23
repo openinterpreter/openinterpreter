@@ -41,6 +41,7 @@ use response_delivery::ResponseDelivery;
 
 use crate::CodexResponsesHeaders;
 use crate::PromptCacheKey;
+use crate::UsageAttributionPolicy;
 use crate::tools::ExecutedToolCalls;
 use async_channel::Sender;
 use codex_api::AgentIdentityTelemetry;
@@ -330,6 +331,7 @@ impl RequestRouteTelemetry {
 /// call site.
 #[derive(Debug, Clone)]
 pub struct ModelClient {
+    usage_attribution_policy: UsageAttributionPolicy,
     state: Arc<ModelClientState>,
     agent_identity_policy: AgentIdentityAuthPolicy,
     prompt_cache_key_policy: PromptCacheKey,
@@ -685,6 +687,7 @@ impl ModelClient {
             prompt_cache_key_policy: PromptCacheKey::default(),
             session_id_override: None,
             codex_responses_headers: None,
+            usage_attribution_policy: UsageAttributionPolicy::default(),
             event_sender: None,
             http_client_factory,
             harness: Harness::Native,
@@ -725,7 +728,7 @@ impl ModelClient {
         prompt_cache_key: PromptCacheKey,
         session_id_override: Option<String>,
         event_sender: Sender<ProtocolEvent>,
-        codex_responses_headers: Option<Arc<CodexResponsesHeaders>>,
+        thread_extension_data: &codex_extension_api::ExtensionData,
         api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
         required_cyber_access_programs: Option<
             Arc<cyber_access_program::RequiredCyberAccessPrograms>,
@@ -734,7 +737,11 @@ impl ModelClient {
         self.prompt_cache_key_policy = prompt_cache_key;
         self.session_id_override = session_id_override;
         self.event_sender = Some(event_sender);
-        self.codex_responses_headers = codex_responses_headers;
+        self.codex_responses_headers = thread_extension_data.get::<CodexResponsesHeaders>();
+        self.usage_attribution_policy = thread_extension_data
+            .get::<UsageAttributionPolicy>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
         self.api_key_cyber_access_programs = api_key_cyber_access_programs;
         self.required_cyber_access_programs = required_cyber_access_programs;
         self
@@ -1620,6 +1627,7 @@ impl ModelClient {
     ) -> ApiHeaderMap {
         let mut headers = build_responses_headers(
             self.state.beta_features_header.as_deref(),
+            self.usage_attribution_policy,
             /*turn_state*/ None,
         );
         add_originator_header(&mut headers, self.state.originator.as_str());
@@ -1696,6 +1704,7 @@ impl<'a> ResponsesHttpExecutor<'a> {
             extra_headers: {
                 let mut headers = build_responses_headers(
                     self.client.state.beta_features_header.as_deref(),
+                    self.client.usage_attribution_policy,
                     Some(turn_state),
                 );
                 add_originator_header(&mut headers, self.client.state.originator.as_str());
@@ -3318,11 +3327,18 @@ fn is_guardian_reviewer(responses_headers: &ApiHeaderMap) -> bool {
 ///
 /// - `x-codex-beta-features`: comma-separated beta feature keys enabled for the session.
 /// - `x-codex-turn-state`: sticky routing token captured earlier in the turn.
+/// - `x-codex-exclude`: response fields the client can omit from the stream.
 fn build_responses_headers(
     beta_features_header: Option<&str>,
+    usage_attribution_policy: UsageAttributionPolicy,
     turn_state: Option<&Arc<OnceLock<String>>>,
 ) -> ApiHeaderMap {
     let mut headers = ApiHeaderMap::new();
+    let exclusions = match usage_attribution_policy {
+        UsageAttributionPolicy::Exclude => "tools,usage.attribution",
+        UsageAttributionPolicy::Retain => "tools",
+    };
+    headers.insert("x-codex-exclude", HeaderValue::from_static(exclusions));
     if let Some(value) = beta_features_header
         && !value.is_empty()
         && let Ok(header_value) = HeaderValue::from_str(value)

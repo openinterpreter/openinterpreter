@@ -38,7 +38,7 @@ impl ChatComposer {
         if !text.is_empty() && self.sparkle.draft.get() == sparkle::SparkleDraft::Untouched {
             self.dismiss_sparkle();
         }
-        let started_vim_edit = self.begin_direct_vim_edit();
+        let started_edit = self.begin_direct_edit();
         let elements_before = self
             .draft
             .textarea
@@ -50,8 +50,8 @@ impl ChatComposer {
         }
         self.sync_bash_mode_from_text();
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
     }
 
@@ -71,6 +71,9 @@ impl ChatComposer {
     /// Classify an explicit paste before integrating text shared with the buffered key path.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
         self.flush_pending_paste_burst();
+        if !self.draft.textarea.is_vim_enabled() {
+            self.finish_edit();
+        }
         self.note_sparkle_paste(&pasted);
         self.apply_paste(pasted)
     }
@@ -148,10 +151,21 @@ impl ChatComposer {
         match self.draft.paste_burst.flush_if_due(now) {
             FlushResult::Paste(pasted) => {
                 self.apply_paste(pasted);
+                if !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
+                }
                 true
             }
             FlushResult::Typed(ch) => {
+                let completion_space = self.draft.skill_completion_space_for_char(ch);
+                let started_edit = completion_space.is_some() && self.begin_direct_edit();
+                if let Some(space) = completion_space {
+                    self.draft.textarea.replace_range(space..space + 1, "");
+                }
                 self.insert_str(ch.to_string().as_str());
+                if started_edit || !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
+                }
                 true
             }
             FlushResult::None => false,
@@ -190,7 +204,8 @@ impl ChatComposer {
             query.editor.insert_str(&pasted);
             return true;
         }
-        let started_vim_edit = self.begin_direct_vim_edit();
+        self.draft.textarea_state.get_mut().follow_cursor();
+        let started_edit = self.begin_direct_edit();
         let elements_before = self.draft.textarea.element_payloads();
         // Resolve the target before editing: a selected range is replaced from its start,
         // not from a cursor that may have moved past the selected quote prefix.
@@ -233,8 +248,8 @@ impl ChatComposer {
         self.draft.paste_burst.clear_after_explicit_paste();
         self.reconcile_deleted_elements(elements_before);
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
         true
     }
@@ -254,6 +269,7 @@ impl ChatComposer {
             .paste_burst
             .append_control_char_if_active('\t', now)
         {
+            self.begin_promoted_paste_edit();
             return true;
         }
 

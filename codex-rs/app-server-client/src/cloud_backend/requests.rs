@@ -32,6 +32,27 @@ pub(super) enum Response {
 }
 
 impl Requests {
+    pub(super) fn thread_name_saved(
+        &mut self,
+        params: protocol::ThreadSetNameParams,
+        output: &mpsc::UnboundedSender<crate::AppServerEvent>,
+    ) {
+        if let Some(loaded) = &mut self.loaded
+            && loaded.thread.id == params.thread_id
+        {
+            loaded.thread.name = Some(params.name.clone());
+        }
+        send_notification(
+            output,
+            protocol::ServerNotification::ThreadNameUpdated(
+                protocol::ThreadNameUpdatedNotification {
+                    thread_id: params.thread_id,
+                    thread_name: Some(params.name),
+                },
+            ),
+        );
+    }
+
     pub(super) fn read_thread(
         &self,
         params: &protocol::ThreadReadParams,
@@ -70,6 +91,14 @@ impl Requests {
                     use_paginated_history(thread);
                 }
                 serde_json::to_value(page)?
+            }
+            Request::ThreadSetName { mut params, .. } => {
+                params.name = params.name.trim().to_owned();
+                self.client
+                    .set_thread_name(&params.thread_id, &params.name)
+                    .await?;
+                self.thread_name_saved(params, output);
+                serde_json::to_value(protocol::ThreadSetNameResponse {})?
             }
             Request::ThreadArchive { params, .. } => {
                 self.client.archive_thread(&params.thread_id).await?;

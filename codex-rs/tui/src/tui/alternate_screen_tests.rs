@@ -14,6 +14,50 @@ struct KeyboardScreens {
     alternate_active: bool,
 }
 
+#[test]
+fn refreshed_mouse_policy_applies_to_owned_transcript_and_overlays() {
+    for owned in [false, true] {
+        let screen = AlternateScreen::default();
+        let mut output = Vec::new();
+        let mut terminal = vt100::Parser::new(
+            /*rows*/ 24, /*cols*/ 80, /*scrollback_len*/ 0,
+        );
+        let mut input = OverlayInput::Default;
+        screen
+            .enter(&mut output, input.captures_mouse(owned))
+            .unwrap();
+        for next in [
+            OverlayInput::Default,
+            OverlayInput::Transcript,
+            OverlayInput::StaticPager,
+        ] {
+            for mouse in [
+                tmux::MouseCapture::Enabled,
+                tmux::MouseCapture::DisabledByTmux,
+                tmux::MouseCapture::Enabled,
+            ] {
+                screen.set_tmux_mouse(mouse);
+                input.apply(&screen, &mut output, next, owned).unwrap();
+                terminal.process(&std::mem::take(&mut output));
+                let capture = next.captures_mouse(owned);
+                let expected = if mouse == tmux::MouseCapture::Enabled && capture {
+                    vt100::MouseProtocolMode::AnyMotion
+                } else {
+                    vt100::MouseProtocolMode::None
+                };
+                assert_eq!(
+                    (
+                        terminal.screen().alternate_screen(),
+                        terminal.screen().mouse_protocol_mode()
+                    ),
+                    (true, expected),
+                );
+            }
+        }
+        screen.leave(&mut output).unwrap();
+    }
+}
+
 impl KeyboardScreens {
     fn process(&mut self, output: &[u8]) {
         for sequence in std::str::from_utf8(output).unwrap().split('\x1b') {

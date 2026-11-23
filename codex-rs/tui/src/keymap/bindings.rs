@@ -135,19 +135,31 @@ impl KeymapActionId {
         {
             return true;
         }
-        self.context.overlaps(other.context)
-            || (self.context == KeymapContext::Global
-                && matches!(
-                    self.action,
-                    "focus_activity" | "find_transcript" | "select_transcript"
-                )
-                && other.context == KeymapContext::List)
-            || (other.context == KeymapContext::Global
-                && matches!(
-                    other.action,
-                    "focus_activity" | "find_transcript" | "select_transcript"
-                )
-                && self.context == KeymapContext::List)
+        let edit = |id: Self| {
+            id.context == KeymapContext::Composer && matches!(id.action, "undo" | "redo")
+        };
+        if edit(self) && other.context.allows_plain_chord_prefix()
+            || edit(other) && self.context.allows_plain_chord_prefix()
+        {
+            return false;
+        }
+        match (self.context, other.context) {
+            // Presets cannot open while a list owns input.
+            (KeymapContext::Chat, KeymapContext::List) => self.action != "open_presets",
+            (KeymapContext::List, KeymapContext::Chat) => other.action != "open_presets",
+
+            // Activity focus, Find, and selection remain available during list navigation.
+            (KeymapContext::Global, KeymapContext::List) => matches!(
+                self.action,
+                "focus_activity" | "find_transcript" | "select_transcript"
+            ),
+            (KeymapContext::List, KeymapContext::Global) => matches!(
+                other.action,
+                "focus_activity" | "find_transcript" | "select_transcript"
+            ),
+
+            _ => self.context.overlaps(other.context),
+        }
     }
 
     pub(crate) fn config_path(self) -> String {
@@ -338,6 +350,8 @@ define_runtime_action_bindings! {
         toggle_shortcuts,
         history_search_previous,
         history_search_next,
+        undo,
+        redo,
     ],
     "editor" => Editor, editor, editor [
         insert_newline,

@@ -278,6 +278,7 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
             AppEvent::ConsolidateAgentMessage {
                 phase,
                 interrupted_item,
+                emitted_cells,
                 source,
                 copy_source,
                 cwd,
@@ -297,6 +298,7 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
                 app.handle_consolidate_agent_message(
                     &mut tui,
                     cell,
+                    emitted_cells,
                     scrollback_reflow,
                     deferred_history_cell,
                 )?;

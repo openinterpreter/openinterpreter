@@ -43,16 +43,6 @@ pub(crate) fn side_frame(
         .join("\n"))
 }
 
-impl App {
-    pub(crate) fn can_read_terminal_after_thread_switch(
-        &self,
-        _tui: &tui::Tui,
-        events: &tokio::sync::mpsc::UnboundedReceiver<crate::app_event::AppEvent>,
-    ) -> bool {
-        self.pending_thread_switch_resets == 0 && events.is_empty()
-    }
-}
-
 pub(super) fn select_catalog_tip(app: &mut App, width: u16, expected: &str) {
     for seed in 0..1024 {
         app.composer_tips = super::composer_hints::ComposerTips::new(seed);
@@ -120,6 +110,7 @@ pub(crate) async fn make_test_app() -> App {
         transcript_reflow: TranscriptReflowState::default(),
         initial_history_replay_buffer: None,
         pending_thread_switch_resets: 0,
+        pending_input_drain: None,
         scrollback_has_older_history: false,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -157,6 +148,7 @@ pub(crate) async fn make_test_app() -> App {
         background_voice: None,
         background_voice_error: None,
         temporary_structured_requests: HashMap::new(),
+        cloud_title_shutdown: Default::default(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),

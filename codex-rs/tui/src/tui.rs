@@ -126,6 +126,11 @@ pub(crate) fn reports_key_releases() -> bool {
     keyboard_modes::reports_key_releases()
 }
 
+pub(crate) fn tmux_mouse_disabled() -> bool {
+    ALTERNATE_SCREEN.is_active()
+        && ALTERNATE_SCREEN.tmux_mouse() == tmux::MouseCapture::DisabledByTmux
+}
+
 fn should_emit_notification(condition: NotificationCondition, terminal_focused: bool) -> bool {
     match condition {
         NotificationCondition::Unfocused => !terminal_focused,
@@ -709,6 +714,12 @@ pub(crate) fn tmux_fullscreen_image_base() -> Option<u32> {
         .map(std::num::NonZeroU32::get)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeferredClear {
+    ThreadSwitch,
+    Replay,
+}
+
 pub struct Tui {
     pub(crate) link_hover: link_pointer::LinkHover,
     frame_requester: FrameRequester,
@@ -719,7 +730,7 @@ pub struct Tui {
     pub(crate) terminal_size_tags: crate::terminal_size_telemetry::LaunchTags,
     pub(crate) terminal: Terminal,
     pending_history_lines: Vec<PendingHistoryLines>,
-    clear_thread_switch_on_draw: bool,
+    clear_on_draw: Option<DeferredClear>,
     screen_size: ScreenSizePolicy,
     ambient_pet_image_state: crate::pets::PetImageRenderState,
     pet_picker_preview_image_state: crate::pets::PetImageRenderState,
@@ -802,7 +813,7 @@ impl Tui {
             event_broker: Arc::new(event_broker),
             terminal,
             pending_history_lines: vec![],
-            clear_thread_switch_on_draw: false,
+            clear_on_draw: None,
             screen_size: ScreenSizePolicy::default(),
             ambient_pet_image_state: crate::pets::PetImageRenderState::default(),
             pet_picker_preview_image_state: crate::pets::PetImageRenderState::default(),
@@ -912,6 +923,11 @@ impl Tui {
         }
     }
 
+    /// Preserve overlay ownership when a temporary onboarding screen selects text.
+    pub(crate) fn overlay_input(&self) -> OverlayInput {
+        self.overlay_input
+    }
+
     /// Never replace a pager's input ownership while reconciling inline question input.
     /// The app calls this on draw after the question's expanded state changes.
     pub(crate) fn set_question_mouse_capture(&mut self, capture: MouseCapture) -> Result<()> {
@@ -926,6 +942,26 @@ impl Tui {
         } else {
             Ok(())
         }
+    }
+
+    // Keep the existing overlay's capture request, including nested /resume,
+    // while a changed tmux policy reconfigures only pointer input.
+    fn refresh_tmux_mouse(&mut self) -> Result<()> {
+        if ALTERNATE_SCREEN.is_active()
+            && let Some(mouse) = self
+                .event_broker
+                .size_monitor
+                .as_ref()
+                .and_then(size_monitor::SizeMonitor::mouse)
+        {
+            if mouse == tmux::MouseCapture::DisabledByTmux && mouse != ALTERNATE_SCREEN.tmux_mouse()
+            {
+                self.frame_requester.schedule_frame();
+            }
+            ALTERNATE_SCREEN.set_tmux_mouse(mouse);
+            self.set_overlay_input(self.overlay_input)?;
+        }
+        Ok(())
     }
 
     pub fn set_notification_settings(
@@ -1011,6 +1047,23 @@ impl Tui {
         let drain_result = discard_pending_terminal_input();
         self.resume_events();
         drain_result
+    }
+
+    /// Keep terminal events paused between batches. The caller retries before showing
+    /// the restored composer or allowing fresh input.
+    pub(crate) fn discard_pending_input_after_thread_transition(&mut self) -> std::task::Poll<()> {
+        self.pause_events();
+        let result = self.event_broker.drain_transition_input();
+        if let Err(err) = result {
+            if err.kind() == std::io::ErrorKind::TimedOut {
+                return std::task::Poll::Pending;
+            }
+            tracing::warn!(%err, "failed to discard input after thread transition");
+        }
+        self.resume_events();
+        // Any batch can consume a resize. Sample geometry after the final one.
+        self.schedule_screen_size_recheck(Duration::ZERO);
+        std::task::Poll::Ready(())
     }
 
     /// Temporarily restore terminal state to run an external interactive program `f`.
@@ -1153,6 +1206,28 @@ impl Tui {
         Box::pin(stream)
     }
 
+    /// Overlays and in-place history edits can flush a replay before the scheduled draw.
+    fn flush_history_before_draw(&mut self) -> Result<()> {
+        let flush = |tui: &mut Self| {
+            let screen_size = tui.terminal.last_known_screen_size;
+            Self::flush_pending_history_lines(
+                &mut tui.terminal,
+                &mut tui.pending_history_lines,
+                &mut tui.retained_images,
+                tui.scrollback,
+                screen_size,
+            )
+        };
+        if self.has_deferred_replay_clear() {
+            stdout().sync_update(|_| {
+                self.apply_deferred_clear()?;
+                flush(self)
+            })?
+        } else {
+            flush(self)
+        }
+    }
+
     /// Enter alternate screen and expand the viewport to full terminal size, saving the current
     /// inline viewport for restoration when leaving.
     pub fn enter_alt_screen(&mut self) -> Result<()> {
@@ -1161,14 +1236,7 @@ impl Tui {
         }
         // History queued before opening an overlay belongs to the inline transcript.
         // Flush before switching screens or expanding an inline overlay's viewport.
-        let screen_size = self.terminal.last_known_screen_size;
-        Self::flush_pending_history_lines(
-            &mut self.terminal,
-            &mut self.pending_history_lines,
-            &mut self.retained_images,
-            self.scrollback,
-            screen_size,
-        )?;
+        self.flush_history_before_draw()?;
         if !self.alt_screen_enabled {
             return Ok(());
         }
@@ -1183,6 +1251,9 @@ impl Tui {
             self.terminal.backend_mut(),
             self.overlay_input.captures_mouse(self.owned_screen),
         );
+        if let Some(monitor) = &self.event_broker.size_monitor {
+            monitor.reset_mouse();
+        }
         self.alt_screen_active
             .store(ALTERNATE_SCREEN.is_active(), Ordering::Relaxed);
         if !self.is_alt_screen_active() {
@@ -1272,33 +1343,71 @@ impl Tui {
 
     pub fn clear_pending_history_lines(&mut self) {
         self.pending_history_lines.clear();
+        if self.has_deferred_replay_clear() {
+            self.clear_on_draw = None;
+        }
     }
 
     pub(crate) fn clear_for_thread_switch(&mut self) -> Result<()> {
-        self.clear_thread_switch_on_draw = false;
+        self.clear_on_draw = None;
         if self.is_alt_screen_active() {
             self.leave_alt_screen()?;
         }
         if self.is_owned_screen() {
             self.terminal.clear()?;
         } else {
+            self.clear_for_replay()?;
+        }
+        Ok(())
+    }
+
+    fn clear_for_replay(&mut self) -> Result<()> {
+        if self.is_alt_screen_active() {
+            self.terminal.clear_visible_screen()?;
+        } else {
             self.terminal.clear_scrollback_and_visible_screen_ansi()?;
-            let mut area = self.terminal.viewport_area;
-            if area.y > 0 {
-                area.y = 0;
-                self.terminal.set_viewport_area(area);
-            }
+        }
+        let mut area = self.terminal.viewport_area;
+        if area.y > 0 {
+            area.y = 0;
+            self.terminal.set_viewport_area(area);
         }
         Ok(())
     }
 
     /// Keep the current frame visible until the next synchronized draw.
     pub(crate) fn defer_thread_switch_clear(&mut self) {
-        self.clear_thread_switch_on_draw = true;
+        self.clear_on_draw = Some(DeferredClear::ThreadSwitch);
     }
 
     pub(crate) fn has_deferred_thread_switch_clear(&self) -> bool {
-        self.clear_thread_switch_on_draw
+        self.clear_on_draw == Some(DeferredClear::ThreadSwitch)
+    }
+
+    /// Replace queued inserts and clear the screen when the replay is painted.
+    /// An empty replay still clears rows removed by rollback.
+    pub(crate) fn queue_history_replay(
+        &mut self,
+        lines: Vec<HyperlinkLine>,
+        wrap_policy: HistoryLineWrapPolicy,
+    ) {
+        self.pending_history_lines.clear();
+        if !self.has_deferred_thread_switch_clear() {
+            self.clear_on_draw = Some(DeferredClear::Replay);
+        }
+        self.insert_history_hyperlink_lines_with_wrap_policy(lines, wrap_policy);
+    }
+
+    pub(crate) fn has_deferred_replay_clear(&self) -> bool {
+        self.clear_on_draw == Some(DeferredClear::Replay)
+    }
+
+    fn apply_deferred_clear(&mut self) -> Result<()> {
+        match self.clear_on_draw.take() {
+            Some(DeferredClear::ThreadSwitch) => self.clear_for_thread_switch(),
+            Some(DeferredClear::Replay) => self.clear_for_replay(),
+            None => Ok(()),
+        }
     }
 
     /// Resize the inline viewport for the resize-reflow path.
@@ -1440,6 +1549,7 @@ impl Tui {
         height: u16,
         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
     ) -> Result<()> {
+        self.refresh_tmux_mouse()?;
         let screen_size = self.take_event_screen_size()?;
         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
         // in the synchronized update.
@@ -1457,15 +1567,13 @@ impl Tui {
         stdout().sync_update(|_| {
             #[cfg(unix)]
             if let Some(prepared) = prepared_resume.take() {
-                self.terminal.invalidate_cursor_state();
-                prepared.apply(
-                    &mut self.terminal,
-                    screen_size,
-                    self.owned_screen,
-                    self.overlay_input.captures_mouse(self.owned_screen),
-                )?;
+                prepared.apply(self, screen_size)?;
             }
 
+            if self.clear_on_draw.is_some() {
+                self.apply_deferred_clear()?;
+                pending_viewport_area = None;
+            }
             if self.owned_screen && !self.is_alt_screen_active() {
                 self.enter_alt_screen()?;
                 pending_viewport_area = None;
@@ -1597,6 +1705,7 @@ impl Tui {
         hud: Option<crate::bottom_pane::ShortcutHud>,
         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
     ) -> Result<()> {
+        self.refresh_tmux_mouse()?;
         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
         // in the synchronized update.
         #[cfg(unix)]
@@ -1609,15 +1718,10 @@ impl Tui {
         stdout().sync_update(|_| {
             #[cfg(unix)]
             if let Some(prepared) = prepared_resume.take() {
-                self.terminal.invalidate_cursor_state();
-                prepared.apply(
-                    &mut self.terminal,
-                    screen_size,
-                    self.owned_screen,
-                    self.overlay_input.captures_mouse(self.owned_screen),
-                )?;
+                prepared.apply(self, screen_size)?;
             }
 
+            self.apply_deferred_clear()?;
             if self.owned_screen && !self.is_alt_screen_active() {
                 self.enter_alt_screen()?;
             }

@@ -86,7 +86,7 @@ impl BottomPane {
         self.composer.set_disable_paste_burst(disabled);
     }
 
-    /// Capture draft content together with the activity timestamp used by delayed approvals.
+    /// Capture draft content together with the activity timestamp used by delayed prompts.
     pub(crate) fn composer_draft_snapshot(&self) -> ComposerDraftSnapshot {
         let mut draft = self.composer.draft_snapshot();
         draft.last_composer_activity_at = self.last_composer_activity_at;
@@ -102,6 +102,14 @@ impl BottomPane {
     pub(crate) fn set_composer_cursor(&mut self, cursor: usize) {
         self.composer.set_current_cursor(cursor);
         self.composer.sync_popups();
+    }
+
+    pub(crate) fn startup_undo_draft(&mut self) -> Option<super::chat_composer::ComposerDraft> {
+        self.composer.capture_startup_undo()
+    }
+
+    pub(crate) fn record_startup_undo(&mut self, destination: super::chat_composer::ComposerDraft) {
+        self.composer.record_startup_undo(destination);
     }
 
     /// Preserve startup-local history and the newest protected-prompt activity timestamp.
@@ -122,9 +130,9 @@ impl BottomPane {
         }
     }
 
-    /// Return whether an approval is waiting to become visible after typing stops.
-    pub(crate) fn has_pending_approval(&self) -> bool {
-        !self.delayed_approval_requests.is_empty()
+    /// Return whether a prompt is waiting to become visible after typing stops.
+    pub(crate) fn has_delayed_prompt(&self) -> bool {
+        !self.delayed_approval_requests.is_empty() || self.delayed_user_input.is_some()
     }
 
     pub(crate) fn composer_paste_deadline(&self) -> Option<Instant> {

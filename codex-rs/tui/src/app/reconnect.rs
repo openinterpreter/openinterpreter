@@ -21,6 +21,7 @@ pub(super) struct ReconnectState {
     pub(super) failed: bool,
     pub(super) presentation: ReconnectPresentation,
     pub(super) seen_version_notice: Option<String>,
+    pub(super) cloud_resume: Option<super::resume_preparation::CloudResume>,
 }
 
 pub(super) struct Reconnected {
@@ -377,6 +378,26 @@ impl App {
         self.app_event_tx = AppEventSender::new(tx);
         self.app_server_backend_id = Some(session.backend_id());
         *app_event_rx = rx;
+        self.pending_thread_switch_resets = 0;
+        self.backtrack.revert_queued = false;
+        for pane in self.sidebars.values_mut() {
+            // Keep attached side chats, but never reuse discovery or creation requests from the
+            // connection whose event channel was just discarded.
+            pane.opening = None;
+            pane.set_discovery(crate::sidebar_chooser::Discovery::Idle);
+            if let Some(creation) = pane.creation.as_mut()
+                && creation.owner != session.backend_id()
+                && matches!(
+                    creation.state,
+                    super::sidebar::CreationState::Waiting { .. }
+                )
+            {
+                creation.state = super::sidebar::CreationState::Failed {
+                    message: "Side chat creation was interrupted by reconnect; retry it.".into(),
+                    cleanup: None,
+                };
+            }
+        }
         // The old timer targets the discarded channel, so a new preview can be scheduled.
         self.config_notification_test_pending = None;
         {

@@ -14,6 +14,7 @@ use grouping::model_name;
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use super::agents_overview_details::AgentsOverviewDetails;
 use super::agents_overview_discovery::HistorySearch;
+use super::agents_overview_discovery::HistorySort;
 use super::agents_overview_discovery::supports_shared_pinning;
 use crate::app_event::AgentsOverviewAction;
 use crate::app_event::AppEvent;
@@ -176,6 +177,7 @@ pub(super) struct AgentsOverviewViewState {
     pub(super) removal: Option<AgentsOverviewAction>,
     pub(super) server_version_notice: Option<String>,
     pub(super) search: String,
+    pub(super) search_sort: HistorySort,
     pub(super) history: Option<HistorySearch>,
     browse_selection: Option<ThreadId>,
     searching: bool,
@@ -204,6 +206,7 @@ impl Default for AgentsOverviewViewState {
             removal: None,
             server_version_notice: None,
             search: String::new(),
+            search_sort: HistorySort::default(),
             history: None,
             browse_selection: None,
             searching: false,
@@ -226,12 +229,15 @@ impl AgentsOverviewViewState {
     }
 
     pub(super) fn restart_history_search(&mut self) {
-        self.history =
-            (!self.search.is_empty() && self.connection_notice.is_none()).then(|| HistorySearch {
-                id: uuid::Uuid::new_v4(),
+        self.history = (!self.search.is_empty() && self.connection_notice.is_none()).then(|| {
+            let id = uuid::Uuid::new_v4();
+            HistorySearch {
+                id,
+                scan_id: id,
                 target: self.history.as_ref().map_or(10, |search| search.target),
                 ..Default::default()
-            });
+            }
+        });
     }
 
     fn includes_row(&self, row: &AgentsOverviewRow) -> bool {
@@ -425,12 +431,16 @@ impl AgentsOverviewView {
         if self.state().history.is_none() {
             return;
         }
-        let visible = self.visible_indices().len();
+        let indices = self.visible_indices();
         let mut state = self.state();
         if state.more_available()
             && let Some(search) = &mut state.history
             && !search.loading
         {
+            let visible = indices
+                .iter()
+                .filter(|&&i| !search.retained.contains(&self.rows[i].thread_id))
+                .count();
             if additional > 0 {
                 search.target = visible + additional;
                 search.failed = false;
@@ -440,7 +450,7 @@ impl AgentsOverviewView {
             }
             search.loading = true;
             self.app_event_tx.send(AppEvent::SearchAgentsOverview(
-                search.id,
+                search.scan_id,
                 search.target - visible,
             ));
         }

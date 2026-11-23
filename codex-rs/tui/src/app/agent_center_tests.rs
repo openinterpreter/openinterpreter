@@ -445,6 +445,11 @@ async fn live_center_search_row_appears_only_while_editing() {
         "live_center_search_active",
         screen(&view, area.width, area.height)
     );
+    view.handle_key_event(KeyCode::Tab.into());
+    let created = screen(&view, area.width, area.height);
+    assert!(created.contains("Created"), "{created}");
+    assert!(created.contains("Tab sort (Created)"), "{created}");
+    view.handle_key_event(KeyCode::Tab.into());
     view.handle_key_event(KeyCode::Esc.into());
     assert_eq!(screen(&view, area.width, area.height), idle);
 }
@@ -472,4 +477,35 @@ async fn backspace_edits_search_and_rename_without_deleting_tasks() {
         assert!(rx.try_recv().is_err());
         view.handle_key_event(KeyCode::Esc.into());
     }
+}
+
+#[tokio::test]
+async fn search_sort_tab_respects_configured_list_bindings_and_rename() {
+    use crate::app::agents_overview_discovery::HistorySort;
+
+    let mut app = make_test_app().await;
+    let id = ThreadId::from_u128(/*value*/ 101);
+    let thread = overview_thread(
+        id,
+        /*parent_thread_id*/ None,
+        "Task",
+        ThreadStatus::Idle,
+    );
+    let config: TuiKeymap = toml::from_str("[list]\nmove_down = 'tab'").unwrap();
+    app.keymap = RuntimeKeymap::from_config(&config).unwrap();
+    let mut view = app.agents_overview_view(vec![thread], Some(id));
+    view.handle_key_event(KeyCode::Char('f').into());
+    view.handle_key_event(KeyCode::Tab.into());
+    assert_eq!(
+        app.agents_overview.view_state.lock().unwrap().search_sort,
+        HistorySort::Updated
+    );
+    assert!(!screen(&view, /*width*/ 88, /*height*/ 16).contains("Tab sort"));
+    view.handle_key_event(KeyCode::Esc.into());
+    view.handle_key_event(KeyCode::Char('r').into());
+    view.handle_key_event(KeyCode::Tab.into());
+    assert_eq!(
+        app.agents_overview.view_state.lock().unwrap().search_sort,
+        HistorySort::Updated
+    );
 }

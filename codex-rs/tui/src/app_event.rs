@@ -556,11 +556,11 @@ pub(crate) enum AppEvent {
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
     },
-    /// Route a hidden title request to its automatic rename or editable prompt.
+    /// Finish title generation and deliver an editable suggestion when requested.
     GeneratedThreadTitle {
         cancellation: CancellationToken,
         thread_id: ThreadId,
-        temporary_thread_id: ThreadId,
+        temporary_thread_id: Option<ThreadId>,
         destination: ThreadTitleDestination,
         result: Result<String, String>,
     },
@@ -845,6 +845,7 @@ pub(crate) enum AppEvent {
     DynamicToolCallCompleted {
         request_id: AppServerRequestId,
         response: DynamicToolCallResponse,
+        reply: Option<codex_app_server_client::AppServerReplyHandle>,
     },
 
     /// Register task tools inherited by a dynamically created thread.
@@ -888,6 +889,11 @@ pub(crate) enum AppEvent {
 
     /// Archive the current active main thread and return to the command center.
     ArchiveCurrentThread,
+    ArchiveFinished {
+        backend_id: crate::backend_id::BackendId,
+        thread_id: ThreadId,
+        result: Result<(), String>,
+    },
 
     /// Permanently delete the current active main thread and return to the command center.
     DeleteCurrentThread,
@@ -1444,8 +1450,7 @@ pub(crate) enum AppEvent {
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
 
-    /// Replace the contiguous run of streaming `AgentMessageCell`s at the end of
-    /// the transcript with a single `AgentMarkdownCell` that stores the raw
+    /// Replace this answer's streaming `AgentMessageCell`s with a single `AgentMarkdownCell` that stores the raw
     /// markdown source and re-renders from it on resize.
     ///
     /// Emitted by `ChatWidget::flush_answer_stream_with_separator` after stream
@@ -1457,6 +1462,8 @@ pub(crate) enum AppEvent {
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
+        /// Bounds the search across notices, including when the stream emitted no cells.
+        emitted_cells: usize,
         phase: Option<codex_protocol::models::MessagePhase>,
         interrupted_item: Option<(String, String)>,
         source: String,

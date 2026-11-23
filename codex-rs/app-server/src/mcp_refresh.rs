@@ -546,6 +546,7 @@ enabled = false
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 thread_extensions(ThreadExtensionDependencies {
+                    thread_state_manager: Default::default(),
                     sample_responses: Arc::new(
                         crate::thread_sample::SampleResponseRegistry::default(),
                     ),

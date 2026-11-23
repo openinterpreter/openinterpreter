@@ -75,6 +75,9 @@ impl ChatWidget {
             || !startup_message.local_images.is_empty()
             || !startup_message.remote_image_urls.is_empty()
             || !draft.pending_pastes.is_empty();
+        let startup_undo = (startup_has_content && !self.local_settings.tui.vim_mode_default)
+            .then(|| self.bottom_pane.startup_undo_draft())
+            .flatten();
 
         let cursor = if existing_has_content && startup_has_content {
             let mut used_paste_placeholders = HashSet::new();
@@ -122,6 +125,9 @@ impl ChatWidget {
             );
             draft.cursor
         };
+        if let Some(destination) = startup_undo {
+            self.bottom_pane.record_startup_undo(destination);
+        }
         self.bottom_pane.set_composer_cursor(cursor);
         self.bottom_pane.restore_startup_composer_state(
             draft.last_composer_activity_at,
@@ -133,9 +139,9 @@ impl ChatWidget {
         crate::startup_recovery::handed_off(|| self.bottom_pane.composer_recovery_snapshot());
     }
 
-    /// Includes protected prompts deferred by streaming or the approval idle timer.
+    /// Includes protected prompts deferred by streaming or the typing idle timer.
     pub(crate) fn has_pending_protected_request(&self) -> bool {
-        self.bottom_pane.has_pending_approval() || self.interrupts.has_pending_prompt()
+        self.bottom_pane.has_delayed_prompt() || self.interrupts.has_pending_prompt()
     }
 
     /// Transfer startup input only after protected views and required sandbox setup finish.

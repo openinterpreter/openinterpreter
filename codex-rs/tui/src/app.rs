@@ -487,6 +487,7 @@ pub struct AppExitInfo {
     pub thread_id: Option<ThreadId>,
     pub resume_hint: Option<ResumableThread>,
     pub disconnect_info: Option<DisconnectInfo>,
+    pub archive_warnings: Vec<String>,
     pub update_action: Option<UpdateAction>,
     pub exit_reason: ExitReason,
 }
@@ -497,6 +498,7 @@ impl AppExitInfo {
             token_usage: TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(message.into()),
@@ -506,6 +508,12 @@ impl AppExitInfo {
 
 pub use exit_summary::DisconnectInfo;
 pub use exit_summary::ResumableThread;
+
+#[derive(Clone, Copy)]
+enum ThreadTransition {
+    PromptReverted(ThreadId),
+    DiscardTypeahead,
+}
 
 #[derive(Debug)]
 pub(crate) enum AppRunControl {
@@ -609,6 +617,7 @@ pub(crate) struct App {
     transcript_reflow: TranscriptReflowState,
     initial_history_replay_buffer: Option<InitialHistoryReplayBuffer>,
     pending_thread_switch_resets: usize,
+    pending_input_drain: Option<ThreadTransition>,
     pub(crate) scrollback_has_older_history: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -672,6 +681,8 @@ pub(crate) struct App {
         ),
     >,
     /// Track title generation across thread switches and deduplicate automatic requests.
+    /// Each pending Cloud title holds a receiver until its name has been saved.
+    cloud_title_shutdown: tokio::sync::watch::Sender<()>,
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
@@ -1574,6 +1585,19 @@ See the keymap documentation for supported actions and examples."
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if matches!(event, TuiEvent::Draw) && tui::tmux_mouse_disabled() {
+            // A button release queued before tmux disabled capture may never arrive.
+            // Keep selected text but end every gesture which still owns pointer state.
+            self.divider_drag = None;
+            self.transcript_view.end_drag();
+            self.chat_widget.end_composer_drag();
+            self.chat_widget.rendered_selection.borrow_mut().end_drag();
+            if let Some((id, _)) = self.passive_link_drag.take()
+                && let Some(companion) = self.side_companions.get_mut(&id)
+            {
+                companion.view.end_drag();
+            }
+        }
         let idle_draw = matches!(event, TuiEvent::Draw);
         if matches!(&event, TuiEvent::Key(_))
             && self.handle_composer_copy_event(tui, &event, tui::Tui::copy_transcript_selection)
@@ -1618,6 +1642,25 @@ See the keymap documentation for supported actions and examples."
             TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
         ) {
             self.expire_pending_key_chord();
+        }
+        let draws_history = matches!(
+            &event,
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
+        );
+        // Reflow and paint must agree on width. Final inserts still use the last
+        // painted width until consolidation completes. Offline sessions drop those events.
+        let defer_inline_draw = draws_history
+            && self.overlay.is_none()
+            && !self.reconnect.offline
+            && !tui.is_owned_screen()
+            && self.chat_widget.has_pending_stream_consolidation()
+            && !self.chat_widget.has_active_modal();
+        if !defer_inline_draw
+            && !matches!(
+                &event,
+                TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
+            )
+        {
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
@@ -1724,10 +1767,11 @@ See the keymap documentation for supported actions and examples."
             _ => {}
         }
 
-        let draws_history = matches!(
-            event,
-            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
-        );
+        if defer_inline_draw {
+            tui.defer_screen_size(screen_size);
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
         if self.overlay.is_some() {
             let _ = self
                 .handle_backtrack_overlay_event(tui, app_server, event)

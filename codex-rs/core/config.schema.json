@@ -5223,8 +5223,10 @@
               "history_search_next": null,
               "history_search_previous": null,
               "queue": null,
+              "redo": null,
               "submit": null,
-              "toggle_shortcuts": null
+              "toggle_shortcuts": null,
+              "undo": null
             },
             "editor": {
               "delete_backward": null,
@@ -5840,6 +5842,14 @@
           ],
           "description": "Queue the current composer draft while a task is running."
         },
+        "redo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Redo an undone composer edit."
+        },
         "submit": {
           "allOf": [
             {
@@ -5855,6 +5865,14 @@
             }
           ],
           "description": "Toggle the composer shortcut overlay."
+        },
+        "undo": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Undo the last edit to the composer draft."
         }
       },
       "type": "object"
@@ -6285,8 +6303,10 @@
             "history_search_next": null,
             "history_search_previous": null,
             "queue": null,
+            "redo": null,
             "submit": null,
-            "toggle_shortcuts": null
+            "toggle_shortcuts": null,
+            "undo": null
           }
         },
         "editor": {

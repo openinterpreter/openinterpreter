@@ -2596,6 +2596,17 @@ impl ThreadManagerState {
         }
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
+        if let Some(parent_id) = parent_thread_id
+            && thread_extension_init
+                .get::<crate::UsageAttributionPolicy>()
+                .is_none()
+            && let Some(parent) = self.threads.read().await.get(&parent_id)
+            && let Some(policy) = parent
+                .thread_extension_data()
+                .get::<crate::UsageAttributionPolicy>()
+        {
+            thread_extension_init.insert(*policy);
+        }
         if thread_extension_init.get::<InheritedSessionId>().is_some()
             && (!matches!(&initial_history, InitialHistory::New)
                 || session_source.is_non_root_agent())
