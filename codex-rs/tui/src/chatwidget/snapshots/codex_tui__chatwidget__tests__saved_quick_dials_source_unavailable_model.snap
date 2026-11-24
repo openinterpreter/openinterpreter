@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Start preset from current settings
+
+
+     Current model           Choose an available reasoning effort with /model
+                             before saving.
+› 1. Current permissions     /permissions :workspace --approval-policy=on-
+                             request --reviewer=auto_review
+     Current terminal title  Choose available terminal-title items with /title
+                             before saving.
+  2. Current status line     /statusline model --colors
+
+  enter select · esc back

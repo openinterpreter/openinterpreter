@@ -13,7 +13,7 @@ use rmcp::ServerHandler;
 use rmcp::ServiceExt;
 use rmcp::model::CancelledNotification;
 use rmcp::model::CancelledNotificationParam;
-use rmcp::model::ClientInfo;
+use rmcp::model::ClientConfig;
 use rmcp::model::ClientJsonRpcMessage;
 use rmcp::model::CustomRequest;
 use rmcp::model::ElicitationAction;
@@ -82,7 +82,7 @@ async fn recovered_connections_accept_elicitations_with_previously_cancelled_ids
                 .await?;
         client
             .initialize(
-                ClientInfo::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
+                ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
                 Some(Duration::from_secs(/*secs*/ 5)),
                 Box::new(|_, _| {
                     Box::pin(async {
@@ -171,7 +171,7 @@ async fn ordinary_elicitations_release_pending_responses_on_cancellation() -> an
         let mut paused = pause_state.subscribe();
         let (route_tx, mut route_rx) = mpsc::unbounded_channel();
         let service = ElicitationClientService::new(
-            ClientInfo::default(),
+            ClientConfig::default(),
             Box::new(move |_, _| {
                 let (response_tx, response_rx) = oneshot::channel();
                 route_tx.send(response_tx).expect("observe elicitation");
@@ -244,7 +244,7 @@ async fn user_verification_service_cancellation_drops_pending_response() -> anyh
     let pause_state = ElicitationPauseState::new();
     let mut paused = pause_state.subscribe();
     let (route_tx, mut route_rx) = mpsc::unbounded_channel();
-    let mut client_info = ClientInfo::default();
+    let mut client_info = ClientConfig::default();
     client_info.capabilities.extensions = Some(
         [(
             OPENAI_ELICITATION_EXTENSION_ID.to_string(),
@@ -303,7 +303,7 @@ async fn cancelling_one_verification_leaves_the_mcp_connection_and_other_request
     let pause_state = ElicitationPauseState::new();
     let mut paused = pause_state.subscribe();
     let (route_tx, mut route_rx) = mpsc::unbounded_channel();
-    let mut client_info = ClientInfo::default();
+    let mut client_info = ClientConfig::default();
     client_info.capabilities.extensions = Some(
         [(
             OPENAI_ELICITATION_EXTENSION_ID.to_string(),
@@ -362,14 +362,6 @@ async fn cancelling_one_verification_leaves_the_mcp_connection_and_other_request
     timeout(Duration::from_secs(/*secs*/ 5), first.closed()).await?;
     assert!(!second.is_closed());
     assert!(*paused.borrow());
-    let cancel = timeout(Duration::from_secs(/*secs*/ 5), server.receive())
-        .await?
-        .expect("cancelled verification still sends a response");
-    let ClientJsonRpcMessage::Response(cancel) = cancel else {
-        anyhow::bail!("expected a cancellation response");
-    };
-    assert_eq!(cancel.id, first_id);
-    assert_eq!(serde_json::to_value(cancel.result)?["action"], "cancel");
 
     for request_id in [first_id, RequestId::Number(999)] {
         server

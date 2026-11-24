@@ -140,7 +140,7 @@ fn edit_root_acl(
     Ok(())
 }
 
-fn read_acl(handle: &OwnedHandle) -> Result<Option<(Vec<u32>, u16)>> {
+pub(crate) fn read_acl(handle: &OwnedHandle) -> Result<Option<(Vec<u32>, u16)>> {
     let mut acl = ptr::null_mut();
     let mut descriptor = ptr::null_mut();
     let status = unsafe {
@@ -279,7 +279,7 @@ fn insert_metadata_ace(acl: &mut Vec<u32>, sid: &LocalSid) -> Result<()> {
     Ok(())
 }
 
-fn write_acl(handle: &OwnedHandle, acl: &mut [u32], control: u16) -> Result<()> {
+pub(crate) fn write_acl(handle: &OwnedHandle, acl: &mut [u32], control: u16) -> Result<()> {
     let mut descriptor: security::SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
     let preserved = security::SE_DACL_PROTECTED | security::SE_DACL_AUTO_INHERITED;
     let raw_descriptor = (&mut descriptor as *mut security::SECURITY_DESCRIPTOR).cast();

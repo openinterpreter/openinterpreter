@@ -243,6 +243,7 @@ async fn status_command_renders_immediately_and_updates_first_card_without_statu
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: Some(1_820_000),
@@ -302,10 +303,9 @@ async fn status_command_renders_immediately_and_updates_first_card_without_statu
 }
 
 #[tokio::test]
-async fn status_command_omits_thread_usage_for_non_cbp_enterprise_plans() {
+async fn status_command_omits_thread_usage_for_unsupported_plans() {
     for plan_type in [
         Some(PlanType::Enterprise),
-        Some(PlanType::Ent26),
         Some(PlanType::Pro),
         Some(PlanType::Edu),
         Some(PlanType::SelfServeBusinessUsageBased),
@@ -373,6 +373,7 @@ async fn status_command_stays_visible_and_updates_after_thread_usage_retry() {
         thread_id,
         retry_request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: Some(1_820_000),
@@ -410,6 +411,7 @@ async fn status_command_renders_credits_and_breakdowns_without_usd_estimate() {
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: None,
@@ -475,6 +477,7 @@ async fn status_command_drops_stale_usd_when_updated_usage_has_only_credits() {
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 40_000_000,
             estimated_usage_usd_micros: Some(1_820_000),
@@ -500,6 +503,7 @@ async fn status_command_drops_stale_usd_when_updated_usage_has_only_credits() {
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: None,
@@ -533,6 +537,7 @@ async fn status_command_requests_thread_usage_for_remote_connection_metadata() {
         address: "wss://remote.example.com".to_string(),
         version: "v1.0.0".to_string(),
         is_local_daemon: false,
+        is_managed_daemon: false,
     });
 
     chat.dispatch_command(SlashCommand::Status);
@@ -584,6 +589,7 @@ async fn status_command_remains_visible_when_account_changes_during_usage_refres
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: Some(1_820_000),
@@ -616,6 +622,7 @@ async fn status_command_remains_visible_when_thread_changes_during_usage_refresh
         thread_id,
         request_id,
         Ok(ThreadUsageOutcome::Available(ThreadUsage {
+            native_usage_usd_micros: None,
             thread_id: thread_id.to_string(),
             estimated_usage_credits_micros: 50_000_000,
             estimated_usage_usd_micros: Some(1_820_000),

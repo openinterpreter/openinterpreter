@@ -21,21 +21,21 @@ codex-protocol = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-windows-sandbox = { workspace = true }
+mxc-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-wxc_common = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-appcontainer_common = { workspace = true }
-learning_mode_windows = { workspace = true }
+flatbuffers = { workspace = true }
 # 1.2.4 imports OneCore_apiset, which the GNU Windows toolchain does not ship.
 tracelogging = "=1.2.3"
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
 ] }
 

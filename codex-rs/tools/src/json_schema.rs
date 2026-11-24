@@ -1,4 +1,4 @@
-//! Normalize tool schemas and prune unreachable definitions before applying the size policy.
+//! Parse catalog overrides and normalize external tool schemas with their size policy.
 
 mod compaction;
 mod traversal;
@@ -9,6 +9,7 @@ pub use types::JsonSchema;
 pub use types::JsonSchemaPrimitiveType;
 pub use types::JsonSchemaType;
 
+use compaction::DEFAULT_COMPACT_TOOL_SCHEMA_BYTES;
 use compaction::compact_large_tool_schema;
 use traversal::DefinitionTraversal;
 use traversal::for_each_schema_child;
@@ -21,10 +22,29 @@ const DEFINITION_TABLE_KEYS: [&str; 2] = ["$defs", "definitions"];
 const SCHEMA_CHILD_KEYS: [&str; 4] = ["items", "anyOf", "oneOf", "allOf"];
 const COMPOSITION_SCHEMA_KEYS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
 
+/// Parse catalog parameters without normalization or compaction.
+/// Consumers own fallback and transport-specific requirements.
+pub fn parse_catalog_tool_parameters(parameters: &str) -> Result<JsonSchema, &'static str> {
+    let parameters: JsonValue =
+        serde_json::from_str(parameters).map_err(|_| "schema is not valid JSON")?;
+    if !parameters.is_object() || parameters["type"] != "object" {
+        return Err("schema must declare an object type");
+    }
+    serde_json::from_value(parameters).map_err(|_| "schema uses unsupported JSON Schema structures")
+}
+
 /// Parse the tool `input_schema` or return an error for invalid schema.
 pub fn parse_tool_input_schema(input_schema: &JsonValue) -> Result<JsonSchema, serde_json::Error> {
+    parse_tool_input_schema_with_max_bytes(input_schema, DEFAULT_COMPACT_TOOL_SCHEMA_BYTES)
+}
+
+/// Compact a tool input schema using the supplied threshold.
+pub(crate) fn parse_tool_input_schema_with_max_bytes(
+    input_schema: &JsonValue,
+    max_bytes: usize,
+) -> Result<JsonSchema, serde_json::Error> {
     let mut input_schema = prepare_tool_input_schema(input_schema);
-    compact_large_tool_schema(&mut input_schema);
+    compact_large_tool_schema(&mut input_schema, max_bytes);
     deserialize_tool_input_schema(input_schema)
 }
 

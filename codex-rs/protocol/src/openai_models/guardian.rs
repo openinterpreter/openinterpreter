@@ -8,7 +8,7 @@ use ts_rs::TS;
 
 use super::ModelInfo;
 use crate::ToolName;
-use crate::mcp::is_node_repl_backed_server;
+use crate::mcp::is_node_repl_backed_connector;
 use crate::mcp::is_node_repl_backed_tool;
 
 /// How Guardian handles an action when the user selects automatic approval.
@@ -73,6 +73,7 @@ impl GuardianModelPolicy {
             GuardianScope::Mcp => self.mcp,
             GuardianScope::Network => self.network,
             GuardianScope::Permissions => self.permissions,
+            GuardianScope::NativeTool => Some(GuardianReviewMode::Synchronous),
         }
         .unwrap_or(GuardianReviewMode::Disabled)
     }
@@ -120,14 +121,39 @@ pub enum GuardianScope {
     Mcp,
     Network,
     Permissions,
+    NativeTool,
 }
 
 impl GuardianScope {
     pub fn for_mcp_server(server: &str) -> Self {
-        if is_node_repl_backed_server(server) {
+        Self::for_mcp_connector(server, /*connector_id*/ None)
+    }
+
+    /// Classifies an MCP call using connector identity from registered tool metadata.
+    pub fn for_mcp_connector(server: &str, connector_id: Option<&str>) -> Self {
+        if is_node_repl_backed_connector(server, connector_id) {
             Self::ComputerUse
         } else {
             Self::Mcp
+        }
+    }
+
+    /// Classifies state-changing MAv2 calls in the configured namespace.
+    /// An absent namespace accepts the default namespace spellings; callers gate this lookup.
+    pub fn for_multi_agent_tool(tool: &ToolName, namespace: Option<&str>) -> Option<Self> {
+        let matches_namespace = match namespace {
+            Some(namespace) => tool.namespace.as_deref() == Some(namespace),
+            None => tool.is_default_namespace(),
+        };
+        if matches_namespace
+            && matches!(
+                tool.name.as_str(),
+                "spawn_agent" | "send_message" | "followup_task" | "interrupt_agent"
+            )
+        {
+            Some(Self::NativeTool)
+        } else {
+            None
         }
     }
 

@@ -1,0 +1,19 @@
+---
+source: tui/src/bottom_pane/async_questions/state_tests.rs
+assertion_line: 220
+expression: "rendered[0]"
+---
+
+  1 of 2
+
+  Run this command:
+
+  printf '診 断 '
+
+  Then review the diagnostics
+  (https://example.com/diagnostics?view=full)?
+
+  Type your answer
+
+  enter submit   ⌃] skip   ⇧→ main prompt
+  ⇧← next question

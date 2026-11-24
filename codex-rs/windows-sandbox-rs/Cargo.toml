@@ -26,6 +26,8 @@ path = "src/bin/managed_deny_probe/main.rs"
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
+codex-http-client = { workspace = true }
 anyhow = "1.0"
 base64 = { workspace = true }
 chrono = { version = "0.4.42", default-features = false, features = [
@@ -38,6 +40,7 @@ codex-utils-string = { workspace = true }
 codex-otel = { workspace = true }
 dunce = "1.0"
 glob = { workspace = true }
+ignore = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"
@@ -76,7 +79,6 @@ features = [
     "Win32_System_WindowsProgramming",
     "Win32_System_IO",
     "Win32_System_Memory",
-    "Win32_System_Kernel",
     "Win32_System_Console",
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",
@@ -97,7 +99,9 @@ features = [
     "Win32_System_Registry",
     "Win32_System_Services",
 ]
-version = "0.52"
+workspace = true
 
 [dev-dependencies]
+codex-utils-cargo-bin = { workspace = true }
+codex-windows-sandbox-test-support = { workspace = true }
 pretty_assertions = { workspace = true }

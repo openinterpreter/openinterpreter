@@ -1,4 +1,5 @@
 use super::*;
+use crate::sqlite::SqliteWriteQueryExt;
 
 const REMOTE_CONTROL_APP_SERVER_CLIENT_NAME_NONE: &str = "";
 
@@ -97,7 +98,7 @@ ON CONFLICT(websocket_url, account_id, app_server_client_name) DO UPDATE SET
         .bind(&enrollment.server_name)
         .bind(enrollment.remote_control_enabled)
         .bind(Utc::now().timestamp())
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(())
     }
@@ -123,7 +124,7 @@ WHERE websocket_url = ? AND account_id = ? AND app_server_client_name = ?
         .bind(remote_control_app_server_client_name_key(
             app_server_client_name,
         ))
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(result.rows_affected())
     }
@@ -145,7 +146,7 @@ WHERE websocket_url = ? AND account_id = ? AND app_server_client_name = ?
         .bind(remote_control_app_server_client_name_key(
             app_server_client_name,
         ))
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(result.rows_affected())
     }

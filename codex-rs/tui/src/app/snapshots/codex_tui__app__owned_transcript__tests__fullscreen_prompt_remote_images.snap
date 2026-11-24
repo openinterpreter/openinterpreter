@@ -1,0 +1,72 @@
+---
+source: tui/src/app/owned_transcript_tests.rs
+expression: "normalize_snapshot_paths(frames.join(\"\\n\\n\"))"
+---
+Draft
+History stays visible
+
+
+
+
+  [Image #1]
+  [Image #2]
+  [Image #3]
+  [Image #4]
+
+› Edit this prompt
+
+
+Up
+History stays visible
+
+
+
+
+  [Image #9]
+  [Image #10]
+  [Image #11]
+  [Image #12]
+
+› Edit this prompt
+
+
+Up
+History stays visible
+
+
+
+
+  [Image #8]
+  [Image #9]
+  [Image #10]
+  [Image #11]
+
+› Edit this prompt
+
+
+Delete
+History stays visible
+
+
+
+
+  [Image #8]
+  [Image #9]
+  [Image #10]
+  [Image #11]
+
+› Edit this prompt
+
+
+Down
+History stays visible
+
+
+
+
+  [Image #1]
+  [Image #2]
+  [Image #3]
+  [Image #4]
+
+› Edit this prompt

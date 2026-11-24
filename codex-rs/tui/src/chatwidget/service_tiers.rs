@@ -7,10 +7,15 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::service_tier_resolution;
 use codex_features::Feature;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
-use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::SPEED_TIER_FAST;
 
 impl ChatWidget {
+    pub(super) fn selected_model(&self) -> &str {
+        self.cloud_picker_selection.as_ref().map_or_else(
+            || self.current_model(),
+            |selection| selection.model.as_str(),
+        )
+    }
     pub(crate) fn set_service_tier(&mut self, service_tier: Option<String>) {
         self.config.service_tier = service_tier;
         self.refresh_effective_service_tier();
@@ -26,19 +31,15 @@ impl ChatWidget {
     }
 
     pub(crate) fn service_tier_update_for_core(&self) -> Option<Option<String>> {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            return None;
+        }
         service_tier_resolution::service_tier_update_for_core(
             &self.config,
             &self.local_settings.notices,
             self.current_model(),
             &self.model_catalog.try_list_models().unwrap_or_default(),
         )
-    }
-
-    pub(crate) fn should_show_fast_status(&self, model: &str, service_tier: Option<&str>) -> bool {
-        service_tier.is_some_and(|service_tier| {
-            service_tier == ServiceTier::Fast.request_value()
-                && self.model_supports_service_tier(model, service_tier)
-        }) && self.has_chatgpt_account
     }
 
     pub(super) fn fast_mode_enabled(&self) -> bool {
@@ -74,10 +75,10 @@ impl ChatWidget {
     }
 
     pub(super) fn sync_service_tier_commands(&mut self) {
+        let commands = self.current_model_service_tier_commands();
         self.bottom_pane
-            .set_service_tier_commands_enabled(self.fast_mode_enabled());
-        self.bottom_pane
-            .set_service_tier_commands(self.current_model_service_tier_commands());
+            .set_service_tier_commands_enabled(!commands.is_empty());
+        self.bottom_pane.set_service_tier_commands(commands);
     }
 
     pub(super) fn current_model_service_tier_commands(&self) -> Vec<ServiceTierCommand> {
@@ -93,6 +94,7 @@ impl ChatWidget {
                         preset
                             .service_tiers
                             .into_iter()
+                            .filter(|tier| self.config.features.service_tier_enabled(&tier.id))
                             .map(|tier| ServiceTierCommand {
                                 id: tier.id,
                                 name: tier.name.to_lowercase(),
@@ -105,6 +107,13 @@ impl ChatWidget {
     }
 
     fn set_service_tier_selection(&mut self, service_tier: Option<String>) {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            self.effective_service_tier.clone_from(&service_tier);
+            self.refresh_model_dependent_surfaces();
+            self.app_event_tx
+                .send(AppEvent::PersistServiceTierSelection { service_tier });
+            return;
+        }
         self.set_service_tier(service_tier.clone());
         self.app_event_tx
             .send(AppEvent::CodexOp(AppCommand::override_turn_context(
@@ -118,28 +127,9 @@ impl ChatWidget {
                 /*summary*/ None,
                 Some(service_tier.clone()),
                 /*collaboration_mode*/ None,
-                /*personality*/ None,
             )));
         self.app_event_tx
             .send(AppEvent::PersistServiceTierSelection { service_tier });
-    }
-
-    fn model_supports_service_tier(&self, model: &str, service_tier: &str) -> bool {
-        self.model_catalog
-            .try_list_models()
-            .ok()
-            .and_then(|models| {
-                models
-                    .into_iter()
-                    .find(|preset| preset.model == model)
-                    .map(|preset| {
-                        preset
-                            .service_tiers
-                            .iter()
-                            .any(|tier| tier.id == service_tier)
-                    })
-            })
-            .unwrap_or(false)
     }
 
     fn current_model_fast_service_tier(&self) -> Option<ServiceTierCommand> {
@@ -149,10 +139,21 @@ impl ChatWidget {
     }
 
     pub(super) fn refresh_effective_service_tier(&mut self) {
+        if self.thread_settings_owner == crate::app_server_session::ThreadSettingsOwner::Server {
+            self.effective_service_tier = self
+                .thread_id
+                .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.service_tier(id))
+                .or_else(|| self.config.service_tier.clone());
+            return;
+        }
+        let model = self
+            .thread_id
+            .and_then(|id| self.pending_cloud_turn_settings.as_ref()?.model(id))
+            .unwrap_or_else(|| self.selected_model().to_string());
         self.effective_service_tier = service_tier_resolution::effective_service_tier(
             &self.config,
             &self.local_settings.notices,
-            self.current_model(),
+            &model,
             &self.model_catalog.try_list_models().unwrap_or_default(),
         );
     }

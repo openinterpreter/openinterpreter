@@ -27,12 +27,12 @@ interpreter --version
 
 ## Requirements
 
-| Item | Notes |
-| ---- | ----- |
-| macOS | Current release builds target modern macOS versions. |
-| Linux | Use a recent 64-bit distribution. Release archives use musl for broad compatibility. |
-| Windows | Use PowerShell for installation. WSL is also supported for Linux-style workflows. |
-| Git | Recommended for repository-aware sessions, diffs, and reviews. |
+| Item    | Notes                                                                                |
+| ------- | ------------------------------------------------------------------------------------ |
+| macOS   | Current release builds target modern macOS versions.                                 |
+| Linux   | Use a recent 64-bit distribution. Release archives use musl for broad compatibility. |
+| Windows | Use PowerShell for installation. WSL is also supported for Linux-style workflows.    |
+| Git     | Recommended for repository-aware sessions, diffs, and reviews.                       |
 
 ## Updating
 
@@ -70,6 +70,7 @@ reinstall without losing them.
     If the installer added a marked `Open Interpreter installer` block to
     `~/.zprofile` or `~/.bash_profile`, you can remove that block. It is also
     safe to leave `~/.local/bin` on `PATH`, especially if other tools use it.
+
   </Tab>
   <Tab title="Linux">
     ```bash
@@ -86,6 +87,7 @@ reinstall without losing them.
     `~/.bashrc`, `~/.zshrc`, or `~/.profile`, you can remove that block. It is
     also safe to leave `~/.local/bin` on `PATH`, especially if other tools use
     it.
+
   </Tab>
   <Tab title="Windows PowerShell">
     ```powershell
@@ -120,6 +122,7 @@ reinstall without losing them.
 
     Open a new PowerShell window after uninstalling so it picks up the updated
     user `PATH`.
+
   </Tab>
 </Tabs>
 

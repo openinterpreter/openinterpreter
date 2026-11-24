@@ -1,6 +1,10 @@
-use reqwest::header::HeaderMap;
-use reqwest::header::HeaderName;
-use reqwest::header::HeaderValue;
+use codex_http_client::HttpClient;
+use codex_http_client::HttpClientBuilder;
+use codex_http_client::RequestBuilder;
+use http::header::CONTENT_TYPE;
+use http::header::HeaderMap;
+use http::header::HeaderName;
+use http::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -23,6 +27,32 @@ const KIMI_CODE_DEVICE_ID_FILE: &str = "device_id";
 const KIMI_CODE_CREDENTIALS_DIR: &str = "credentials";
 const KIMI_CODE_CREDENTIALS_FILE: &str = "kimi-code.json";
 const MIN_REFRESH_THRESHOLD_SECS: u64 = 300;
+
+// Keep credential-bearing request URLs and response headers out of HTTP diagnostics.
+// Preserve the transport-default proxy behavior used by the previous OAuth client.
+#[allow(deprecated)]
+fn kimi_auth_client() -> HttpClient {
+    HttpClientBuilder::new()
+        .without_request_logging()
+        .build_with_transport_default_proxy_and_custom_ca_fallback()
+}
+
+trait KimiFormRequest {
+    fn form_fields(self, fields: &[(&str, &str)]) -> Self;
+}
+
+impl KimiFormRequest for RequestBuilder {
+    fn form_fields(self, fields: &[(&str, &str)]) -> Self {
+        self.header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(encode_form_fields(fields))
+    }
+}
+
+fn encode_form_fields(fields: &[(&str, &str)]) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish()
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct KimiCodeDeviceAuthorization {
@@ -69,7 +99,7 @@ pub enum KimiCodeAuthError {
     #[error("failed to open browser for Kimi Code login: {0}")]
     Browser(#[source] io::Error),
     #[error("network error during Kimi Code login: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(#[from] codex_http_client::HttpError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,14 +130,14 @@ struct OAuthErrorResponse {
 pub async fn request_device_authorization(
     codex_home: &Path,
 ) -> Result<KimiCodeDeviceAuthorization, KimiCodeAuthError> {
-    let client = reqwest::Client::new();
+    let client = kimi_auth_client();
     let response = client
         .post(format!(
             "{}/api/oauth/device_authorization",
             oauth_host().trim_end_matches('/')
         ))
         .headers(common_headers(codex_home)?)
-        .form(&[("client_id", KIMI_CODE_CLIENT_ID)])
+        .form_fields(&[("client_id", KIMI_CODE_CLIENT_ID)])
         .send()
         .await?;
     let status = response.status();
@@ -139,7 +169,7 @@ pub async fn complete_device_authorization(
     codex_home: &Path,
     authorization: &KimiCodeDeviceAuthorization,
 ) -> Result<(), KimiCodeAuthError> {
-    let client = reqwest::Client::new();
+    let client = kimi_auth_client();
     loop {
         let response = client
             .post(format!(
@@ -147,7 +177,7 @@ pub async fn complete_device_authorization(
                 oauth_host().trim_end_matches('/')
             ))
             .headers(common_headers(codex_home)?)
-            .form(&[
+            .form_fields(&[
                 ("client_id", KIMI_CODE_CLIENT_ID),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("device_code", authorization.device_code.as_str()),
@@ -389,14 +419,14 @@ async fn refresh_token(
     codex_home: &Path,
     refresh_token: &str,
 ) -> Result<KimiCodeToken, KimiCodeAuthError> {
-    let client = reqwest::Client::new();
+    let client = kimi_auth_client();
     let response = client
         .post(format!(
             "{}/api/oauth/token",
             oauth_host().trim_end_matches('/')
         ))
         .headers(common_headers(codex_home)?)
-        .form(&[
+        .form_fields(&[
             ("client_id", KIMI_CODE_CLIENT_ID),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -520,6 +550,17 @@ fn format_oauth_error(body: &[u8], status: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_form_escapes_sensitive_fields_without_changing_field_order() {
+        assert_eq!(
+            encode_form_fields(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("refresh_token", "a+b &c")
+            ]),
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&refresh_token=a%2Bb+%26c"
+        );
+    }
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 

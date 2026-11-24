@@ -1,36 +1,36 @@
-//! Bounded discovery for permission pickers; fixed request IDs bound abandoned RPCs.
-//! This never applies a profile; the app chooses local or server-owned selection.
+//! Bounded permission catalog discovery with distinct IDs for concurrent requests.
+//! Discovery and availability come from the connected server; selection uses its settings API.
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::ThreadParamsMode;
+use crate::app_server_session::ThreadSettingsOwner;
 use crate::legacy_core::config::Config;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::ConfigReadParams;
-use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::ConfigRequirements;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::PermissionProfileListParams;
 use codex_app_server_protocol::PermissionProfileListResponse;
 use codex_app_server_protocol::PermissionProfileSummary;
 use codex_app_server_protocol::RequestId;
+#[cfg(test)]
 use codex_utils_approval_presets::builtin_approval_presets;
 use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct PermissionDiscovery {
     pub(crate) profiles: Vec<PermissionProfileSummary>,
     pub(crate) requirements: Option<ConfigRequirements>,
-    pub(crate) explicit_profile_mode: bool,
 }
 
 impl PermissionDiscovery {
+    #[cfg(test)]
     pub(crate) fn local(config: &Config) -> Self {
         let mut profiles = builtin_approval_presets()
             .into_iter()
@@ -50,7 +50,6 @@ impl PermissionDiscovery {
         Self {
             profiles,
             requirements: None,
-            explicit_profile_mode: true,
         }
     }
 
@@ -61,7 +60,7 @@ impl PermissionDiscovery {
         reviewer: Option<ApprovalsReviewer>,
     ) -> Option<String> {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
-            return Some("Not available on this server.".to_string());
+            return Some("Not available on this server".to_string());
         };
         let requirements = self.requirements.as_ref();
         if !profile.allowed
@@ -75,7 +74,7 @@ impl PermissionDiscovery {
                 .and_then(|r| r.allowed_approvals_reviewers.as_ref())
                 .is_some_and(|allowed| reviewer.is_some_and(|value| !allowed.contains(&value)))
         {
-            return Some("Disabled by requirements.".to_string());
+            return Some("Disabled by requirements".to_string());
         }
         None
     }
@@ -90,56 +89,26 @@ pub(crate) fn fetch(
 ) {
     let handle = app_server.request_handle();
     let mode = app_server.thread_params_mode();
+    if mode.settings_owner() == ThreadSettingsOwner::Server {
+        tx.send(AppEvent::PermissionProfilesLoaded {
+            request_id,
+            result: Err("Cloud conversations use server-selected permissions.".to_string()),
+        });
+        return;
+    }
     let cwd = thread_cwd
         .or_else(|| match mode {
             ThreadParamsMode::Embedded => Some(config.cwd.as_path()),
-            ThreadParamsMode::Remote => app_server.remote_cwd_override(),
+            ThreadParamsMode::Remote | ThreadParamsMode::Cloud => app_server.remote_cwd_override(),
         })
         .map(|cwd| cwd.to_string_lossy().into_owned());
-    // The daemon's catalog cannot see permission definitions from this invocation.
-    let local_discovery = (!app_server.uses_embedded_app_server()
-        && mode == ThreadParamsMode::Embedded
-        && config.config_layer_stack.layers_low_to_high().any(|layer| {
-            matches!(layer.name, codex_config::ConfigLayerSource::SessionFlags)
-                && layer.config.get("permissions").is_some()
-        }))
-    .then(|| PermissionDiscovery::local(config));
-    let active_custom_profile = config
-        .permissions
-        .active_permission_profile()
-        .is_some_and(|profile| !profile.id.starts_with(':'));
     tokio::spawn(async move {
         let request = async {
-            if let Some(discovery) = local_discovery {
-                return Ok(discovery);
-            }
-            if mode == ThreadParamsMode::Remote && !active_custom_profile {
-                let config: ConfigReadResponse = handle
-                    .request_typed(ClientRequest::ConfigRead {
-                        request_id: RequestId::String("tui-permission-config".to_string()),
-                        params: ConfigReadParams {
-                            include_layers: false,
-                            cwd: cwd.clone(),
-                        },
-                    })
-                    .await
-                    .map_err(discovery_error)?;
-                if !config
-                    .config
-                    .additional
-                    .get("default_permissions")
-                    .is_some_and(serde_json::Value::is_string)
-                {
-                    return Ok(PermissionDiscovery {
-                        profiles: Vec::new(),
-                        requirements: None,
-                        explicit_profile_mode: false,
-                    });
-                }
-            }
             let requirements: ConfigRequirementsReadResponse = handle
                 .request_typed(ClientRequest::ConfigRequirementsRead {
-                    request_id: RequestId::String("tui-permission-requirements".to_string()),
+                    request_id: RequestId::String(format!(
+                        "tui-permission-requirements-{request_id}"
+                    )),
                     params: None,
                 })
                 .await
@@ -147,10 +116,12 @@ pub(crate) fn fetch(
             let mut profiles = Vec::new();
             let mut cursor = None;
             let mut cursors = HashSet::new();
-            for _ in 0..10 {
+            for page in 0..10 {
                 let response: PermissionProfileListResponse = handle
                     .request_typed(ClientRequest::PermissionProfileList {
-                        request_id: RequestId::String("tui-permission-profiles".to_string()),
+                        request_id: RequestId::String(format!(
+                            "tui-permission-profiles-{request_id}-{page}"
+                        )),
                         params: PermissionProfileListParams {
                             cursor,
                             limit: Some(100),
@@ -174,7 +145,6 @@ pub(crate) fn fetch(
                     return Ok(PermissionDiscovery {
                         profiles,
                         requirements: requirements.requirements,
-                        explicit_profile_mode: true,
                     });
                 };
                 if !cursors.insert(next.clone()) {

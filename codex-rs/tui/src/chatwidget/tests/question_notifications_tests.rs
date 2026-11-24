@@ -7,7 +7,8 @@ use pretty_assertions::assert_eq;
 #[tokio::test]
 async fn live_async_question_notifies_once_and_takes_priority_over_turn_completion() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    let item = AppServerThreadItem::AgentMessage {
+    let item = AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "question".into(),
         text: String::new(),
         phase: None,
@@ -26,12 +27,13 @@ async fn live_async_question_notifies_once_and_takes_priority_over_turn_completi
         assert!(chat.pending_notification.is_none());
     }
 
-    let notification = ServerNotification::ItemCompleted(ItemCompletedNotification {
+    let notification = ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        "thread".into(),
+        "turn".into(),
         item,
-        thread_id: "thread".into(),
-        turn_id: "turn".into(),
-        completed_at_ms: 0,
-    });
+        None,
+        0,
+    ));
     chat.handle_server_notification(notification.clone(), /*replay_kind*/ None);
     chat.notify(Notification::AgentTurnComplete {
         response: "Done".into(),

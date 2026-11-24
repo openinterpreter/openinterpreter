@@ -304,7 +304,7 @@ fn activity_alternative_focuses_details_and_hints_follow_configured_chords() {
                     cell.compact_hyperlink_lines(width)
                 },
                 auxiliary: Vec::new(),
-                has_hidden_details: true,
+                disclosure: Some(crate::history_cell::ActivityDisclosure::Generic),
             })
         });
         render(view, &[])

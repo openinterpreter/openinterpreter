@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use app_test_support::ChatGptAuthFixture;
@@ -16,10 +17,12 @@ use serde_json::Value;
 use serde_json::json;
 use std::path::Path;
 use std::process::Output;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -635,6 +638,64 @@ async fn plugin_list_prints_plugins_in_a_table() -> Result<()> {
         .stdout(contains("not installed"))
         .stdout(contains(plugin_path.display().to_string()));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_list_succeeds_when_stdout_closes_early() -> Result<()> {
+    assert_plugin_list_succeeds_when_stdout_closes_early(&[]).await
+}
+
+#[tokio::test]
+async fn plugin_list_json_succeeds_when_stdout_closes_early() -> Result<()> {
+    assert_plugin_list_succeeds_when_stdout_closes_early(&["--json", "--available"]).await
+}
+
+async fn assert_plugin_list_succeeds_when_stdout_closes_early(args: &[&str]) -> Result<()> {
+    let (codex_home, source) = setup_local_marketplace()?;
+    let plugins = (0..32_768)
+        .map(|index| {
+            json!({
+                "name": format!("sample-{index:05}"),
+                "source": {"source": "npm", "package": "sample"},
+            })
+        })
+        .collect::<Vec<_>>();
+    write_marketplace_source_with_manifest(
+        source.path(),
+        &json!({"name": "debug", "plugins": plugins}).to_string(),
+    )?;
+
+    // The producer must not fit its entire output in the pipe before we close it.
+    let complete = codex_command(codex_home.path())?
+        .args(["plugin", "list", "--marketplace", "debug"])
+        .args(args)
+        .assert()
+        .success();
+    assert!(complete.get_output().stdout.len() > 1024 * 1024);
+
+    let mut child = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .env("CODEX_HOME", codex_home.path())
+        .env("HOME", codex_home.path())
+        .current_dir(codex_home.path())
+        .args(["plugin", "list", "--marketplace", "debug"])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = child.stdout.take().context("piped stdout")?;
+    let mut prefix = [0; 1];
+    stdout.read_exact(&mut prefix).await?;
+    drop(stdout);
+
+    let output = child.wait_with_output().await?;
+    assert!(
+        output.status.success(),
+        "plugin list {args:?} exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!String::from_utf8(output.stderr)?.contains("panicked"));
     Ok(())
 }
 

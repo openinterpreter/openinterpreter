@@ -1,6 +1,9 @@
 use crate::agent::types::AgentMetadata;
+use crate::config::Config;
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
@@ -36,9 +39,19 @@ struct ActiveAgents {
     nickname_reset_count: usize,
 }
 
+/// Effective configuration and executor bindings retained while a child's runtime is unloaded.
+#[derive(Clone)]
+pub(crate) struct EvictedEnvironments {
+    pub(crate) history_mode: codex_protocol::protocol::ThreadHistoryMode,
+    pub(crate) config: Arc<Config>,
+    pub(crate) has_independent_service_tier: bool,
+    pub(crate) selections: Vec<TurnEnvironmentSelection>,
+    pub(crate) bindings: TurnEnvironmentSnapshot,
+}
+
 struct RegisteredAgent {
     path: String,
-    evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
+    evicted_environments: Option<EvictedEnvironments>,
 }
 
 impl RegisteredAgent {
@@ -92,9 +105,10 @@ impl AgentRegistry {
     ) -> Result<SpawnReservation> {
         if let Some(max_threads) = max_threads {
             if !self.try_increment_spawned(max_threads) {
-                return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
-                    max_threads,
-                }));
+                return Err(
+                    CodexErr::new(CodexErrorDetails::AgentLimitReached { max_threads })
+                        .with_agent_context(AgentErrorContext::RegistryCapacity),
+                );
             }
         } else {
             self.total_count.fetch_add(1, Ordering::AcqRel);
@@ -172,7 +186,7 @@ impl AgentRegistry {
     pub(crate) fn save_evicted_environments(
         &self,
         thread_id: ThreadId,
-        environments: Vec<TurnEnvironmentSelection>,
+        environments: EvictedEnvironments,
     ) {
         let mut active_agents = self
             .active_agents
@@ -183,10 +197,7 @@ impl AgentRegistry {
         }
     }
 
-    pub(crate) fn evicted_environments(
-        &self,
-        thread_id: ThreadId,
-    ) -> Option<Vec<TurnEnvironmentSelection>> {
+    pub(crate) fn evicted_environments(&self, thread_id: ThreadId) -> Option<EvictedEnvironments> {
         let active_agents = self
             .active_agents
             .lock()
@@ -302,7 +313,8 @@ impl AgentRegistry {
         match active_agents.agent_tree.entry(agent_path.to_string()) {
             Entry::Occupied(_) => Err(CodexErr::UnsupportedOperation(format!(
                 "agent path `{agent_path}` already exists"
-            ))),
+            ))
+            .with_agent_context(AgentErrorContext::DuplicatePath)),
             Entry::Vacant(entry) => {
                 entry.insert(AgentMetadata {
                     agent_path: Some(agent_path.clone()),
@@ -364,6 +376,7 @@ impl SpawnReservation {
             .reserve_agent_nickname(names, preferred)
             .ok_or_else(|| {
                 CodexErr::UnsupportedOperation("no available agent nicknames".to_string())
+                    .with_agent_context(AgentErrorContext::NicknameUnavailable)
             })?;
         self.reserved_agent_nickname = Some(agent_nickname.clone());
         Ok(agent_nickname)

@@ -49,7 +49,7 @@ use crate::protocol::WireFsReadFileParams;
 #[tokio::test]
 async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conversion() {
     let (websocket_url, captured_params, server) =
-        record_read_file_params(/*expected_requests*/ 2).await;
+        record_read_file_params(/*expected_requests*/ 4).await;
     let file_system = RemoteFileSystem::new(LazyRemoteExecServerClient::new(
         ExecServerTransportParams::websocket_url(
             websocket_url,
@@ -88,14 +88,23 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
     }
 
     let captured_params = captured_params.await.expect("captured params");
-    let expected_params = paths
-        .into_iter()
+    let mut expected_params = paths
+        .iter()
+        .cloned()
         .map(|path| FsReadFileParams {
             path,
             follow_symlinks: None,
             sandbox: Some(sandbox.clone()),
         })
         .collect::<Vec<_>>();
+    expected_params.extend(vec![
+        FsReadFileParams {
+            path: paths[0].clone(),
+            follow_symlinks: None,
+            sandbox: None,
+        };
+        2
+    ]);
     assert_eq!(
         captured_params
             .iter()
@@ -118,6 +127,71 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
         );
     }
     server.await.expect("recording server should succeed");
+}
+
+/// Only dynamic policies retain legacy selection fields; all policies preserve the new context.
+#[tokio::test]
+async fn remote_full_disk_reads_preserve_executor_permission_path_validation() {
+    let cases = [
+        ("file:///workspace", "file:///allowed", false),
+        ("file:///workspace", "file:///C:/allowed", true),
+        ("file:///C:/workspace", "file:///C:/allowed", false),
+        ("file:///C:/workspace", "file://server/share/allowed", false),
+        ("file:///C:/workspace", "file:///allowed", true),
+        ("file:///C:/workspace", "file:///C:/allowed%5Csecret", true),
+        ("file:///workspace", "file:///%00/bad/path/YQ", true),
+    ];
+    let (websocket_url, captured_params, server) = record_read_file_params(cases.len()).await;
+    let file_system = RemoteFileSystem::new(LazyRemoteExecServerClient::new(
+        ExecServerTransportParams::websocket_url(
+            websocket_url,
+            DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+        ),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    ));
+    let mut expected_params = Vec::new();
+    for (cwd, permission_path, retain_sandbox) in cases {
+        let cwd = PathUri::parse(cwd).expect("executor cwd");
+        let path = cwd.join("readable.txt").expect("executor file");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry::new(
+                FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::new(
+                PathUri::parse(permission_path)
+                    .expect("permission path")
+                    .into(),
+                FileSystemAccessMode::Write,
+            ),
+        ]);
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            // Policy cwd is caller-supplied; only the operation path must be native to succeed.
+            PathUri::parse(permission_path).expect("deliberately mismatched policy cwd"),
+        );
+        file_system
+            .read_file(&path, Default::default(), Some(&sandbox))
+            .await
+            .expect("remote read");
+        expected_params.push(FsReadFileParams {
+            path,
+            follow_symlinks: None,
+            sandbox: retain_sandbox.then_some(sandbox),
+        });
+    }
+    assert_eq!(
+        captured_params
+            .await
+            .expect("captured params")
+            .into_iter()
+            .map(|(params, _)| params)
+            .collect::<Vec<_>>(),
+        expected_params,
+    );
+    server.await.expect("recording server");
 }
 
 /// Only dynamic policies retain legacy selection fields; all policies preserve the new context.
@@ -402,7 +476,7 @@ async fn concurrent_remote_metadata_requests_share_only_in_flight_results() {
     };
     assert_eq!(first.expect("first metadata request"), expected);
     assert_eq!(second.expect("second metadata request"), expected);
-    assert!(file_system.metadata_requests.lock().await.is_empty());
+    assert!(file_system.lock_metadata_requests().is_empty());
 
     let initializing_file_system = std::sync::Arc::clone(&file_system);
     let initializing_path = path.clone();
@@ -424,9 +498,7 @@ async fn concurrent_remote_metadata_requests_share_only_in_flight_results() {
     assert!(futures::poll!(follower.as_mut()).is_pending());
     assert_eq!(
         file_system
-            .metadata_requests
-            .lock()
-            .await
+            .lock_metadata_requests()
             .get(&path)
             .map(std::sync::Arc::strong_count),
         Some(3)
@@ -448,7 +520,7 @@ async fn concurrent_remote_metadata_requests_share_only_in_flight_results() {
             .expect("waiting metadata request should retry the abandoned initializer"),
         refreshed
     );
-    assert!(file_system.metadata_requests.lock().await.is_empty());
+    assert!(file_system.lock_metadata_requests().is_empty());
     assert_eq!(
         captured_params.await.expect("captured metadata requests"),
         vec![

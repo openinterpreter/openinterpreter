@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::LoadInstructionsFuture;
@@ -31,7 +33,9 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 
+use crate::CodexThread;
 use crate::ThreadManager;
+pub use crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
 use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -39,6 +43,78 @@ use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::thread_manager;
 use crate::unified_exec;
+
+/// Retain the active turn's timing state across completion for integration assertions.
+pub async fn observe_turn_timing(
+    thread: &CodexThread,
+) -> Option<impl Fn(Instant, Instant) -> Option<[Duration; 5]> + use<>> {
+    let timing = {
+        let active = thread.session.active_turn.lock().await;
+        Arc::clone(
+            &active
+                .as_ref()?
+                .task
+                .as_ref()?
+                .turn_context
+                .turn_timing_state,
+        )
+    };
+    Some(move |start: Instant, end: Instant| {
+        let path = timing.snapshot_path(end)?;
+        let durations = path.durations(start, end);
+        Some([
+            durations.sampling,
+            durations.auto_review,
+            durations.tools,
+            durations.overhead + durations.compaction + durations.user_wait,
+            durations.unknown,
+        ])
+    })
+}
+
+/// Inspect the resolved environment configurations used to construct sampling steps.
+pub async fn environment_windows_sandbox_types(
+    thread: &CodexThread,
+) -> Vec<(String, codex_protocol::sandbox::SandboxType)> {
+    thread
+        .session
+        .services
+        .turn_environments
+        .snapshot()
+        .await
+        .turn_environments()
+        .map(|environment| {
+            (
+                environment.selection.environment_id.clone(),
+                environment.config().windows_sandbox_type,
+            )
+        })
+        .collect()
+}
+
+/// Supply fixed model metadata to tests without implementing a provider.
+pub fn fixed_model_catalog(
+    manager: SharedModelsManager,
+) -> Arc<dyn codex_model_provider::ModelCatalogFactory> {
+    struct FixedCatalog(SharedModelsManager);
+
+    impl codex_model_provider::ModelCatalogFactory for FixedCatalog {
+        fn build(
+            &self,
+            _provider: codex_model_provider::SharedModelProvider,
+            _config_model_catalog: Option<codex_protocol::openai_models::ModelsResponse>,
+            _api_key_model_discovery_default: bool,
+        ) -> SharedModelsManager {
+            Arc::clone(&self.0)
+        }
+
+        fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
+            self.0.set_api_key_model_discovery_enabled(enabled);
+        }
+    }
+
+    Arc::new(FixedCatalog(manager))
+}
 
 static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     let mut response = bundled_models_response()
@@ -62,6 +138,17 @@ pub async fn history_with_tool_call_metadata(
         .executed_tool_calls
         .attach_to_prompt(&mut items, &mut Default::default());
     items
+}
+
+/// Read the same attribution that the provider serializes in client metadata.
+pub fn mcp_attribution_snapshot(
+    thread: &crate::CodexThread,
+) -> codex_protocol::mcp::McpAttribution {
+    thread
+        .session
+        .services
+        .executed_tool_calls
+        .mcp_attribution_snapshot()
 }
 
 /// Test-only provider that supplies no user instructions.
@@ -137,7 +224,7 @@ pub async fn start_thread_with_user_shell_override(
         .await
 }
 
-pub async fn resume_thread_from_rollout_with_user_shell_override(
+pub async fn resume_legacy_thread_from_rollout_with_user_shell_override(
     thread_manager: &ThreadManager,
     config: Config,
     rollout_path: PathBuf,
@@ -146,7 +233,7 @@ pub async fn resume_thread_from_rollout_with_user_shell_override(
     supports_openai_form_elicitation: bool,
 ) -> codex_protocol::error::Result<crate::NewThread> {
     thread_manager
-        .resume_thread_from_rollout_with_user_shell_override_for_tests(
+        .resume_legacy_thread_from_rollout_with_user_shell_override_for_tests(
             config,
             rollout_path,
             auth_manager,
@@ -177,7 +264,9 @@ pub fn get_model_offline(model: Option<&str>) -> String {
 }
 
 pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {
-    construct_model_info_offline_for_tests(model, &config.to_models_manager_config())
+    Arc::unwrap_or_clone(
+        construct_model_info_offline_for_tests(model, &config.to_models_manager_config()).model,
+    )
 }
 
 #[derive(Clone, Copy)]

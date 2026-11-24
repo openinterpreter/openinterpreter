@@ -15,11 +15,11 @@ use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
-use codex_app_server::AppServerWebsocketAuthSettings;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::RemoteControlStartupMode;
 use codex_app_server::run_main_with_transport_options;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RemoteControlClient;
@@ -47,6 +47,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_state::RemoteControlEnrollmentRecord;
 use codex_state::StateRuntime;
 use codex_utils_cli::CliConfigOverrides;
+use codex_websocket_auth::WebsocketAuthSettings;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -241,7 +242,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
             /*default_analytics_enabled*/ false,
             transport,
             SessionSource::VSCode,
-            AppServerWebsocketAuthSettings::default(),
+            WebsocketAuthSettings::default(),
             AppServerRuntimeOptions {
                 plugin_startup_tasks: PluginStartupTasks::Skip,
                 remote_control_startup_mode: RemoteControlStartupMode::EnabledEphemeral,
@@ -713,6 +714,84 @@ async fn rpc_updates_durable_preference_but_ephemeral_does_not() -> Result<()> {
         Some(false)
     );
 
+    assert!(
+        !codex_home
+            .path()
+            .join("app-server-daemon/settings.json")
+            .exists()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_rpc_persists_unless_daemon_lock_is_busy() -> Result<()> {
+    use super::daemon_update_recovery::connect_daemon_client;
+    use super::daemon_update_recovery::request;
+    use super::daemon_update_recovery::spawn_server;
+    use serde_json::json;
+
+    let home = TempDir::new()?;
+    let mut backend = BlockingRemoteControlBackend::start(home.path()).await?;
+    let socket = home.path().join("control/server.sock");
+    let settings_file = home.path().join("app-server-daemon/settings.json");
+    let _server = spawn_server(home.path(), &socket)?;
+    let mut client = connect_daemon_client(
+        &socket,
+        InitializeCapabilities {
+            experimental_api: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let enable = request(
+        &mut client,
+        /*id*/ 2,
+        "remoteControl/enable",
+        json!(null),
+    );
+    let enroll = async {
+        timeout(DEFAULT_TIMEOUT, backend.wait_for_enroll_request()).await??;
+        backend.complete_enrollment()
+    };
+    tokio::try_join!(enable, enroll)?;
+    let mut settings = tokio::fs::read(&settings_file).await?;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&settings)?,
+        json!({"remoteControlEnabled": true})
+    );
+    for (id, method, ephemeral) in [
+        (3, "remoteControl/disable", true),
+        (4, "remoteControl/disable", false),
+        (5, "remoteControl/enable", true),
+    ] {
+        request(&mut client, id, method, json!({"ephemeral": ephemeral})).await?;
+        let updated = tokio::fs::read(&settings_file).await?;
+        if ephemeral {
+            assert_eq!(updated, settings);
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&updated)?,
+                json!({"remoteControlEnabled": false})
+            );
+        }
+        settings = updated;
+    }
+    // A lifecycle operation holding daemon.lock must not block the RPC or
+    // allow it to overwrite other settings being changed by the daemon.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(settings_file.with_file_name("daemon.lock"))?;
+    lock.lock()?;
+    request(
+        &mut client,
+        /*id*/ 6,
+        "remoteControl/enable",
+        json!(null),
+    )
+    .await?;
+    assert_eq!(tokio::fs::read(&settings_file).await?, settings);
     Ok(())
 }
 
@@ -1251,11 +1330,14 @@ impl PairingRemoteControlBackend {
                 )
                 .await?;
 
-                let request_after_enroll = read_http_request(&listener).await?;
-                let pair_http_request = if request_after_enroll.request_line.starts_with("GET ") {
-                    read_http_request(&listener).await?
-                } else {
-                    request_after_enroll
+                let mut websocket_connections = Vec::new();
+                let pair_http_request = loop {
+                    let request = read_http_request(&listener).await?;
+                    if request.request_line.starts_with("GET ") {
+                        websocket_connections.push(request);
+                    } else {
+                        break request;
+                    }
                 };
                 respond_with_json(
                     pair_http_request.reader.into_inner(),
@@ -1272,7 +1354,14 @@ impl PairingRemoteControlBackend {
                     serde_json::json!({ "pairing_code": "pairing-code" }),
                     serde_json::json!({ "manual_pairing_code": "ABCD-EFGH" }),
                 ] {
-                    let status_http_request = read_http_request(&listener).await?;
+                    let status_http_request = loop {
+                        let request = read_http_request(&listener).await?;
+                        if request.request_line.starts_with("GET ") {
+                            websocket_connections.push(request);
+                        } else {
+                            break request;
+                        }
+                    };
                     assert_eq!(
                         status_http_request.request_line,
                         "POST /backend-api/wham/remote/control/server/pair/status HTTP/1.1"

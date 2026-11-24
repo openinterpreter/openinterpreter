@@ -222,25 +222,28 @@ impl<'a> MathMarkdown<'a> {
                 }
             }
             let rendered = if super::preferences::current().math && formula.len() < MAX_MATH_BYTES {
-                render::render(formula, display)
+                let mode = if !display {
+                    render::MathMode::Inline
+                } else if containers
+                    .peek()
+                    .is_some_and(|range| range.contains(&start))
+                {
+                    render::MathMode::NestedDisplay
+                } else {
+                    render::MathMode::Display
+                };
+                render::render(formula, mode).filter(|math| {
+                    // A spatial layout must fit in full, never wrap within a nested Markdown prefix.
+                    math.required_width.is_none_or(|required| {
+                        mode == render::MathMode::Display
+                            && width.is_none_or(|width| required <= width.saturating_sub(4))
+                    })
+                })
             } else {
                 None
             };
             let rendered = rendered
-                .filter(|text| {
-                    // Nested Markdown prefixes have their own width; keep spatial layouts at the top level.
-                    // Never wrap a spatial layout into misleading pieces.
-                    !text.contains('\n')
-                        || !containers
-                            .peek()
-                            .is_some_and(|range| range.contains(&start))
-                            && width.is_none_or(|width| {
-                                text.lines().all(|line| {
-                                    crate::width::display_width(line)
-                                        <= width.saturating_sub(/*rhs*/ 4)
-                                })
-                            })
-                })
+                .map(|math| math.text)
                 .unwrap_or_else(|| input[span.clone()].to_owned());
             // Dollars are ordinary text in the Markdown parser and cannot form an HTML tag.
             result

@@ -431,6 +431,67 @@ impl ExecutorFileSystem for TestFileSystem {
 }
 
 #[tokio::test]
+async fn project_diagnostic_uses_the_current_file_and_ignores_its_provider() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join(CONFIG_TOML_FILE);
+    let layer = ConfigLayerEntry::new(
+        ConfigLayerSource::Project {
+            dot_codex_folder: AbsolutePathBuf::from_absolute_path(dir.path())?,
+        },
+        TomlValue::Table(Default::default()),
+    );
+    std::fs::write(
+        &path,
+        "[tui]\nstatus_line_provider = 42\nvim_mode_default = 43\n",
+    )?;
+    let error = first_layer_config_error_from_entries(&[layer])
+        .await
+        .expect("invalid vim setting");
+    assert_eq!((error.path, error.range.start.line), (path, 3));
+    assert!(error.message.contains("43"), "{}", error.message);
+    Ok(())
+}
+
+#[tokio::test]
+async fn packaged_status_line_provider_is_ignored_but_strictly_validated() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let path = AbsolutePathBuf::resolve_path_against_base("defaults.toml", dir.path());
+    std::fs::write(&path, "[tui]\nstatus_line_provider = 42\n")?;
+    let load = |strict_config| {
+        load_config_layers_state(
+            &TestFileSystem,
+            dir.path(),
+            /*cwd*/ None,
+            &[],
+            ConfigLoadOptions {
+                loader_overrides: LoaderOverrides {
+                    packaged_defaults_path: Some(path.clone()),
+                    ..LoaderOverrides::without_managed_config_for_tests()
+                },
+                strict_config,
+                ..Default::default()
+            },
+            &crate::NoopThreadConfigLoader,
+        )
+    };
+    let stack = load(/*strict_config*/ false).await?;
+    assert_eq!(stack.effective_config().get("tui"), None);
+    let error = load(/*strict_config*/ true)
+        .await
+        .expect_err("malformed packaged provider");
+    let diagnostic = error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<crate::ConfigLoadError>())
+        .expect("packaged config diagnostic")
+        .config_error();
+    assert_eq!(
+        (diagnostic.path.as_path(), diagnostic.range.start.line),
+        (path.as_path(), 2)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn packaged_defaults_have_lower_precedence_than_existing_config_layers() {
     let tmp = tempdir().expect("tempdir");
     let packaged_defaults_path =
@@ -582,6 +643,63 @@ async fn missing_packaged_defaults_file_returns_an_error() {
             packaged_defaults_path.display()
         )
     );
+}
+
+#[tokio::test]
+async fn multi_agent_warns_for_explicit_user_and_project_settings() -> std::io::Result<()> {
+    let home = tempdir()?;
+    let workspace = tempdir()?;
+    let cwd = AbsolutePathBuf::try_from(workspace.path())?;
+    let trust_key = TomlValue::String(project_trust_key(workspace.path()));
+    let project_config_dir = workspace.path().join(".codex");
+    std::fs::create_dir(&project_config_dir)?;
+    let session_flags = [(
+        "features.multi_agent".to_string(),
+        TomlValue::Boolean(false),
+    )];
+    for (user, project, flags, warn) in [
+        ("", "", session_flags.as_slice(), false),
+        ("[features]\nmulti_agent = false", "", &[], true),
+        (
+            "",
+            "[features]\nmulti_agent = true",
+            session_flags.as_slice(),
+            true,
+        ),
+    ] {
+        std::fs::write(
+            home.path().join(CONFIG_TOML_FILE),
+            format!("[projects.{trust_key}]\ntrust_level = 'trusted'\n{user}"),
+        )?;
+        std::fs::write(project_config_dir.join(CONFIG_TOML_FILE), project)?;
+        let stack = load_config_layers_state(
+            &TestFileSystem,
+            home.path(),
+            Some(cwd.clone()),
+            flags,
+            LoaderOverrides::without_managed_config_for_tests(),
+            &crate::NoopThreadConfigLoader,
+        )
+        .await?;
+        let warned = stack
+            .startup_warnings()
+            .unwrap_or_default()
+            .iter()
+            .any(|warning| {
+                warning.contains(
+                    "`[features].multi_agent` is deprecated. It still controls the V1 fallback.",
+                )
+            });
+        assert_eq!(
+            (
+                stack.effective_config()["features"]["multi_agent"].as_bool(),
+                warned
+            ),
+            (Some(false), warn),
+            "user={user:?}, project={project:?}"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1077,4 +1195,36 @@ fn project_config_cannot_change_system_proxy_routing() {
             );
         }
     }
+}
+
+#[test]
+fn otel_headers_helpers_cannot_come_from_repository_config() {
+    let mut config: TomlValue = toml::from_str(
+        "[otel]\nheaders_helper = 'untrusted-command'\nheaders_helper_refresh_interval_ms = 1",
+    )
+    .unwrap();
+    let ignored =
+        sanitize_project_config(&mut config, CredentialBrokerProjectState::Unconfigured, &[]);
+    assert_eq!(ignored, ["otel"]);
+    assert!(config.get("otel").is_none());
+}
+
+#[test]
+fn otel_headers_helper_interval_must_be_positive() {
+    assert!(
+        toml::from_str::<ConfigToml>(
+            "[otel]\nheaders_helper = 'helper'\nheaders_helper_refresh_interval_ms = 0"
+        )
+        .is_err()
+    );
+    let config: ConfigToml = toml::from_str(
+        "[otel]\nheaders_helper = 'helper'\nheaders_helper_refresh_interval_ms = 900000",
+    )
+    .unwrap();
+    let otel = config.otel.unwrap();
+    assert_eq!(otel.headers_helper.as_deref(), Some("helper"));
+    assert_eq!(
+        otel.headers_helper_refresh_interval_ms.unwrap().get(),
+        900000
+    );
 }

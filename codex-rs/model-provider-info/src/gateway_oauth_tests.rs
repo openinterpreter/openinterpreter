@@ -20,8 +20,8 @@ fn parses_header_and_cookie_delivery() {
     let header = provider("delivery = { kind = 'header', name = 'x-gateway-auth' }");
     assert_eq!(header.validate(), Ok(()));
     assert_eq!(
-        header.gateway_oauth.as_ref().unwrap().delivery,
-        GatewayOAuthDelivery::Header {
+        header.gateway_oauth.as_ref().unwrap().delivery(),
+        &GatewayOAuthDelivery::Header {
             name: "x-gateway-auth".into(),
             scheme: "Bearer".into(),
         }
@@ -32,6 +32,19 @@ fn parses_header_and_cookie_delivery() {
         toml::from_str::<ModelProviderInfo>(&toml::to_string(&cookie).unwrap()).unwrap(),
         cookie
     );
+}
+
+#[test]
+fn a_remote_device_authorization_url_requires_https() {
+    for (url, valid) in [
+        ("https://login.example.test/devicecode", true),
+        ("http://login.example.test/devicecode", false),
+    ] {
+        let config = provider(&format!(
+            "device_authorization_url = '{url}'\ndelivery = {{ kind = 'header', name = 'x-gateway-auth' }}"
+        ));
+        assert_eq!(config.validate().is_ok(), valid, "{url}");
+    }
 }
 
 #[test]
@@ -47,12 +60,14 @@ fn rejects_unsafe_endpoints_and_delivery_collisions() {
         invalid.base_url = Some(url.into());
         assert!(invalid.validate().is_err());
         invalid = valid.clone();
-        invalid.gateway_oauth.as_mut().unwrap().token_url = url.into();
+        let Some(GatewayOAuthConfig::OAuth(settings)) = &mut invalid.gateway_oauth else {
+            unreachable!()
+        };
+        settings.token_url = url.into();
         let error = invalid.validate().unwrap_err();
         assert!(!error.contains(url));
     }
     for name in [
-        "Authorization",
         "HOST",
         "x-openai-actor-authorization",
         "content-length",
@@ -76,4 +91,66 @@ fn rejects_unsafe_endpoints_and_delivery_collisions() {
         "COOKIE_ENV".into(),
     )]));
     assert!(cookie.validate().is_err());
+}
+
+#[test]
+fn credential_export_rejects_oauth_settings() {
+    for oauth in [
+        "client_id = 'codex'",
+        "scopes = []",
+        "credentials_store = 'keyring'",
+        "authorization_url = 'https://example.test/authorize'\ntoken_url = 'https://example.test/token'\nclient_id = 'codex'",
+    ] {
+        let config =
+            format!("[gateway_oauth]\ncredential_export = {{ command = 'export-token' }}\n{oauth}");
+        let error = toml::from_str::<ModelProviderInfo>(&config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("choose one gateway credential source"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn gateway_bearer_requires_the_model_catalog_to_share_its_origin() {
+    let other = "https://gateway.example.test:8443/catalog";
+    let mut info = provider("");
+    info.model_catalog_url = Some(other.into());
+    assert!(
+        info.validate()
+            .unwrap_err()
+            .contains("same scheme, host, and port as base_url")
+    );
+
+    info.model_catalog_url = Some("https://gateway.example.test:443/custom/catalog".into());
+    assert_eq!(info.validate(), Ok(()));
+
+    let mut legacy = provider("delivery = { kind = 'header', name = 'x-gateway-auth' }");
+    legacy.model_catalog_url = Some(other.into());
+    assert_eq!(legacy.validate(), Ok(()));
+}
+
+#[test]
+fn omitted_delivery_rejects_an_existing_provider_bearer() {
+    let mut info = provider("");
+    assert_eq!(info.validate(), Ok(()));
+    info.requires_openai_auth = true;
+    assert!(
+        info.validate()
+            .unwrap_err()
+            .contains("gateway_oauth.delivery")
+    );
+    info.requires_openai_auth = false;
+    info.env_key = Some("PROVIDER_API_KEY".into());
+    assert!(
+        info.validate()
+            .unwrap_err()
+            .contains("gateway_oauth.delivery")
+    );
+
+    let mut explicit = provider("delivery = { kind = 'header', name = 'x-gateway-auth' }");
+    explicit.env_key = info.env_key;
+    assert_eq!(explicit.validate(), Ok(()));
 }

@@ -55,6 +55,7 @@ pub struct ConfigProfile {
     pub include_apps_instructions: Option<bool>,
     pub include_collaboration_mode_instructions: Option<bool>,
     pub include_environment_context: Option<bool>,
+    pub include_environment_context_time: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub tools: Option<ToolsToml>,
     pub web_search: Option<WebSearchMode>,
@@ -74,7 +75,6 @@ pub struct ConfigProfile {
 
 /// TUI settings supported inside a named profile.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct ProfileTui {
     /// Preferred layout for resume/fork session picker results.

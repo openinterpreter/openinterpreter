@@ -1,0 +1,8 @@
+---
+source: tui/src/empty_state_animation_tests.rs
+assertion_line: 171
+expression: "fade_frames.join(\"\\n\")"
+---
+0ms: ⣀ Rgb(195, 201, 206)
+200ms: ⣀ Rgb(121, 126, 136)
+400ms: ⣀ Rgb(47, 52, 67)

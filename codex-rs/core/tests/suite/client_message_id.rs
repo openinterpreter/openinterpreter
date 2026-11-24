@@ -79,7 +79,10 @@ async fn repeated_client_message_id_during_turn_adds_input_once() -> anyhow::Res
         .await?;
     let codex = &test.codex;
 
-    let TurnInputSubmission::Started { turn_id } = codex
+    let TurnInputSubmission::Started {
+        turn_id,
+        root_turn_id,
+    } = codex
         .start_or_steer_turn(user_message("start prompt", Some("start-id")))
         .await?
     else {
@@ -93,6 +96,7 @@ async fn repeated_client_message_id_during_turn_adds_input_once() -> anyhow::Res
 
     let steered = TurnInputSubmission::Steered {
         turn_id: turn_id.clone(),
+        root_turn_id: root_turn_id.clone(),
     };
     assert_eq!(
         codex
@@ -164,7 +168,10 @@ async fn repeated_client_message_id_after_turn_is_no_op() -> anyhow::Result<()> 
     let test = test_codex().build_with_auto_env(&server).await?;
     let codex = &test.codex;
 
-    let TurnInputSubmission::Started { turn_id } = codex
+    let TurnInputSubmission::Started {
+        turn_id,
+        root_turn_id,
+    } = codex
         .start_or_steer_turn(user_message("only once", Some("idle-id")))
         .await?
     else {
@@ -177,7 +184,8 @@ async fn repeated_client_message_id_after_turn_is_no_op() -> anyhow::Result<()> 
             .start_or_steer_turn(user_message("only once", Some("idle-id")))
             .await?,
         TurnInputSubmission::Steered {
-            turn_id: turn_id.clone()
+            turn_id: turn_id.clone(),
+            root_turn_id,
         }
     );
     // A repeat names a stale turn, but the original request already succeeded.
@@ -220,6 +228,7 @@ async fn interrupt_discards_pending_input_so_retry_is_accepted() -> anyhow::Resu
 
     let TurnInputSubmission::Started {
         turn_id: interrupted_turn,
+        ..
     } = codex
         .start_or_steer_turn(user_message("first prompt", /*client_id*/ None))
         .await?
@@ -248,7 +257,7 @@ async fn interrupt_discards_pending_input_so_retry_is_accepted() -> anyhow::Resu
     let retried = codex
         .start_or_steer_turn(user_message("retry me", Some("retry-id")))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = &retried else {
+    let TurnInputSubmission::Started { turn_id, .. } = &retried else {
         panic!("a retry of discarded input should start a turn: {retried:?}");
     };
     assert_ne!(turn_id, &interrupted_turn);
@@ -297,6 +306,7 @@ async fn input_dropped_before_recording_is_accepted_on_retry() -> anyhow::Result
 
     let TurnInputSubmission::Started {
         turn_id: stopped_turn,
+        ..
     } = codex
         .start_or_steer_turn(user_message("retry me", Some("retry-id")))
         .await?
@@ -308,7 +318,7 @@ async fn input_dropped_before_recording_is_accepted_on_retry() -> anyhow::Result
     let retried = codex
         .start_or_steer_turn(user_message("retry me", Some("retry-id")))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = &retried else {
+    let TurnInputSubmission::Started { turn_id, .. } = &retried else {
         panic!("a retry of input that was never recorded should start a turn: {retried:?}");
     };
     assert_ne!(turn_id, &stopped_turn);

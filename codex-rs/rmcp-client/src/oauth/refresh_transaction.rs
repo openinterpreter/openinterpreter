@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
+use codex_config::McpServerOAuthConfig;
 use codex_keyring_store::DefaultKeyringStore;
 use codex_keyring_store::KeyringStore;
 use oauth2::TokenResponse;
@@ -19,6 +20,8 @@ use rmcp::transport::auth::StoredCredentials;
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::warn;
+
+use crate::oauth_client_credentials::OAuthClientCredentials;
 
 use super::OAuthPersistor;
 use super::OAuthPersistorInner;
@@ -152,7 +155,8 @@ impl OAuthPersistor {
                     });
                 }
             }
-            install_tokens_in_manager(&mut guard, &latest).await?;
+            install_tokens_in_manager(&mut guard, &latest, self.inner.oauth_config.as_ref())
+                .await?;
             *self.inner.last_credentials.lock().await = Some(latest);
             return Ok(());
         }
@@ -178,7 +182,7 @@ impl OAuthPersistor {
             .metadata;
         validate_refresh_token_issuer(&metadata, &latest)?;
         guard.set_metadata(metadata);
-        install_tokens_in_manager(&mut guard, &latest)
+        install_tokens_in_manager(&mut guard, &latest, self.inner.oauth_config.as_ref())
             .await
             .context("failed to stage OAuth credentials for refresh")?;
         // The owned task prevents caller deadlines from canceling after possible token rotation;
@@ -242,16 +246,17 @@ impl OAuthPersistor {
         // TODO: Add a bounded persistence retry only if telemetry shows this is common; never
         // silently switch stores or continue with an unpersisted credential.
         debug!("persisting refreshed MCP OAuth credentials to the resolved store");
-        if let Err(error) =
-            self.inner
-                .credential_store
-                .save(keyring_store, &self.inner.server_name, &refreshed)
-        {
+        let result = self.inner.credential_store.save_with_refresh_telemetry(
+            keyring_store,
+            &self.inner.server_name,
+            Some(&latest),
+            &refreshed,
+        );
+        if let Err(error) = result {
             warn!(
-                error = %error,
                 "failed to persist refreshed MCP OAuth credentials; returning the error and restoring the previous in-process credentials"
             );
-            install_tokens_in_manager(&mut guard, &latest)
+            install_tokens_in_manager(&mut guard, &latest, self.inner.oauth_config.as_ref())
                 .await
                 .context(
                     "failed to restore previous OAuth credentials after refresh persistence failed",
@@ -262,7 +267,7 @@ impl OAuthPersistor {
         // This layer retains RMCP's legacy persistence hook. Install the same merged response
         // (including carried-forward refresh token/scopes) so that hook cannot overwrite durable
         // credentials with the provider's partial response.
-        install_tokens_in_manager(&mut guard, &refreshed)
+        install_tokens_in_manager(&mut guard, &refreshed, self.inner.oauth_config.as_ref())
             .await
             .context(
                 "refreshed OAuth tokens were persisted but could not be installed in the authorization manager",
@@ -315,7 +320,8 @@ impl OAuthPersistor {
                 );
             }
             debug!("adopting new MCP OAuth credentials after a failed refresh");
-            install_tokens_in_manager(manager, &replacement).await?;
+            install_tokens_in_manager(manager, &replacement, self.inner.oauth_config.as_ref())
+                .await?;
             *self.inner.last_credentials.lock().await = Some(replacement);
             return Ok(());
         }
@@ -335,7 +341,10 @@ fn token_has_expired(expires_at: Option<u64>) -> bool {
 pub(crate) async fn install_tokens_in_manager(
     authorization_manager: &mut AuthorizationManager,
     tokens: &StoredOAuthTokens,
+    oauth_config: Option<&McpServerOAuthConfig>,
 ) -> Result<()> {
+    let credentials = OAuthClientCredentials::resolve(oauth_config)?;
+    credentials.validate_stored_client_id(&tokens.client_id)?;
     let store = InMemoryCredentialStore::new();
     let token_response = tokens.token_response.0.clone();
     let granted_scopes = token_response
@@ -366,6 +375,7 @@ pub(crate) async fn install_tokens_in_manager(
         .initialize_from_store()
         .await
         .context("failed to adopt refreshed OAuth tokens")?;
+    credentials.configure_for_refresh(authorization_manager, &tokens.url, &tokens.client_id)?;
     Ok(())
 }
 
@@ -381,7 +391,7 @@ fn refreshed_tokens(
         token_response.set_scopes(previous.token_response.0.scopes().cloned());
     }
     StoredOAuthTokens {
-        server_name: inner.server_name.clone(),
+        server_name: inner.refreshed_server_name(Some(previous)),
         url: inner.url.clone(),
         issuer: previous.issuer.clone(),
         client_id: previous.client_id.clone(),

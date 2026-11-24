@@ -4,7 +4,6 @@ use pretty_assertions::assert_eq;
 fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
     ResponsesApiRequest {
         model: "gpt-5.6".to_string(),
-        instructions: String::new(),
         input,
         tools: Some(responses_api_tools(vec![json!({
             "type": "function",
@@ -21,8 +20,10 @@ fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
         client_metadata: None,
         access_programs: None,
+        request_country: Default::default(),
         text: None,
     }
 }
@@ -30,6 +31,8 @@ fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
 fn function_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
+        status: None,
+        encrypted_content: None,
         name: "Bash".to_string(),
         namespace: None,
         arguments: json!({ "command": "pwd" }).to_string(),
@@ -53,6 +56,8 @@ fn function_output(call_id: &str, output: &str) -> ResponseItem {
 fn text_message(role: &str, text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
+        status: None,
+        encrypted_content: None,
         role: role.to_string(),
         content: vec![ContentItem::InputText {
             text: text.to_string(),
@@ -99,7 +104,7 @@ fn defers_approval_notice_until_after_tool_output() {
                 "tool_call_id": "call-1"
             },
             {
-                "role": "user",
+                "role": "system",
                 "content": "Approved command prefix saved:\n[\"git\", \"status\"]"
             }
         ])
@@ -154,7 +159,7 @@ fn keeps_parallel_tool_outputs_adjacent_before_interleaved_messages() {
                 "tool_call_id": "call-2"
             },
             {
-                "role": "user",
+                "role": "system",
                 "content": "approval updated"
             },
             {

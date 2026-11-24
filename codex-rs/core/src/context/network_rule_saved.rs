@@ -1,7 +1,9 @@
 use super::ContextualUserFragment;
 use codex_protocol::approvals::NetworkPolicyAmendment;
 use codex_protocol::approvals::NetworkPolicyRuleAction;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NetworkRuleSaved {
@@ -35,14 +37,14 @@ impl ContextualUserFragment for NetworkRuleSaved {
         ("", "")
     }
 
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let (action, list_name) = match self.action {
             NetworkPolicyRuleAction::Allow => ("Allowed", "allowlist"),
             NetworkPolicyRuleAction::Deny => ("Denied", "denylist"),
         };
-        format!(
+        input_text(format!(
             "{action} network rule saved in execpolicy ({list_name}): {}",
             self.host
-        )
+        ))
     }
 }

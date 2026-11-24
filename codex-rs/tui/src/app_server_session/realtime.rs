@@ -26,7 +26,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadRealtimeStartResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadRealtimeStart {
                 request_id,
                 params: ThreadRealtimeStartParams {
@@ -37,6 +37,7 @@ impl AppServerSession {
                     codex_responses_as_items: None,
                     codex_response_item_prefix: None,
                     codex_response_handoff_mode: None,
+                    backend_reasoning_status: false,
                     codex_response_handoff_channel_prefixes: None,
                     model,
                     output_modality: RealtimeOutputModality::Audio,
@@ -46,6 +47,7 @@ impl AppServerSession {
                     realtime_end_instructions: None,
                     prompt: None,
                     realtime_session_id: None,
+                    voice_session_id: None,
                     transport: Some(ThreadRealtimeStartTransport::Webrtc { sdp: offer_sdp }),
                     version: Some(RealtimeConversationVersion::V3),
                     voice,
@@ -59,7 +61,7 @@ impl AppServerSession {
     pub(crate) async fn thread_realtime_stop(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadRealtimeStopResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadRealtimeStop {
                 request_id,
                 params: ThreadRealtimeStopParams {
@@ -78,7 +80,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadRealtimeAppendSpeechResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadRealtimeAppendSpeech {
                 request_id,
                 params: ThreadRealtimeAppendSpeechParams {

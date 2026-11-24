@@ -8,18 +8,36 @@ use serde_json::json;
 const MAX_MCP_TOOL_DESCRIPTION_BYTES: usize = 1_000;
 
 pub fn parse_mcp_tool(tool: &rmcp::model::Tool) -> Result<ToolDefinition, serde_json::Error> {
-    parse_mcp_tool_with_description_limit(tool, /*description_limit*/ None)
+    parse_mcp_tool_with_description_limit(
+        tool, /*description_limit*/ None, /*schema_max_bytes*/ None,
+    )
+}
+
+pub(crate) fn parse_mcp_tool_with_schema_max_bytes(
+    tool: &rmcp::model::Tool,
+    schema_max_bytes: usize,
+) -> Result<ToolDefinition, serde_json::Error> {
+    parse_mcp_tool_with_description_limit(
+        tool,
+        /*description_limit*/ None,
+        Some(schema_max_bytes),
+    )
 }
 
 pub fn parse_agent_plugin_mcp_tool(
     tool: &rmcp::model::Tool,
 ) -> Result<ToolDefinition, serde_json::Error> {
-    parse_mcp_tool_with_description_limit(tool, Some(MAX_MCP_TOOL_DESCRIPTION_BYTES))
+    parse_mcp_tool_with_description_limit(
+        tool,
+        Some(MAX_MCP_TOOL_DESCRIPTION_BYTES),
+        /*schema_max_bytes*/ None,
+    )
 }
 
 fn parse_mcp_tool_with_description_limit(
     tool: &rmcp::model::Tool,
     description_limit: Option<usize>,
+    schema_max_bytes: Option<usize>,
 ) -> Result<ToolDefinition, serde_json::Error> {
     let mut serialized_input_schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
 

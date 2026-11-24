@@ -1,0 +1,47 @@
+---
+source: core/tests/suite/scenarios_tools_namespace_budget.rs
+expression: "context_snapshot::format_request_history_snapshot(\"A crowded tool catalog retains every namespace, discovers a late namespace, and stays unchanged on follow-up.\",\n&requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
+---
+Scenario: A crowded tool catalog retains every namespace, discovers a late namespace, and stays unchanged on follow-up.
+
+## Window 1
+-- request 1 (turn) --
+00:message/developer:
+    <MODEL_INSTRUCTIONS>
+01:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <tools>
+        Deferred tool namespaces:
+        - service_00: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=0ab3fdffc78b8a7e]
+        - service_01: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=8c11455aa17451d3]
+        - service_02: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=ba7bd9b7d9c593ac]
+        - service_03: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=1fd3c09fb04ffc39]
+        - service_04: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=00fdda43bcbcaf1a]
+        - service_05: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=e0cec0a267c572ef]
+        - service_06: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=1ce1fc0c63651118]
+        - service_07: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=3855dbcad5307b95]
+        - service_08: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=dd43e13ba10dae06]
+        - service_09: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=770d71c9fa136b7b]
+        - service_10: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=4f09ad3c23876b69]
+        - service_11: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=201bfaf907ccdd5c]
+        - service_12: Find records & retrieve <details> from this service. Search by project, owner, date, or st... questions with its title, summary, source link, a... [hash=fd05df37ef3bb583]
+        - service_13: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=9013ae8c9f38b0ab]
+        - service_14: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=58780ba86e1698fe]
+        - service_15: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=54ea65e72647fd19]
+        - service_16: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=5252ec987dd85214]
+        - service_17: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=d6e058a14552297f]
+        - service_18: Find records & retrieve <details> from this service. Search by project, owner, date, or st...r questions with its title, summary, source link, ... [hash=ef78c2b1fa9afde2]
+        - zulu_travel: Find records & retrieve <details> from this service. Search by project, owner, date, or s...r questions with its title, summary, source link, ... [hash=8f37122c26e42e38]
+        </tools>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Find the record search tool for Zulu Travel.
+-- request 2 (turn) --
+04:tool_search_call
+05:tool_search_output
+-- request 3 (turn) --
+06:message/assistant:
+    Zulu Travel provides a record search tool.
+07:message/user:
+    Are the same services still available?

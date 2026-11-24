@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// The isolated developer policy provided to a Guardian reviewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,10 +26,6 @@ impl ContextualUserFragment for GuardianPolicy {
         "developer"
     }
 
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
-
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()
     }
@@ -36,7 +34,7 @@ impl ContextualUserFragment for GuardianPolicy {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        self.policy.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.policy.clone())
     }
 }

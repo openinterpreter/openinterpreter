@@ -1,4 +1,6 @@
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::AgentStatus;
 
 use super::ContextualUserFragment;
@@ -35,13 +37,13 @@ impl ContextualUserFragment for SubagentNotification {
         ("<subagent_notification>", "</subagent_notification>")
     }
 
-    fn body(&self) -> String {
-        format!(
+    fn body(&self) -> ContentItem {
+        input_text(format!(
             "\n{}\n",
             serde_json::json!({
                 "agent_path": &self.agent_reference,
                 "status": &self.status,
             })
-        )
+        ))
     }
 }

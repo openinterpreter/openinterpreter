@@ -5,6 +5,7 @@
 //! old rollouts on every startup while still retrying skipped files that later change.
 
 use super::*;
+use crate::sqlite::SqliteWriteQueryExt;
 
 impl StateRuntime {
     pub async fn get_rollout_migration_state(
@@ -70,7 +71,7 @@ WHERE excluded.last_checked_thread_created_at IS NOT NULL
         .bind(thread_created_at)
         .bind(thread_id)
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(())
     }
@@ -124,7 +125,7 @@ ON CONFLICT(migration_id, rollout_path) DO UPDATE SET
         .bind(skipped_rollout.rollout_modified_at_ns)
         .bind(skipped_rollout.skip_reason.as_str())
         .bind(now)
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(())
     }
@@ -142,7 +143,7 @@ WHERE migration_id = ? AND rollout_path = ?
         )
         .bind(migration_id)
         .bind(rollout_path)
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
         Ok(())
     }

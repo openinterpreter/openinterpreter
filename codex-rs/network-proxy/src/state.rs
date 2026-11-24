@@ -8,11 +8,12 @@ use crate::mitm_hook::MitmHookConfig;
 use crate::mitm_hook::compile_mitm_hooks;
 use crate::mitm_hook::validate_mitm_hook_config;
 use crate::policy::DomainPattern;
-use crate::policy::compile_allowlist_globset;
-use crate::policy::compile_denylist_globset;
+use crate::policy::compile_allowlist;
+use crate::policy::compile_denylist;
 use crate::policy::is_global_wildcard_domain_pattern;
 use crate::runtime::ConfigState;
 use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ pub use crate::runtime::NetworkProxyState;
 #[cfg(test)]
 pub(crate) use crate::runtime::network_proxy_state_for_policy;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NetworkProxyConstraints {
     pub enabled: Option<bool>,
     pub mode: Option<NetworkMode>,
@@ -82,16 +83,22 @@ pub fn build_config_state(
         !config.credential_broker || config.mitm,
         "network.credential_broker requires network.mitm = true"
     );
+    anyhow::ensure!(
+        config.mitm_ca.is_none() || config.mitm,
+        "network.mitm_ca requires network.mitm = true"
+    );
     let allowed_domains = config.allowed_domains().unwrap_or_default();
     let denied_domains = config.denied_domains().unwrap_or_default();
     validate_non_global_wildcard_domain_patterns("network.denied_domains", &denied_domains)
         .map_err(NetworkProxyConstraintError::into_anyhow)?;
-    let deny_set = compile_denylist_globset(&denied_domains)?;
-    let allow_set = compile_allowlist_globset(&allowed_domains)?;
+    let deny_set = compile_denylist(&denied_domains)?;
+    let allow_set = compile_allowlist(&allowed_domains)?;
+    let review_set = compile_allowlist(&config.review_domains)?;
     let mitm_hooks = compile_mitm_hooks(&config)?;
     let mitm = if config.mitm {
         Some(Arc::new(MitmState::new(MitmUpstreamConfig {
             allow_upstream_proxy: config.allow_upstream_proxy,
+            external_ca: config.mitm_ca.clone(),
         })?))
     } else {
         None
@@ -102,6 +109,7 @@ pub fn build_config_state(
         brokerage_created_default_allowlist,
         allow_set,
         deny_set,
+        review_set,
         mitm,
         mitm_hooks,
         constraints,
@@ -376,14 +384,11 @@ pub fn validate_policy_against_constraints(
     }
 
     if let Some(allow_unix_sockets) = &constraints.allow_unix_sockets {
-        let allowed_set: HashSet<String> = allow_unix_sockets
-            .iter()
-            .map(|s| s.to_ascii_lowercase())
-            .collect();
+        let allowed_set: HashSet<&str> = allow_unix_sockets.iter().map(String::as_str).collect();
         validate(config_allow_unix_sockets, move |candidate| {
             let mut invalid = Vec::new();
             for entry in candidate {
-                if !allowed_set.contains(&entry.to_ascii_lowercase()) {
+                if !allowed_set.contains(entry.as_str()) {
                     invalid.push(entry.clone());
                 }
             }

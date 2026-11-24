@@ -187,6 +187,54 @@ fn allows_shared_prefixes_with_distinct_completions() {
     config.global.copy = Some(binding("ctrl-x ctrl-o"));
 
     RuntimeKeymap::from_config(&config).expect("prefix trie can branch on the second stroke");
+
+    // Fill the budget immediately after the existing sidebar chooser shortcut.
+    let mut config = TuiKeymap::default();
+    config.global.leader = Some(KeybindingsSpec::Many(
+        (1..=16)
+            .map(|n| KeybindingSpec(format!("super-f{n}")))
+            .collect(),
+    ));
+    config.global.open_transcript = Some(KeybindingsSpec::Many(
+        ["", "shift-", "alt-"]
+            .into_iter()
+            .flat_map(|modifier| {
+                (1..=19).map(move |n| KeybindingSpec(format!("leader {modifier}f{n}")))
+            })
+            .take(45)
+            .collect(),
+    ));
+    let runtime = RuntimeKeymap::for_session(&config, /*workspace*/ true).unwrap();
+    assert_eq!(
+        runtime
+            .chords
+            .bindings
+            .iter()
+            .filter(|b| b.is_leader())
+            .count(),
+        super::MAX_LEADER_CHORD_BINDINGS
+    );
+    assert_eq!(
+        crate::keymap_setup::active_binding_specs(&runtime, "global", "focus_sidebar_tabs")
+            .unwrap(),
+        ["leader t"]
+    );
+    assert!(
+        runtime
+            .primary_hint(KeymapContext::Global, "sidebar_up")
+            .is_none()
+    );
+}
+
+#[test]
+fn allows_super_modified_character_prefixes_and_leaders() {
+    let mut config = TuiKeymap::default();
+    config.global.leader = Some(binding("super-k"));
+    config.global.open_transcript = Some(binding("leader super-t"));
+    config.global.copy = Some(binding("super-o super-c"));
+
+    RuntimeKeymap::from_config(&config)
+        .expect("Super-modified characters do not intercept ordinary text input");
 }
 
 #[test]
@@ -623,4 +671,17 @@ fn warning_context_keeps_local_chords_ahead_of_copy_and_hides_unreachable_hints(
     };
     assert!(runtime.list.jump_bottom.is_pressed(event));
     assert!(!runtime.app.copy.is_pressed(event));
+}
+
+#[test]
+fn composer_undo_defaults_yield_without_shadowing_vim_redo() {
+    let mut config = TuiKeymap::default();
+    config.global.leader = Some(binding("f7"));
+    config.composer.history_search_previous = Some(binding("alt-h"));
+    config.composer.redo = Some(binding("ctrl-r f6"));
+    let runtime = RuntimeKeymap::from_config(&config).unwrap();
+    let undo = KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE);
+    let redo = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert!(!runtime.composer.undo.is_pressed(undo));
+    assert!(runtime.vim_normal.redo.is_pressed(redo));
 }

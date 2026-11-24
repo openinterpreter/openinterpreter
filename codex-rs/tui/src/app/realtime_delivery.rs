@@ -5,6 +5,7 @@
 //! fallback, without adding history to whichever thread is currently visible.
 
 use super::*;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_protocol::models::MessagePhase;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -17,13 +18,13 @@ fn normalized_replay_text(text: &str) -> String {
 }
 
 fn record_voice_item(
-    item: &ThreadItem,
+    item: &ThreadItemPayload,
     turn_id: &str,
     delegated: &mut HashSet<String>,
     items: &mut HashMap<(String, String, &'static str), String>,
 ) {
     match item {
-        ThreadItem::UserMessage { id, content, .. } => {
+        ThreadItemPayload::UserMessage { id, content, .. } => {
             if let Some(input) = crate::chatwidget::realtime_delegation_input(content) {
                 delegated.insert(turn_id.to_string());
                 let display = crate::chatwidget::realtime_delegation_display_text(input);
@@ -33,7 +34,7 @@ fn record_voice_item(
                 );
             }
         }
-        ThreadItem::AgentMessage {
+        ThreadItemPayload::AgentMessage {
             id,
             text,
             phase: Some(MessagePhase::FinalAnswer) | None,
@@ -56,7 +57,7 @@ pub(super) fn replayed_voice_texts_from_turns(turns: &[Turn]) -> ReplayedVoiceTe
     let mut items = HashMap::new();
     for turn in turns {
         for item in &turn.items {
-            record_voice_item(item, &turn.id, &mut delegated, &mut items);
+            record_voice_item(&item.payload, &turn.id, &mut delegated, &mut items);
         }
     }
     count_replayed_voice_texts(items)
@@ -83,7 +84,7 @@ pub(super) fn replayed_voice_texts(snapshot: &ThreadEventSnapshot) -> ReplayedVo
     let mut items = HashMap::new();
     for turn in &snapshot.turns {
         for item in &turn.items {
-            record_voice_item(item, &turn.id, &mut delegated, &mut items);
+            record_voice_item(&item.payload, &turn.id, &mut delegated, &mut items);
         }
     }
     for event in &snapshot.events {
@@ -92,26 +93,26 @@ pub(super) fn replayed_voice_texts(snapshot: &ThreadEventSnapshot) -> ReplayedVo
         };
         match notification.as_ref() {
             ServerNotification::ItemStarted(n) => {
-                if let ThreadItem::UserMessage { content, .. } = &n.item
+                if let ThreadItemPayload::UserMessage { content, .. } = &n.item.payload
                     && crate::chatwidget::realtime_delegation_input(content).is_some()
                 {
                     delegated.insert(n.turn_id.clone());
                 }
             }
             ServerNotification::ItemCompleted(n) => {
-                record_voice_item(&n.item, &n.turn_id, &mut delegated, &mut items);
+                record_voice_item(&n.item.payload, &n.turn_id, &mut delegated, &mut items);
             }
             ServerNotification::TurnCompleted(n) if n.turn.status == TurnStatus::Completed => {
                 if let Some(item) = n.turn.items.iter().rev().find(|item| {
                     matches!(
-                        item,
-                        ThreadItem::AgentMessage {
+                        &item.payload,
+                        ThreadItemPayload::AgentMessage {
                             phase: Some(MessagePhase::FinalAnswer) | None,
                             ..
                         }
-                    ) && !crate::chatwidget::is_private_realtime_agent_item(item)
+                    ) && !crate::chatwidget::is_private_realtime_agent_item(&item.payload)
                 }) {
-                    record_voice_item(item, &n.turn.id, &mut delegated, &mut items);
+                    record_voice_item(&item.payload, &n.turn.id, &mut delegated, &mut items);
                 }
             }
             _ => {}
@@ -337,7 +338,7 @@ impl App {
             return;
         };
         for (turn_id, item) in pending {
-            let ThreadItem::AgentMessage { id, text, .. } = &item else {
+            let ThreadItemPayload::AgentMessage { id, text, .. } = &item else {
                 continue;
             };
             // A matching ID with empty text did not render the saved answer.
@@ -374,7 +375,8 @@ pub(super) fn completed_agent_items(
         };
         match notification.as_ref() {
             ServerNotification::ItemCompleted(completed_item) => {
-                if let ThreadItem::AgentMessage { id, text, .. } = &completed_item.item
+                if let ThreadItemPayload::AgentMessage { id, text, .. } =
+                    &completed_item.item.payload
                     && !text.trim().is_empty()
                 {
                     completed.insert((completed_item.turn_id.clone(), id.clone()), text.clone());
@@ -384,7 +386,7 @@ pub(super) fn completed_agent_items(
                 if completed_turn.turn.status == TurnStatus::Completed =>
             {
                 for item in &completed_turn.turn.items {
-                    if let ThreadItem::AgentMessage { id, text, .. } = item
+                    if let ThreadItemPayload::AgentMessage { id, text, .. } = &item.payload
                         && !text.trim().is_empty()
                     {
                         completed
@@ -404,7 +406,7 @@ pub(super) fn completed_agent_items_from_turns(
     let mut completed = HashMap::new();
     for turn in turns {
         for item in &turn.items {
-            if let ThreadItem::AgentMessage { id, text, .. } = item
+            if let ThreadItemPayload::AgentMessage { id, text, .. } = &item.payload
                 && !text.trim().is_empty()
             {
                 completed.insert((turn.id.clone(), id.clone()), text.clone());

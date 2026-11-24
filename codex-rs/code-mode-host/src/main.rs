@@ -18,7 +18,14 @@ const OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 
 #[derive(Debug, Parser)]
 struct Cli {
-    /// Transport endpoint: `stdio`, `stdio://`, or `grpc://IP:PORT`.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = ["listen", "otel_trace_listen", "otel_trace_exporter"]
+    )]
+    codex_ui_plugin_process: bool,
+
+    /// Transport endpoint: `stdio`, `stdio://`, `grpc+stdio://`, or `grpc://IP:PORT`.
     #[arg(
         long,
         value_name = "URL",
@@ -37,8 +44,7 @@ struct Cli {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut trace_transport = if let Some(trace_listen) = cli.otel_trace_listen.as_deref() {
         Some(TraceWebSocket::start(trace_listen).await?)
     } else {
@@ -88,8 +94,20 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    if cli.codex_ui_plugin_process {
+        return codex_code_mode_runtime::run_ui_sandbox().map_err(Into::into);
+    }
+    run(cli)
+}
+
 fn build_trace_provider(endpoint: &str) -> anyhow::Result<OtelProvider> {
     OtelProvider::try_new(&OtelSettings {
+        headers_helper: None,
+        http_client_factory: codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
         environment: "code-mode-host".to_string(),
         service_name: "codex-code-mode-host".to_string(),
         service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -103,7 +121,7 @@ fn build_trace_provider(endpoint: &str) -> anyhow::Result<OtelProvider> {
         },
         metrics_exporter: OtelExporter::None,
         runtime_metrics: false,
-        span_attributes: BTreeMap::new(),
+        span_attributes: HashMap::new(),
         tracestate: BTreeMap::new(),
     })
     .map_err(|error| anyhow::anyhow!("failed to build code-mode host OTEL provider: {error}"))?

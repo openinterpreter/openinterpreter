@@ -39,7 +39,14 @@ async fn guardian_receives_sender_user_messages() -> Result<()> {
     let receiver = test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(test.codex.environment_selections().await),
+            environments: Some(
+                test.codex
+                    .environment_selections()
+                    .await
+                    .into_iter()
+                    .map(codex_protocol::protocol::TurnEnvironmentSelection::into_request)
+                    .collect(),
+            ),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?

@@ -186,8 +186,20 @@ pub struct NetworkPolicyAmendment {
 }
 
 /// Why this approval needs a fresh Guardian assessment.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    TS,
+    strum_macros::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum GuardianReviewReason {
     Policy,
     FreshRequired,
@@ -263,6 +275,8 @@ pub struct GuardianAssessmentEvent {
 pub enum ExecApprovalKind {
     #[default]
     Command,
+    /// Requires a fresh human decision; automated and reusable approvals are invalid.
+    HumanCommand,
     WriteStdin,
 }
 
@@ -448,12 +462,24 @@ pub enum ElicitationRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct ElicitationAbandonedEvent {
+    pub server_name: String,
+    /// Original Core-generated response token of the unanswered request.
+    #[ts(type = "string | number")]
+    pub id: RequestId,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct ElicitationRequestEvent {
     /// Turn ID that this elicitation belongs to, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub turn_id: Option<String>,
     pub server_name: String,
+    /// Registration scope, not necessarily the server's execution environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment_id: Option<String>,
     #[ts(type = "string | number")]
     pub id: RequestId,
     pub request: ElicitationRequest,

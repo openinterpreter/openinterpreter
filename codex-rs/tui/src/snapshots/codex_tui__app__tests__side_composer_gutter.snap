@@ -1,0 +1,11 @@
+---
+source: tui/src/app/tests.rs
+expression: "format!(\"Inactive\\n{inactive}\\n\\nFocused\\n{focused}\")"
+---
+Inactive
+" " Rgb(48, 48, 48) | "│" Reset | "›" Rgb(31, 31, 31)
+" " Reset | "│" Reset | " " Reset
+
+Focused
+" " Rgb(31, 31, 31) | "│" Reset | "›" Rgb(48, 48, 48)
+" " Reset | "│" Reset | " " Reset

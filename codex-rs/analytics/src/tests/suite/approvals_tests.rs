@@ -256,6 +256,8 @@ async fn guardian_review_event_ingests_custom_fact_with_optional_target_item() {
                         version: "1.0.0".to_string(),
                     },
                     capabilities: Some(InitializeCapabilities {
+                        explicit_gateway_oauth: false,
+                        required_human_approval: false,
                         experimental_api: false,
                         request_attestation: false,
                         opt_out_notification_methods: None,
@@ -291,6 +293,7 @@ async fn guardian_review_event_ingests_custom_fact_with_optional_target_item() {
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::GuardianReview(Box::new(
                 GuardianReviewEventParams {
+                    guardian_context_mode: None,
                     thread_id: "thread-guardian".to_string(),
                     turn_id: "turn-guardian".to_string(),
                     review_id: "review-guardian".to_string(),
@@ -844,6 +847,7 @@ async fn guardian_events_keep_thread_source_and_originator_with_explicit_turn_co
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::SubAgentThreadStarted(
                 SubAgentThreadStartedInput {
+                    initialization_mode: crate::facts::ThreadInitializationMode::New,
                     session_id: "session-root".to_string(),
                     thread_id: "thread-review".to_string(),
                     parent_thread_id: Some(parent_thread_id.to_string()),
@@ -867,6 +871,7 @@ async fn guardian_events_keep_thread_source_and_originator_with_explicit_turn_co
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(Box::new(
                 CodexCompactionEvent {
+                    usage_limit_window_minutes: None,
                     thread_id: "thread-review".to_string(),
                     turn_id: "turn-compact".to_string(),
                     trigger: CompactionTrigger::Manual,

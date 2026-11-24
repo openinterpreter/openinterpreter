@@ -11,6 +11,8 @@ use codex_utils_pty::JobObject;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::BorrowedHandle;
+use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
@@ -49,15 +51,8 @@ pub enum ConsoleMode {
 }
 
 pub fn make_env_block(env: &HashMap<String, String>) -> Vec<u16> {
-    let mut items: Vec<(String, String)> =
-        env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    items.sort_by(|a, b| {
-        a.0.to_uppercase()
-            .cmp(&b.0.to_uppercase())
-            .then(a.0.cmp(&b.0))
-    });
     let mut w: Vec<u16> = Vec::new();
-    for (k, v) in items {
+    for (k, v) in ordered_env_entries(env) {
         let mut s = to_wide(format!("{k}={v}"));
         s.pop();
         w.extend_from_slice(&s);
@@ -67,10 +62,27 @@ pub fn make_env_block(env: &HashMap<String, String>) -> Vec<u16> {
     w
 }
 
+// Match the environment we actually serialize, including for callers which
+// supply multiple spellings of a Windows key. Keep the first spelling in the
+// existing block order instead of letting HashMap iteration pick the value.
+pub(crate) fn ordered_env_entries(env: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    let mut items: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    items.sort_by(|a, b| {
+        a.0.to_uppercase()
+            .cmp(&b.0.to_uppercase())
+            .then(a.0.cmp(b.0))
+    });
+    items.dedup_by(|a, b| a.0.eq_ignore_ascii_case(b.0));
+    items
+}
+
 unsafe fn ensure_inheritable_stdio(si: &mut STARTUPINFOW) -> Result<()> {
     for kind in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         let h = GetStdHandle(kind);
-        if h == 0 || h == INVALID_HANDLE_VALUE {
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
             return Err(anyhow!("GetStdHandle failed: {}", GetLastError()));
         }
         if SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) == 0 {
@@ -225,7 +237,7 @@ impl PipeSpawnHandles {
 /// Spawns a process with anonymous pipes and returns the relevant handles.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_process_with_pipes(
-    h_token: HANDLE,
+    h_token: BorrowedHandle<'_>,
     argv: &[String],
     cwd: &Path,
     env_map: &HashMap<String, String>,
@@ -235,12 +247,12 @@ pub fn spawn_process_with_pipes(
     desktop: LaunchDesktop,
     logs_base_dir: Option<&Path>,
 ) -> Result<PipeSpawnHandles> {
-    let mut in_r: HANDLE = 0;
-    let mut in_w: HANDLE = 0;
-    let mut out_r: HANDLE = 0;
-    let mut out_w: HANDLE = 0;
-    let mut err_r: HANDLE = 0;
-    let mut err_w: HANDLE = 0;
+    let mut in_r: HANDLE = std::ptr::null_mut();
+    let mut in_w: HANDLE = std::ptr::null_mut();
+    let mut out_r: HANDLE = std::ptr::null_mut();
+    let mut out_w: HANDLE = std::ptr::null_mut();
+    let mut err_r: HANDLE = std::ptr::null_mut();
+    let mut err_w: HANDLE = std::ptr::null_mut();
     unsafe {
         if CreatePipe(&mut in_r, &mut in_w, ptr::null_mut(), 0) == 0 {
             return Err(anyhow!("CreatePipe stdin failed: {}", GetLastError()));
@@ -269,7 +281,7 @@ pub fn spawn_process_with_pipes(
     let stdio = Some((in_r, out_w, stderr_handle));
     let spawn_result = unsafe {
         create_process_as_user(
-            h_token,
+            h_token.as_raw_handle(),
             argv,
             cwd,
             env_map,
@@ -329,8 +341,8 @@ pub fn spawn_process_with_pipes(
     })
 }
 
-/// Reads a HANDLE until EOF and invokes `on_chunk` for each read.
-pub fn read_handle_loop<F>(handle: HANDLE, mut on_chunk: F) -> std::thread::JoinHandle<()>
+/// Reads an owned handle until EOF and invokes `on_chunk` for each read.
+pub fn read_handle_loop<F>(handle: OwnedHandle, mut on_chunk: F) -> std::thread::JoinHandle<()>
 where
     F: FnMut(&[u8]) + Send + 'static,
 {
@@ -340,7 +352,7 @@ where
             let mut read_bytes: u32 = 0;
             let ok = unsafe {
                 ReadFile(
-                    handle,
+                    handle.as_raw_handle(),
                     buf.as_mut_ptr(),
                     buf.len() as u32,
                     &mut read_bytes,
@@ -351,9 +363,6 @@ where
                 break;
             }
             on_chunk(&buf[..read_bytes as usize]);
-        }
-        unsafe {
-            CloseHandle(handle);
         }
     })
 }

@@ -6,12 +6,12 @@ use anyhow::Result;
 use codex_config::HookStateToml;
 use codex_config::McpServerConfig;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::AgentRuntimeOwnership;
 use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnStartOptions;
-use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
 use codex_features::Feature;
@@ -34,6 +34,8 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookRunStatus;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -47,12 +49,10 @@ use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::TestTargetOs;
 use core_test_support::fs_wait;
+use core_test_support::hooks::mount_hook_mcp;
 use core_test_support::hooks::trust_discovered_hooks;
-use core_test_support::hooks::trust_hooks;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
@@ -88,12 +88,17 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tokio::time::timeout;
+use tracing_test::traced_test;
 
 const FIRST_CONTINUATION_PROMPT: &str = "Retry with exactly the phrase meow meow meow.";
 const SECOND_CONTINUATION_PROMPT: &str = "Now tighten it to just: meow.";
 const BLOCKED_PROMPT_CONTEXT: &str = "Remember the blocked lighthouse note.";
 const PERMISSION_REQUEST_HOOK_MATCHER: &str = "^Bash$";
 const PERMISSION_REQUEST_ALLOW_REASON: &str = "should not be used for allow";
+
+#[cfg(test)]
+#[path = "hooks_cwd_tests.rs"]
+mod cwd_tests;
 
 #[tokio::test]
 async fn managed_hook_discovery_failure_rejects_session_startup_when_hooks_enabled() -> Result<()> {
@@ -168,24 +173,6 @@ fn non_openai_model_provider(server: &wiremock::MockServer) -> ModelProviderInfo
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
-}
-
-fn trust_plugin_hooks(config: &mut Config, plugin_hook_sources: Vec<PluginHookSource>) {
-    config
-        .features
-        .enable(Feature::CodexHooks)
-        .expect("test config should allow feature update");
-    let listed = codex_hooks::list_hooks(codex_hooks::HooksConfig {
-        feature_enabled: true,
-        config_layer_stack: Some(config.config_layer_stack.clone()),
-        plugin_hook_sources,
-        ..codex_hooks::HooksConfig::default()
-    });
-    assert!(
-        !listed.hooks.is_empty(),
-        "trusted plugin hook fixture should discover at least one hook"
-    );
-    trust_hooks(config, listed.hooks);
 }
 
 fn write_stop_hook(home: &Path, block_prompts: &[&str]) -> Result<()> {
@@ -470,7 +457,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     Ok(())
 }
 
-fn write_pre_tool_use_hook(
+pub(super) fn write_pre_tool_use_hook(
     home: &Path,
     matcher: Option<&str>,
     mode: &str,
@@ -549,7 +536,7 @@ elif mode == "exit_2":
     Ok(())
 }
 
-fn write_updating_pre_tool_use_hook(
+pub(super) fn write_updating_pre_tool_use_hook(
     home: &Path,
     matcher: &str,
     updated_input: &Value,
@@ -738,7 +725,7 @@ elif mode == "exit_2":
     Ok(())
 }
 
-fn install_allow_permission_request_hook(home: &Path) -> Result<()> {
+pub(super) fn install_allow_permission_request_hook(home: &Path) -> Result<()> {
     write_permission_request_hook(
         home,
         Some(PERMISSION_REQUEST_HOOK_MATCHER),
@@ -1201,7 +1188,7 @@ fn read_pre_tool_use_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> 
     read_hook_inputs_from_log(home.join("pre_tool_use_hook_log.jsonl").as_path())
 }
 
-fn read_permission_request_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
+pub(super) fn read_permission_request_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
     fs::read_to_string(home.join("permission_request_hook_log.jsonl"))
         .context("read permission request hook log")?
         .lines()
@@ -1678,7 +1665,7 @@ print(json.dumps({"hookSpecificOutput": {
 
     let forked = test
         .thread_manager
-        .fork_thread(
+        .fork_legacy_thread(
             ForkSnapshot::TruncateBeforeNthUserMessage(1),
             StartThreadOptions::new(test.config.clone()),
             test.codex.rollout_path().expect("parent rollout path"),
@@ -1936,12 +1923,10 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         .await
         .context("timed out waiting for the async hook to start")?;
 
-    fs::write(
-        test.codex_home_path()
-            .join("async_user_prompt_submit_release"),
-        "ready",
-    )
-    .context("release gated async hook")?;
+    let release_path = test
+        .codex_home_path()
+        .join("async_user_prompt_submit_release");
+    fs::write(&release_path, "ready").context("release gated async hook")?;
 
     let finished_path = test
         .codex_home_path()
@@ -1962,6 +1947,10 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         1,
         "an async hook result from the previous turn must not start a model turn"
     );
+
+    // Keep the next prompt's hook pending so only the first hook's buffered
+    // output can contribute to the next model turn.
+    fs::remove_file(release_path).context("reset the async hook gate")?;
 
     let next_prompt = "observe the buffered async context";
     let next_turn = if automatic_continuation {
@@ -2040,6 +2029,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         "buffered async hook context should precede the next user prompt"
     );
 
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -2737,7 +2727,9 @@ async fn multiple_blocking_stop_hooks_persist_multiple_hook_prompt_fragments() -
     Ok(())
 }
 
+/// A blocked prompt keeps hook context but never reaches prompt telemetry, the rollout, or the model.
 #[tokio::test]
+#[traced_test]
 async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2757,11 +2749,40 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
             write_user_prompt_submit_hook(home, "blocked first prompt", BLOCKED_PROMPT_CONTEXT)
                 .expect("failed to write user prompt submit hook test fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(|config| {
+            trust_discovered_hooks(config);
+            config.otel.log_user_prompt = true;
+        });
     let test = builder.build(&server).await?;
 
-    test.submit_turn("blocked first prompt").await?;
+    test.codex
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "blocked first prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     test.submit_turn("second prompt").await?;
+
+    logs_assert(|lines| {
+        let prompts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("codex.user_prompt") && line.contains(" prompt="))
+            .collect();
+        if prompts.len() == 1 && prompts[0].contains("prompt=second prompt") {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected only the accepted prompt in telemetry: {prompts:?}"
+            ))
+        }
+    });
+    let rollout = fs::read_to_string(test.codex.rollout_path().expect("rollout path"))?;
+    assert!(!rollout.contains("blocked first prompt"));
+    assert!(rollout.contains("second prompt"));
 
     let request = response.single_request();
     assert!(
@@ -2812,12 +2833,10 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
     Ok(())
 }
 
-#[test_case::test_case(/*thread_context_enabled*/ true; "retained context enabled")]
-#[test_case::test_case(/*thread_context_enabled*/ false; "retained context disabled")]
+/// Queued input is logged exactly once after acceptance; a later blocked prompt cannot leak or strand it.
 #[tokio::test]
-async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
-    thread_context_enabled: bool,
-) -> Result<()> {
+#[traced_test]
+async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let (gate_completed_tx, gate_completed_rx) = oneshot::channel();
@@ -2862,10 +2881,7 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
         })
         .with_config(move |config| {
             trust_discovered_hooks(config);
-            config
-                .features
-                .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
-                .expect("test context mode");
+            config.otel.log_user_prompt = true;
         });
     let test = builder.build_with_streaming_server(&server).await?;
 
@@ -2914,6 +2930,26 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
 
     assert_eq!(requests.len(), 2);
 
+    logs_assert(|lines| {
+        let prompts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("codex.user_prompt") && line.contains(" prompt="))
+            .collect();
+        if prompts.len() == 2
+            && prompts[0].contains("prompt=initial prompt")
+            && prompts[1].contains("prompt=accepted queued prompt")
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected only accepted prompts in telemetry: {prompts:?}"
+            ))
+        }
+    });
+    let rollout = fs::read_to_string(test.codex.rollout_path().expect("rollout path"))?;
+    assert!(!rollout.contains("blocked queued prompt"));
+    assert!(rollout.contains("accepted queued prompt"));
+
     let second_user_texts = request_message_input_texts(&requests[1], "user");
     assert!(
         second_user_texts.contains(&"accepted queued prompt".to_string()),
@@ -2925,30 +2961,21 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt(
     );
 
     let history = test.codex.conversation_history_snapshot().await;
-    assert_eq!(history.retained_context().is_some(), thread_context_enabled);
+    assert!(history.retained_context().is_some());
     let retained = serde_json::to_value(history.retained_context().cloned().unwrap_or_default())?;
+    let messages = retained["user_messages"]
+        .as_array()
+        .expect("retained user messages");
     assert_eq!(
-        retained["user_messages"]
-            .as_array()
-            .expect("retained user messages")
+        messages
             .iter()
-            .map(|message| (message["order"].clone(), message["text"].clone()))
+            .map(|message| message["text"].clone())
             .collect::<Vec<_>>(),
-        if thread_context_enabled {
-            vec![
-                (json!(0), json!("initial prompt")),
-                (json!(1), json!("accepted queued prompt")),
-            ]
-        } else {
-            Vec::new()
-        },
+        vec![json!("initial prompt"), json!("accepted queued prompt")],
     );
-    assert_eq!(
-        retained["next_order"],
-        // Three accepted input positions (including the blocked prompt), then
-        // the two completed assistant messages.
-        json!(if thread_context_enabled { 5 } else { 0 })
-    );
+    // Three accepted input positions (including the blocked prompt), then
+    // the two completed assistant messages.
+    assert_eq!(retained["next_order"], json!(5));
 
     let hook_inputs = read_user_prompt_submit_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 3);
@@ -3414,7 +3441,7 @@ mode = "limited"
 allow_local_binding = true
 "#,
     )?;
-    let args = serde_json::json!({ "cmd": command });
+    let args = serde_json::json!({ "cmd": command, "workdir": "network-workdir" });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -3445,8 +3472,26 @@ allow_local_binding = true
                 hook_reason,
             )
             .expect("failed to write permission request hook test fixture");
+            let script_path = home.join("permission_request_hook.py");
+            let script = fs::read_to_string(&script_path)
+                .expect("read permission request hook script")
+                .replace(
+                    "payload = json.load(sys.stdin)",
+                    "payload = json.load(sys.stdin)\npayload['process_cwd'] = str(Path.cwd())",
+                );
+            fs::write(script_path, script).expect("record network hook process cwd");
         })
-        .with_cloud_config_bundle(managed_network_requirements_loader())
+        .with_cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[experimental_network]
+enabled = true
+allow_local_binding = true
+allowed_domains = ["**.invalid"]
+review_domains = ["codex-network-test.invalid"]
+"#,
+            ),
+        )
         .with_config(move |config| {
             trust_discovered_hooks(config);
             config.approvals_reviewer = codex_config::types::ApprovalsReviewer::AutoReview;
@@ -3458,6 +3503,8 @@ allow_local_binding = true
         })
         .build(&server)
         .await?;
+    let execution_cwd = test.workspace_path_uri("network-workdir")?;
+    fs::create_dir(execution_cwd.to_abs_path()?).context("create network command workdir")?;
 
     test.submit_turn_with_approval_and_permission_profile(
         "run the shell command after the network permission hook",
@@ -3494,11 +3541,21 @@ allow_local_binding = true
         );
     }
 
-    assert_single_permission_request_hook_input(
+    let hook_inputs = assert_single_permission_request_hook_input(
         test.codex_home_path(),
         command,
         Some("network-access http://codex-network-test.invalid:80"),
     )?;
+    assert_eq!(
+        json!({
+            "cwd": hook_inputs[0]["cwd"],
+            "process_cwd": hook_inputs[0]["process_cwd"],
+        }),
+        json!({
+            "cwd": execution_cwd.inferred_native_path_string(),
+            "process_cwd": dunce::canonicalize(&test.config.cwd)?.to_string_lossy(),
+        }),
+    );
     let requests = responses.requests();
     assert_eq!(
         requests
@@ -4446,32 +4503,13 @@ async fn local_bundled_cleanup_hook_runs_without_saved_trust(
         }),
     };
     let server = start_mock_server().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/repl"))
-        .respond_with(move |request: &wiremock::Request| {
-            let request: Value = serde_json::from_slice(&request.body).expect("MCP request");
-            let result = match request["method"].as_str() {
-                Some("initialize") => serde_json::json!({
-                    "protocolVersion": request["params"]["protocolVersion"],
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": mcp_server_name, "version": "1.0.0" },
-                }),
-                Some("notifications/initialized") => return wiremock::ResponseTemplate::new(202),
-                Some("tools/list") => serde_json::json!({ "tools": [
-                    { "name": "turn_ended", "inputSchema": { "type": "object" } },
-                    { "name": "regular_stop", "inputSchema": { "type": "object" } },
-                ] }),
-                Some("tools/call") => hook_response.clone(),
-                method => panic!("unexpected MCP request: {method:?}"),
-            };
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": result,
-            }))
-        })
-        .mount(&server)
-        .await;
+    mount_hook_mcp(
+        &server,
+        mcp_server_name,
+        &["turn_ended", "regular_stop"],
+        move |_| hook_response.clone(),
+    )
+    .await;
     let response = mount_sse_once(
         &server,
         sse(vec![
@@ -4553,19 +4591,12 @@ async fn local_bundled_cleanup_hook_runs_without_saved_trust(
             .features
             .disable(Feature::ExecutorCapabilityDiscovery)
             .expect("disable executor capability discovery");
-        let repl: McpServerConfig = serde_json::from_value(serde_json::json!({
-            "url": repl_url,
-            "environment_id": super::rmcp_client::remote_aware_environment_id(),
-        }))
-        .expect("valid MCP configuration");
-        config
-            .mcp_servers
-            .set(
-                [(String::from(mcp_server_name), repl)]
-                    .into_iter()
-                    .collect(),
-            )
-            .expect("configure MCP server");
+        configure_hook_mcp(
+            config,
+            mcp_server_name,
+            &repl_url,
+            &super::rmcp_client::remote_aware_environment_id(),
+        );
     });
     let test = builder.build_with_auto_env(&server).await?;
     assert!(!test.config.bypass_hook_trust);
@@ -4578,6 +4609,7 @@ async fn local_bundled_cleanup_hook_runs_without_saved_trust(
         HookStateToml {
             enabled: Some(false),
             trusted_hash: None,
+            trusted_content_hash: None,
         },
     )]);
     if !hooks_enabled {
@@ -4593,6 +4625,7 @@ async fn local_bundled_cleanup_hook_runs_without_saved_trust(
                 HookStateToml {
                     enabled: None,
                     trusted_hash: Some(hook.current_hash),
+                    trusted_content_hash: None,
                 },
             );
         }
@@ -4660,8 +4693,11 @@ async fn plugin_pre_tool_use_blocks_exec_command_before_execution() -> Result<()
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
     let call_id = "plugin-pretooluse-exec-command";
-    let marker = std::env::temp_dir().join("plugin-pretooluse-exec-command-marker");
+    let same_turn_call_id = "plugin-pretooluse-exec-command-same-turn";
+    let changed_call_id = "plugin-pretooluse-changed-script";
+    let marker = home.path().join("plugin-pretooluse-exec-command-marker");
     let command = format!("printf blocked > {}", marker.display());
     let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
@@ -4677,6 +4713,24 @@ async fn plugin_pre_tool_use_blocks_exec_command_before_execution() -> Result<()
                 ev_completed("resp-1"),
             ]),
             sse(vec![
+                ev_response_created("resp-same-turn"),
+                ev_function_call(
+                    same_turn_call_id,
+                    "exec_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-same-turn"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-changed"),
+                ev_function_call(
+                    changed_call_id,
+                    "exec_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-changed"),
+            ]),
+            sse(vec![
                 ev_response_created("resp-2"),
                 ev_assistant_message("msg-1", "plugin hook blocked it"),
                 ev_completed("resp-2"),
@@ -4685,7 +4739,6 @@ async fn plugin_pre_tool_use_blocks_exec_command_before_execution() -> Result<()
     )
     .await;
 
-    let home = Arc::new(TempDir::new()?);
     let plugin_root = home.path().join("plugins/cache/test/sample/local");
     let hooks_dir = plugin_root.join("hooks");
     fs::create_dir_all(plugin_root.join(".codex-plugin"))
@@ -4700,18 +4753,40 @@ async fn plugin_pre_tool_use_blocks_exec_command_before_execution() -> Result<()
         home.path().join("config.toml"),
         r#"[plugins."sample@test"]
 enabled = true
+
+# Declaration-only approvals from before content fingerprinting.
+[hooks.state."sample@test:hooks/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:c9ee1aca1b5d8c72b99df6571c87d61350b09f7f4594ae30e7250a2027e9d76b"
+[hooks.state."sample@test:hooks/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:9eef43ad6f26b1f9b94f318a50445f8bb62c363da08152a2966b73d308bf42ba"
 "#,
     )
     .context("write plugin config")?;
 
     let script_path = hooks_dir.join("pre_tool_use_hook.py");
-    let log_path = hooks_dir.join("pre_tool_use_hook_log.jsonl");
+    let log_path = home.path().join("pre_tool_use_hook_log.jsonl");
+    fs::write(
+        hooks_dir.join("hook_support.py"),
+        "DENIAL_REASON = 'blocked by plugin hook'\n",
+    )
+    .context("write bundled hook module")?;
     fs::write(
         &script_path,
         format!(
             r#"import json
 from pathlib import Path
 import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from hook_support import DENIAL_REASON
+
+root = Path(__file__).parents[1]
+for relative in (".venv/pyvenv.cfg", "sample.egg-info/PKG-INFO"):
+    artifact = root / relative
+    artifact.parent.mkdir(exist_ok=True)
+    artifact.write_text("generated")
+python_link = root / ".venv/python"
+if sys.platform != "win32" and not python_link.exists():
+    python_link.symlink_to(sys.executable)
 
 payload = json.load(sys.stdin)
 with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
@@ -4721,9 +4796,12 @@ print(json.dumps({{
     "hookSpecificOutput": {{
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": "blocked by plugin hook"
+        "permissionDecisionReason": DENIAL_REASON
     }}
 }}))
+if len(Path(r"{log_path}").read_text().splitlines()) == 2:
+    with Path(__file__).open("a", encoding="utf-8") as script:
+        script.write("\n# updated plugin bundle\n")
 "#,
             log_path = log_path.display(),
         ),
@@ -4735,30 +4813,20 @@ print(json.dumps({{
       "matcher": "^Bash$",
       "hooks": [{
         "type": "command",
-        "command": "python3 ${PLUGIN_ROOT}/hooks/pre_tool_use_hook.py"
+        "command": "python3 -I -S ${PLUGIN_ROOT}/hooks/pre_tool_use_hook.py"
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": "^Bash$",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 -I -S ${PLUGIN_ROOT}/hooks/pre_tool_use_hook.py"
       }]
     }]
   }
 }"#;
     let plugin_hooks_path = hooks_dir.join("hooks.json");
     fs::write(&plugin_hooks_path, plugin_hooks_json).context("write plugin hooks config")?;
-    let plugin_root_abs =
-        AbsolutePathBuf::try_from(plugin_root.clone()).context("absolute plugin root")?;
-    let plugin_hooks_path_abs =
-        AbsolutePathBuf::try_from(plugin_hooks_path).context("absolute plugin hooks path")?;
-    let plugin_data_root =
-        AbsolutePathBuf::try_from(plugin_root.join("data")).context("absolute plugin data root")?;
-    let plugin_hook_sources = vec![PluginHookSource {
-        plugin_id: PluginId::parse("sample@test").context("plugin id")?,
-        plugin_root: plugin_root_abs,
-        plugin_data_root,
-        source_path: plugin_hooks_path_abs,
-        source_relative_path: "hooks/hooks.json".to_string(),
-        hooks: serde_json::from_str::<codex_config::HooksFile>(plugin_hooks_json)
-            .context("parse plugin hooks")?
-            .hooks,
-    }];
-
     let mut builder = test_codex()
         .with_home(Arc::clone(&home))
         .with_config(move |config| {
@@ -4766,13 +4834,11 @@ print(json.dumps({{
                 .features
                 .enable(Feature::Plugins)
                 .expect("test config should allow feature update");
-            trust_plugin_hooks(config, plugin_hook_sources);
+            config.features.enable(Feature::CodexHooks).unwrap();
         });
     let test = builder.build(&server).await?;
-
-    if marker.exists() {
-        fs::remove_file(&marker).context("remove leftover plugin pre tool use marker")?;
-    }
+    assert!(!home.path().join(".hook-trust").exists());
+    let legacy_config = fs::read_to_string(home.path().join("config.toml"))?;
 
     test.submit_turn_with_policy(
         "run the shell command blocked by a plugin hook",
@@ -4781,7 +4847,7 @@ print(json.dumps({{
     .await?;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     let output_item = requests[1].function_call_output(call_id);
     let output = output_item
         .get("output")
@@ -4791,17 +4857,32 @@ print(json.dumps({{
         output.contains("Command blocked by PreToolUse hook: blocked by plugin hook"),
         "blocked tool output should surface the plugin hook reason",
     );
+    assert!(marker.exists(), "the modified hook must not execute again");
     assert!(
-        !marker.exists(),
-        "plugin hook should block shell command execution"
+        requests[2].function_call_output(same_turn_call_id)["output"]
+            .as_str()
+            .unwrap()
+            .contains("Command blocked by PreToolUse hook")
     );
 
     let hook_inputs = read_hook_inputs_from_log(&log_path)?;
-    assert_eq!(hook_inputs.len(), 1);
+    // A legacy hook first used after a bundle change must share the earlier baseline.
+    assert_eq!(hook_inputs.len(), 2);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
     assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert!(
+        hooks_dir.join("__pycache__").exists(),
+        "isolated Python should create bytecode without invalidating hook trust"
+    );
+    assert_eq!(hook_inputs[1]["tool_use_id"], same_turn_call_id);
+    // Migration keeps declaration-only approvals readable by older clients.
+    assert_eq!(
+        fs::read_to_string(home.path().join("config.toml"))?,
+        legacy_config
+    );
+    assert_eq!(fs::read_dir(home.path().join(".hook-trust"))?.count(), 1);
 
     Ok(())
 }
@@ -5965,5 +6046,573 @@ async fn post_tool_use_records_apply_patch_context_with_edit_alias() -> Result<(
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], patch);
 
+    Ok(())
+}
+
+fn configure_hook_mcp(
+    config: &mut codex_core::config::Config,
+    name: &str,
+    url: &str,
+    environment_id: &str,
+) {
+    let server: McpServerConfig = serde_json::from_value(json!({
+        "url": url, "environment_id": environment_id,
+    }))
+    .expect("valid MCP configuration");
+    config
+        .mcp_servers
+        .set([(name.to_owned(), server)].into_iter().collect())
+        .expect("configure MCP server");
+}
+
+pub(super) fn write_lifecycle_hooks(home: &Path, events: &[&str]) -> Result<()> {
+    let mut hooks = serde_json::Map::new();
+    for event in events {
+        let log = home.join(format!("{event}.jsonl"));
+        let command = format!(
+            "cat >> '{log}'; echo >> '{log}'; printf '%s' '{{\"continue\":false,\"decision\":\"block\",\"reason\":\"ignored-observer-control\"}}'",
+            log = log.display(),
+        );
+        hooks.insert(
+            (*event).into(),
+            json!([{"hooks": [{"type": "command", "command": command}]}]),
+        );
+    }
+    fs::write(home.join("hooks.json"), json!({"hooks": hooks}).to_string())?;
+    Ok(())
+}
+
+async fn wait_for_hook_inputs(home: &Path, event: &str, count: usize) -> Result<Vec<Value>> {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(inputs) = read_hook_inputs_from_log(&home.join(format!("{event}.jsonl")))
+                && inputs.len() >= count
+            {
+                return Ok(inputs);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn model_request_hooks_report_failures_and_retries_but_cannot_veto() -> Result<()> {
+    core_test_support::skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("failed-attempt")]),
+            sse(vec![
+                ev_response_created("successful-attempt"),
+                ev_assistant_message("answer", "done"),
+                ev_completed_with_tokens("successful-attempt", /*total_tokens*/ 42),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_lifecycle_hooks(home, &["PreModelRequest", "PostModelRequest"]).unwrap()
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+    test.submit_turn("respond").await?;
+    for request in requests.requests() {
+        assert!(
+            !request
+                .body_json()
+                .to_string()
+                .contains("ignored-observer-control")
+        );
+    }
+    let pre = wait_for_hook_inputs(test.codex_home_path(), "PreModelRequest", /*count*/ 2).await?;
+    let post =
+        wait_for_hook_inputs(test.codex_home_path(), "PostModelRequest", /*count*/ 2).await?;
+    assert_eq!(pre.len(), 2);
+    assert_eq!(post.len(), 2);
+    let thread_id = test.session_configured.thread_id.to_string();
+    for hook in pre.iter().chain(&post) {
+        assert_eq!(hook["thread_id"], thread_id);
+        assert_eq!(hook["kind"], "sampling");
+    }
+    assert_eq!(post[0]["status"], "failed");
+    assert!(post[0]["error"].is_string());
+    assert_eq!(post[0]["response_id"], Value::Null);
+    assert_eq!(post[0]["token_usage"], Value::Null);
+    assert_eq!(post[1]["status"], "completed");
+    assert_eq!(post[1]["response_id"], "successful-attempt");
+    assert_eq!(post[1]["token_usage"]["total_tokens"], 42);
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_request_observer_reports_cancellation() -> Result<()> {
+    core_test_support::skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let request_received = Arc::new(tokio::sync::Notify::new());
+    let notify = Arc::clone(&request_received);
+    responses::mount_response_once_match(
+        &server,
+        move |_: &wiremock::Request| {
+            notify.notify_one();
+            true
+        },
+        responses::sse_response(responses::sse_completed("initial"))
+            .set_delay(Duration::from_secs(60)),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_lifecycle_hooks(home, &["PreModelRequest", "PostModelRequest"]).unwrap()
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+    test.codex
+        .start_or_steer_turn(codex_core::TurnInputRequest::user_input(vec![
+            codex_protocol::user_input::UserInput::Text {
+                text: "respond".into(),
+                text_elements: vec![],
+            },
+        ]))
+        .await?;
+    timeout(Duration::from_secs(10), request_received.notified()).await?;
+    test.codex
+        .submit(codex_protocol::protocol::Op::Interrupt)
+        .await?;
+    let post =
+        wait_for_hook_inputs(test.codex_home_path(), "PostModelRequest", /*count*/ 1).await?;
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0]["status"], "cancelled");
+    assert_eq!(post[0]["token_usage"], Value::Null);
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolDispatchCase {
+    Eager,
+    AsyncHook,
+    AfterComplete,
+    SyncHook,
+    InterruptedHook,
+    ExhaustedHook,
+    OverflowHook(AgentRuntimeOwnership),
+}
+
+#[test_case::test_case(ToolDispatchCase::Eager; "default runs the tool before the response ends")]
+#[test_case::test_case(ToolDispatchCase::AsyncHook; "an observer does not hold the tool")]
+#[test_case::test_case(ToolDispatchCase::AfterComplete; "buffered output waits for completion without hooks")]
+#[test_case::test_case(ToolDispatchCase::SyncHook; "streaming output and tools precede a synchronous hook")]
+#[test_case::test_case(ToolDispatchCase::InterruptedHook; "interrupt discards the held response and its charge")]
+#[test_case::test_case(ToolDispatchCase::ExhaustedHook; "the response bill blocks its own tool")]
+#[test_case::test_case(ToolDispatchCase::OverflowHook(AgentRuntimeOwnership::Host); "the host receives an overflow lower bound and keeps its policy")]
+#[test_case::test_case(ToolDispatchCase::OverflowHook(AgentRuntimeOwnership::Controller); "a native overflow closes even the largest allowance")]
+#[tokio::test]
+async fn model_request_post_hook_orders_tool_dispatch(case: ToolDispatchCase) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    use ToolDispatchCase::AfterComplete;
+    use ToolDispatchCase::AsyncHook;
+    use ToolDispatchCase::Eager;
+    use ToolDispatchCase::ExhaustedHook;
+    use ToolDispatchCase::InterruptedHook;
+    use ToolDispatchCase::OverflowHook;
+    use ToolDispatchCase::SyncHook;
+    const MARKER: &str = "tool-dispatched";
+    const STREAMED: &str = "Still streaming.";
+
+    let buffered = matches!(
+        case,
+        AfterComplete | InterruptedHook | ExhaustedHook | OverflowHook(_)
+    );
+    let hook_async = match case {
+        Eager | AfterComplete => None,
+        AsyncHook => Some(true),
+        SyncHook | InterruptedHook | ExhaustedHook | OverflowHook(_) => Some(false),
+    };
+    // The native controls both spend 98 of 100. Only the successful +3 price
+    // crosses the limit; the failed sibling's reported 999 never counts.
+    let price_tools: &[&str] = match case {
+        SyncHook => &["failed"],
+        InterruptedHook | ExhaustedHook => &["price", "failed"],
+        OverflowHook(_) => &["price", "second_price"],
+        _ => &[],
+    };
+    let pricing = if price_tools.is_empty() {
+        None
+    } else {
+        let server = start_mock_server().await;
+        mount_hook_mcp(&server, "billing", price_tools, move |params| {
+            if matches!(case, OverflowHook(_)) {
+                let output = if params["arguments"]["response_id"] == "first" {
+                    json!({"extra_codex_rollout_budget_units":1e308})
+                } else {
+                    json!({})
+                };
+                json!({"content":[], "structuredContent":output})
+            } else if params["name"] == "failed" {
+                json!({"isError":true, "content":[{"type":"text","text":"failed"}],
+                       "structuredContent":{"extra_codex_rollout_budget_units":999}})
+            } else {
+                // Turn B must report its own 3, not the interrupted first response's 31.
+                let units =
+                    if case == InterruptedHook && params["arguments"]["response_id"] != "second" {
+                        31
+                    } else {
+                        3
+                    };
+                json!({"content":[], "structuredContent":{"extra_codex_rollout_budget_units":units}})
+            }
+        })
+        .await;
+        Some(server)
+    };
+    let pricing_url = pricing
+        .as_ref()
+        .map(|server| format!("{}/repl", server.uri()));
+    let (finish_stream, gate) = oneshot::channel();
+    let mut completed = ev_completed_with_tokens("first", /*total_tokens*/ 42);
+    completed["response"]["usage"]["codex_rollout_budget_units"] =
+        json!(if matches!(case, SyncHook | ExhaustedHook) {
+            98
+        } else {
+            1
+        });
+    let first = vec![
+        StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("first"),
+                ev_apply_patch_custom_tool_call(
+                    "call",
+                    &format!("*** Begin Patch\n*** Add File: {MARKER}\n+ran\n*** End Patch"),
+                ),
+                ev_message_item_added("progress", ""),
+                ev_output_text_delta(STREAMED),
+                ev_message_item_done("progress", STREAMED),
+                // Safety notifications pass through in either mode. Observing this one
+                // proves the reader consumed the preceding items while completion was held.
+                json!({"type":"response.metadata", "response_id":"first",
+                    "metadata":{"type":"safety_buffering","use_cases":["cyber"],"reasons":["policy-check"]}}),
+            ]),
+        },
+        StreamingSseChunk {
+            gate: Some(gate),
+            body: sse_event(completed),
+        },
+    ];
+    let second_bill = if case == InterruptedHook {
+        let mut completed = ev_completed_with_tokens("second", /*total_tokens*/ 7);
+        completed["response"]["usage"]["codex_rollout_budget_units"] = json!(7);
+        completed
+    } else {
+        ev_completed("second")
+    };
+    let second = vec![StreamingSseChunk {
+        gate: None,
+        body: sse(vec![ev_response_created("second"), second_bill]),
+    }];
+    let (server, _) = start_streaming_sse_server(vec![first, second]).await;
+    let accounting = Arc::new(super::rollout_budget::HostAccounting::default());
+    // The first post-hook blocks on this connection until the test closes it.
+    let hook_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = hook_gate.local_addr()?.port();
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if buffered {
+                fs::write(home.join("config.toml"), "[responses]\nprocess_mode = \"after_complete_response\"\n")
+                    .expect("configure response processing after completion");
+            }
+            if let Some(hook_async) = hook_async {
+                let post = format!(
+                    r#"python3 -c 'import json, socket, sys; json.load(sys.stdin).get("response_id") == "first" and socket.create_connection(("127.0.0.1", {port})).recv(1)'"#
+                );
+                let mut group = vec![json!({
+                    "type": "command", "command": post, "async": hook_async,
+                })];
+                group.extend(price_tools.iter().map(|tool| json!({
+                    "type": "mcp_tool", "server": "billing", "tool": tool,
+                    "input": {"response_id": "${response_id}"}
+                })));
+                let hooks = json!({"PostModelRequest": [{"hooks": group}]});
+                fs::write(home.join("hooks.json"), json!({"hooks": hooks}).to_string())
+                    .expect("write hook configuration");
+            }
+        })
+        .with_config(move |config| {
+            if let Some(url) = &pricing_url {
+                configure_hook_mcp(config, "billing", url, codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID);
+            }
+            if hook_async.is_some() {
+                trust_discovered_hooks(config);
+            }
+            if matches!(case, Eager | SyncHook | ExhaustedHook) {
+                config.rollout_budget = Some(super::rollout_budget::rollout_budget());
+            }
+            if case == OverflowHook(AgentRuntimeOwnership::Controller) {
+                let mut budget = super::rollout_budget::rollout_budget();
+                budget.limit_budget = f64::MAX;
+                config.rollout_budget = Some(budget);
+            }
+            // The builder changes cwd after loading config, so bind the write grant to that cwd.
+            config.workspace_roots = vec![config.cwd.clone()];
+            config.permissions.set_workspace_roots(config.workspace_roots.clone());
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config.permissions.set_permission_profile(restrictive_workspace_write_profile())
+                .expect("allow the fixture's patch inside its temporary workspace");
+        });
+    if matches!(
+        case,
+        InterruptedHook | OverflowHook(AgentRuntimeOwnership::Host)
+    ) {
+        let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+        extensions.thread_lifecycle_contributor(accounting.clone());
+        builder = builder.with_extensions(Arc::new(extensions.build()));
+    }
+    let test = builder.build_with_streaming_server(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "use the tool".into(),
+            text_elements: vec![],
+        }]))
+        .await?;
+
+    let marker = test.workspace_path(MARKER);
+    let mut saw_delta = false;
+    wait_for_event(&test.codex, |event| {
+        saw_delta |= matches!(event, EventMsg::AgentMessageContentDelta(message) if message.delta == STREAMED);
+        matches!(event, EventMsg::SafetyBuffering(_))
+    }).await;
+    assert_eq!(saw_delta, !buffered);
+    if buffered {
+        assert!(!marker.exists());
+    } else {
+        fs_wait::wait_for_path_exists(&marker, Duration::from_secs(10)).await?;
+    }
+    finish_stream.send(()).expect("release response stream");
+    let held_hook = if hook_async.is_some() {
+        Some(
+            timeout(Duration::from_secs(10), hook_gate.accept())
+                .await??
+                .0,
+        )
+    } else {
+        None
+    };
+    if buffered && hook_async == Some(false) {
+        assert!(!marker.exists());
+        test.codex.ensure_rollout_materialized().await;
+        let history = test.codex.load_history(/*include_archived*/ false).await?;
+        assert!(
+            !history.items.iter().any(|item| matches!(item,
+                RolloutItem::ResponseItem(envelope) if match &envelope.item {
+                    ResponseItem::CustomToolCall { call_id, .. } => call_id == "call",
+                    ResponseItem::Message { role, content, .. } => role == "assistant" && content.iter().any(
+                        |part| matches!(part, ContentItem::OutputText { text, .. } if text == STREAMED)),
+                    _ => false,
+                }
+            )),
+            "the completed response is still waiting for its synchronous hook"
+        );
+    }
+    if case == InterruptedHook {
+        let started = wait_for_event_match(&test.codex, |event| match event {
+            EventMsg::HookStarted(started)
+                if started.run.event_name == HookEventName::PostModelRequest
+                    && started.run.handler_type
+                        == codex_protocol::protocol::HookHandlerType::Command =>
+            {
+                Some(started.clone())
+            }
+            _ => None,
+        })
+        .await;
+        test.codex.submit(Op::Interrupt).await?;
+        let mut stopped = None;
+        let mut aborted = false;
+        wait_for_event(&test.codex, |event| {
+            match event {
+                EventMsg::HookCompleted(completed) if completed.run.id == started.run.id => {
+                    stopped = Some(completed.clone());
+                }
+                EventMsg::TurnAborted(_) => aborted = true,
+                _ => {}
+            }
+            aborted && stopped.is_some()
+        })
+        .await;
+        let stopped = stopped.expect("post-hook must emit a terminal event after interruption");
+        assert_eq!(stopped.turn_id, started.turn_id);
+        assert_eq!(stopped.run.id, started.run.id);
+        assert_eq!(stopped.run.status, HookRunStatus::Stopped);
+        assert_eq!(
+            stopped.run.status_message.as_deref(),
+            Some("Hook cancelled because the turn was interrupted"),
+        );
+        // Start and finish B before releasing A's hook gate. A's unread
+        // response must never publish its output or charge either turn.
+        let codex_core::TurnInputSubmission::Started { turn_id, .. } = test
+            .codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "continue after interrupt".into(),
+                text_elements: vec![],
+            }]))
+            .await?
+        else {
+            anyhow::bail!("expected a new turn B");
+        };
+        let done = wait_for_event_match(&test.codex, |event| match event {
+            EventMsg::TurnComplete(done) if done.turn_id == turn_id => Some(done.clone()),
+            _ => None,
+        })
+        .await;
+        assert!(done.error.is_none(), "B failed: {:?}", done.error);
+        drop(held_hook);
+        assert!(!marker.exists());
+        test.codex.ensure_rollout_materialized().await;
+        let history = test.codex.load_history(/*include_archived*/ false).await?;
+        assert!(!history.items.iter().any(|item| {
+            let RolloutItem::ResponseItem(envelope) = item else { return false; };
+            match &envelope.item {
+                ResponseItem::CustomToolCall { call_id, .. }
+                | ResponseItem::CustomToolCallOutput { call_id, .. } => call_id == "call",
+                ResponseItem::Message { role, content, .. } => role == "assistant"
+                    && content.iter().any(|part| matches!(part, ContentItem::OutputText { text, .. } if text == STREAMED)),
+                _ => false,
+            }
+        }));
+        let reports = accounting.reports.lock().expect("usage reports");
+        let [bill] = reports.as_slice() else {
+            anyhow::bail!("expected only B's bill: {reports:?}");
+        };
+        assert_eq!(bill.turn_id, turn_id);
+        assert_eq!(
+            bill.usage
+                .as_ref()
+                .and_then(|usage| usage.codex_rollout_budget_units.as_ref())
+                .and_then(serde_json::Number::as_f64),
+            Some(7.0)
+        );
+        assert_eq!(bill.additional_budget_units, 3.0);
+        return Ok(());
+    }
+    drop(held_hook);
+    let done = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::TurnComplete(done) => Some(done.clone()),
+        _ => None,
+    })
+    .await;
+    if let OverflowHook(owner) = case {
+        assert!(
+            done.error
+                .is_some_and(|error| error.message.contains("total hook cost exceeds f64 range"))
+        );
+        assert!(!marker.exists());
+        if owner == AgentRuntimeOwnership::Host {
+            let reports = accounting.reports.lock().expect("usage reports");
+            let [bill] = reports.as_slice() else {
+                anyhow::bail!("expected one partial bill: {reports:?}");
+            };
+            assert_eq!(bill.additional_budget_units, 1e308);
+            assert!(bill.additional_budget_units_overflowed);
+            assert_eq!(
+                bill.usage
+                    .as_ref()
+                    .and_then(|usage| usage.codex_rollout_budget_units.as_ref())
+                    .and_then(serde_json::Number::as_f64),
+                Some(1.0)
+            );
+        }
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "try the next turn".into(),
+                text_elements: vec![],
+            }]))
+            .await?;
+        let done = wait_for_event_match(&test.codex, |event| match event {
+            EventMsg::TurnComplete(done) => Some(done.clone()),
+            _ => None,
+        })
+        .await;
+        match owner {
+            AgentRuntimeOwnership::Host => assert!(done.error.is_none()),
+            AgentRuntimeOwnership::Controller => assert_eq!(
+                done.error.and_then(|error| error.codex_error_info),
+                Some(codex_protocol::protocol::CodexErrorInfo::SessionBudgetExceeded),
+            ),
+        }
+        return Ok(());
+    }
+    if case == ExhaustedHook {
+        assert_eq!(
+            done.error.and_then(|error| error.codex_error_info),
+            Some(codex_protocol::protocol::CodexErrorInfo::SessionBudgetExceeded)
+        );
+        assert!(!marker.exists());
+        test.codex.ensure_rollout_materialized().await;
+        let history = test.codex.load_history(/*include_archived*/ false).await?;
+        let recorded = history
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(envelope) => match &envelope.item {
+                    ResponseItem::Message { role, content, .. } if role == "assistant" && content.iter().any(
+                        |part| matches!(part, ContentItem::OutputText { text, .. } if text == STREAMED)
+                    ) => Some("assistant message"),
+                    ResponseItem::CustomToolCall { call_id, .. } if call_id == "call" => {
+                        Some("tool call")
+                    }
+                    ResponseItem::CustomToolCallOutput {
+                        call_id, output, ..
+                    } if call_id == "call" => output.text_content(),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recorded,
+            ["tool call", "assistant message", "aborted before dispatch"]
+        );
+    } else {
+        assert!(
+            done.error.is_none(),
+            "unexpected turn error: {:?}",
+            done.error
+        );
+        assert_eq!(fs::read_to_string(marker)?, "ran\n");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_consolidation_skips_user_model_request_hooks() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let response = mount_sse_once(&server, responses::sse_completed("memory")).await;
+    let mut test = test_codex()
+        .with_pre_build_hook(|home| {
+            write_lifecycle_hooks(home, &["PreModelRequest", "PostModelRequest"])
+                .expect("write synchronous model request hooks");
+        })
+        .with_config(trust_discovered_hooks)
+        .build(&server)
+        .await?;
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::Internal(
+                InternalSessionSource::MemoryConsolidation,
+            )),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    test.codex = thread.thread;
+    test.submit_turn("consolidate").await?;
+    response.single_request();
+    let home = test.codex_home_path();
+    for event in ["PreModelRequest", "PostModelRequest"] {
+        assert!(!home.join(format!("{event}.jsonl")).exists(), "{event} ran");
+    }
     Ok(())
 }

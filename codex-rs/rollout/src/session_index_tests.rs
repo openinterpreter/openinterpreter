@@ -33,8 +33,12 @@ fn write_rollout_with_source_and_provider(
     let line = RolloutLine {
         timestamp: timestamp.clone(),
         ordinal: None,
-        item: RolloutItem::SessionMeta(SessionMetaLine {
+        item: RolloutItem::SessionMeta(Box::new(SessionMetaLine {
             meta: SessionMeta {
+                account_scoped: false,
+                attached_thread: false,
+                creator_user_id: None,
+                creator_account_id: None,
                 session_id: thread_id.into(),
                 id: thread_id,
                 forked_from_id: None,
@@ -62,7 +66,7 @@ fn write_rollout_with_source_and_provider(
                 context_window: None,
             },
             git: None,
-        }),
+        })),
     };
     let body = serde_json::to_string(&line).map_err(std::io::Error::other)?;
     std::fs::write(path, format!("{body}\n"))
@@ -355,6 +359,43 @@ async fn reverse_lookup_accepts_valid_eof_json_and_skips_invalid() -> std::io::R
 }
 
 #[tokio::test]
+async fn append_and_remove_thread_names_preserves_other_entries() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let removed_id = ThreadId::new();
+    let retained = SessionIndexEntry {
+        id: ThreadId::new(),
+        thread_name: "retained".to_string(),
+        updated_at: "2024-01-01T00:00:00Z".to_string(),
+    };
+    for entry in [
+        SessionIndexEntry {
+            id: removed_id,
+            thread_name: "original".to_string(),
+            ..retained.clone()
+        },
+        retained.clone(),
+        SessionIndexEntry {
+            id: removed_id,
+            thread_name: "renamed".to_string(),
+            ..retained.clone()
+        },
+    ] {
+        append_session_index_entry(temp.path(), entry).await?;
+    }
+    assert_eq!(
+        find_thread_name_by_id(temp.path(), &removed_id).await?,
+        Some("renamed".to_string()),
+    );
+
+    remove_thread_name_entries(temp.path(), removed_id).await?;
+    assert_eq!(
+        std::fs::read_to_string(session_index_path(temp.path()))?,
+        format!("{}\n", serde_json::to_string(&retained)?),
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn find_thread_names_by_ids_prefers_latest_entry() -> std::io::Result<()> {
     let temp = TempDir::new()?;
     let path = session_index_path(temp.path());
@@ -390,6 +431,183 @@ async fn find_thread_names_by_ids_prefers_latest_entry() -> std::io::Result<()> 
     let found = find_thread_names_by_ids(temp.path(), &ids).await?;
     assert_eq!(found, expected);
     Ok(())
+}
+
+#[tokio::test]
+async fn find_thread_names_by_ids_skips_unusable_names_and_reads_across_chunks()
+-> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let renamed = ThreadId::new();
+    let older = ThreadId::new();
+    let missing = ThreadId::new();
+    let mut contents = String::new();
+    for (id, thread_name) in [
+        (renamed, "original".to_string()),
+        (older, "  older name  ".to_string()),
+        (ThreadId::new(), "unrelated".repeat(/*n*/ 10_000)),
+        (renamed, "  最新 café  ".to_string()),
+        (renamed, " \t ".to_string()),
+    ] {
+        let entry = SessionIndexEntry {
+            id,
+            thread_name,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        contents.push_str(&serde_json::to_string(&entry)?);
+        contents.push_str("\n\nnot json\n");
+    }
+    // A partial final write must not hide the latest complete name.
+    contents.push_str("{\"id\":");
+    std::fs::write(path, contents)?;
+
+    for (ids, expected) in [
+        (
+            HashSet::from([renamed]),
+            HashMap::from([(renamed, "最新 café".to_string())]),
+        ),
+        (
+            HashSet::from([renamed, older]),
+            HashMap::from([
+                (renamed, "最新 café".to_string()),
+                (older, "older name".to_string()),
+            ]),
+        ),
+        (
+            HashSet::from([renamed, older, missing]),
+            HashMap::from([
+                (renamed, "最新 café".to_string()),
+                (older, "older name".to_string()),
+            ]),
+        ),
+    ] {
+        assert_eq!(find_thread_names_by_ids(temp.path(), &ids).await?, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn removal_preserves_other_names_and_malformed_lines() -> std::io::Result<()> {
+    let absent_home = TempDir::new()?;
+    remove_thread_name_entries(&absent_home.path().join("missing"), ThreadId::new()).await?;
+    let temp = TempDir::new()?;
+    let removed_id = ThreadId::new();
+    let kept_id = ThreadId::new();
+    append_thread_name(temp.path(), removed_id, "old").await?;
+    append_thread_name(temp.path(), removed_id, "new").await?;
+    append_thread_name(temp.path(), kept_id, "kept").await?;
+    let path = session_index_path(temp.path());
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(b"malformed\n")?;
+
+    remove_thread_name_entries(temp.path(), removed_id).await?;
+
+    assert_eq!(
+        find_thread_names_by_ids(temp.path(), &HashSet::from([removed_id, kept_id])).await?,
+        HashMap::from([(kept_id, "kept".to_string())]),
+    );
+    assert!(
+        std::fs::read_to_string(path)?
+            .lines()
+            .any(|line| line == "malformed")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn index_lock_survives_cancellation_and_times_out_without_writing() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let update_home = home.path().to_path_buf();
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let update = tokio::spawn(async move {
+        with_session_index_lock(&update_home, move || {
+            let _ = reached_tx.send(());
+            // Dropping the sender on a test failure also releases the blocking worker.
+            let _ = resume_rx.recv();
+            Ok(())
+        })
+        .await
+    });
+    reached_rx.await.unwrap();
+    update.abort();
+    assert!(update.await.unwrap_err().is_cancelled());
+
+    let independent_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.path().join(SESSION_INDEX_LOCK_FILE))?;
+    let file_lock_is_held = match independent_file.try_lock() {
+        Ok(()) => {
+            independent_file.unlock()?;
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+    };
+    resume_tx.send(()).unwrap();
+    with_session_index_lock(home.path(), || Ok(())).await?;
+    assert!(
+        file_lock_is_held,
+        "cancellation released a running index mutation's lock"
+    );
+    independent_file
+        .try_lock()
+        .expect("the completed mutation must release its file lock");
+    // A busy file lock must not allow an append to run without ownership.
+    let error = append_thread_name(home.path(), ThreadId::new(), "blocked")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(!session_index_path(home.path()).exists());
+    drop(independent_file);
+    append_thread_name(home.path(), ThreadId::new(), "after contention").await?;
+    assert!(session_index_path(home.path()).is_file());
+    Ok(())
+}
+
+#[test]
+fn cancelled_queued_index_update_preserves_the_next_write() -> std::io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let home = TempDir::new()?;
+        let path = home.path().join("thread-name");
+
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = reached_tx.send(());
+            // Dropping the sender on a failure also lets runtime teardown finish.
+            let _ = resume_rx.recv();
+        });
+        reached_rx.await.unwrap();
+
+        let queued_path = path.clone();
+        let mut update = Box::pin(with_session_index_lock(home.path(), move || {
+            std::fs::write(queued_path, "obsolete")
+        }));
+        let state = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(update.as_mut(), cx))
+        })
+        .await;
+        assert!(
+            state.is_pending(),
+            "the blocking pool should hold the update queued"
+        );
+        drop(update);
+
+        drop(resume_tx);
+        blocker.await.unwrap();
+        let next_path = path.clone();
+        with_session_index_lock(home.path(), move || std::fs::write(next_path, "latest")).await?;
+        assert_eq!(std::fs::read_to_string(path)?, "latest".to_string());
+        Ok(())
+    })
 }
 
 #[test]

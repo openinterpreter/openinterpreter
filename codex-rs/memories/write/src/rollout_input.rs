@@ -44,6 +44,7 @@ pub(crate) fn serialize_tiered_input(
     for item in items {
         let item = match item {
             RolloutItem::ResponseItem(item) => sanitize_response_item_for_memories(&item.item),
+            RolloutItem::DynamicToolsUpdated { .. } => None,
             RolloutItem::InterAgentCommunication(message) => Some(message.to_model_input_item()),
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -124,7 +125,7 @@ pub(crate) fn serialize_tiered_input(
                     })
                     || InterAgentCommunication::is_message_content(content)
                     || content.iter().any(|part| match part {
-                        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                             let text = text.trim_start();
                             text.starts_with("<subagent_notification>")
                                 || (text.starts_with("Message Type:")
@@ -263,6 +264,8 @@ pub(crate) fn sanitize_response_item_for_memories(item: &ResponseItem) -> Option
         role,
         content,
         phase,
+        encrypted_content,
+        status,
         internal_chat_message_metadata_passthrough: metadata,
     } = item
     else {
@@ -291,6 +294,8 @@ pub(crate) fn sanitize_response_item_for_memories(item: &ResponseItem) -> Option
         role: role.clone(),
         content,
         phase: phase.clone(),
+        encrypted_content: encrypted_content.clone(),
+        status: status.clone(),
         internal_chat_message_metadata_passthrough: metadata.clone(),
     })
 }

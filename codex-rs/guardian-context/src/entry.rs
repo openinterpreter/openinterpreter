@@ -1,8 +1,8 @@
 //! Structured transcript evidence shared by synchronous and asynchronous Guardian.
 //!
 //! Entry kinds preserve source attribution for consumer-specific retention and
-//! rendering. User text and manual approvals stay complete for admission; other text is
-//! capped during collection, with its original size retained for accounting.
+//! rendering. Both consumers keep originals until request preparation applies caps.
+//! Original sizes remain available for accounting.
 
 /// Semantic role of one parent-conversation transcript entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +19,8 @@ pub enum ConversationTranscriptEntryKind {
     ToolCall(String),
     /// Tool result with a call-derived, explicit, or generic fallback label.
     ToolOutput(String),
+    /// Whole Code Mode exec output selected by its host-recorded nested tool calls.
+    SelectedExecOutput,
     /// Result from a Node REPL-backed tool that may receive a larger sync cap.
     NodeReplToolOutput(String),
     /// Plaintext model reasoning that the async consumer explicitly enables.
@@ -35,18 +37,59 @@ impl ConversationTranscriptEntryKind {
             Self::ToolCall(role) | Self::ToolOutput(role) | Self::NodeReplToolOutput(role) => {
                 role.as_str()
             }
+            Self::SelectedExecOutput => "tool exec result",
             Self::Reasoning => "reasoning",
         }
     }
 }
 
-/// Structured text evidence shared by sync Guardian and async scoring.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Collected text, a host-attributed record, or an opaque backend-native message.
+#[derive(Clone, PartialEq)]
+pub enum TranscriptContent {
+    Text(String),
+    /// Original scheduler input, compressed only during request preparation.
+    ScheduledMessage(ScheduledTranscriptMessage),
+    /// Host-attributed text prepared by the profile, rendered at delivery.
+    Record(crate::TranscriptRecord),
+    NativeMessage(Box<codex_protocol::models::ResponseItem>),
+}
+
+impl std::fmt::Debug for TranscriptContent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Text(_) => "Text(..)",
+            Self::ScheduledMessage(_) => "ScheduledMessage(..)",
+            Self::Record(_) => "Record(..)",
+            Self::NativeMessage(_) => "NativeMessage(..)",
+        })
+    }
+}
+
+/// Structured evidence shared by sync Guardian and async scoring.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConversationTranscriptEntry {
     /// Semantic role used for consumer-specific retention and truncation.
     pub kind: ConversationTranscriptEntryKind,
-    /// Complete authorization evidence, or other text bounded by per-entry limits.
-    pub text: String,
+    /// Original captured evidence, or content bounded during preparation.
+    pub content: TranscriptContent,
     /// Size before truncation, retained for omission and truncation accounting.
     pub original_bytes: usize,
+    /// Original source revision and display order, established from host metadata.
+    pub retained_source: Option<RetainedTranscriptSource>,
+}
+
+/// Display ordering is separate from source identity and cannot establish delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedTranscriptSource {
+    /// Size of the complete role- and order-labeled source, before request admission.
+    pub rendered_bytes: usize,
+    pub order: String,
+    pub source: codex_history::RetainedSource,
+}
+
+/// Original scheduler text and the provenance needed to compare heartbeat instructions.
+#[derive(Clone, PartialEq)]
+pub struct ScheduledTranscriptMessage {
+    pub(crate) text: String,
+    pub(crate) heartbeat: Option<crate::preparation::HeartbeatInstruction>,
 }

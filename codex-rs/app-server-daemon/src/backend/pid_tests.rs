@@ -67,6 +67,17 @@ async fn locked_empty_pid_file_is_treated_as_active_reservation() {
         PidFileState::Starting
     );
     assert!(pid_file.exists());
+
+    tokio::fs::remove_file(&pid_file)
+        .await
+        .expect("remove pid file");
+    assert_eq!(
+        backend
+            .read_pid_file_state()
+            .await
+            .expect("read missing pid"),
+        PidFileState::Starting
+    );
 }
 
 #[tokio::test]
@@ -89,6 +100,115 @@ async fn unlocked_empty_pid_file_is_treated_as_stale_reservation() {
     assert!(!pid_file.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn reservation_probe_releases_lock_with_duplicated_handle() {
+    #[derive(Debug, Clone, Copy)]
+    enum Probe {
+        Missing,
+        Empty,
+        ReadError,
+        Cancelled,
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(/*val*/ 1)
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        for case in [
+            Probe::Missing,
+            Probe::Empty,
+            Probe::ReadError,
+            Probe::Cancelled,
+        ] {
+            let temp_dir = TempDir::new().expect("temp dir");
+            let backend = PidBackend::new(
+                temp_dir.path().join("codex"),
+                temp_dir.path().join("app-server.pid"),
+                /*remote_control_enabled*/ false,
+            );
+            match case {
+                Probe::Missing => {}
+                Probe::Empty | Probe::Cancelled => {
+                    std::fs::write(&backend.pid_file, "").expect("empty pid file");
+                }
+                Probe::ReadError => {
+                    std::fs::create_dir(&backend.pid_file).expect("unreadable pid file");
+                }
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&backend.lock_file)
+                .expect("open pid lock file");
+            // Share the open file description as fork would, without inheriting
+            // unrelated descriptors from other tests.
+            let inherited = file.try_clone().expect("clone pid lock file");
+
+            let file = tokio::fs::File::from_std(file);
+            let mut cancellation = None;
+            let probe = match case {
+                Probe::Missing => super::probe_reservation_lock(file),
+                Probe::Empty | Probe::ReadError => {
+                    super::inspect_empty_pid_reservation_with_file(&backend.pid_file, file)
+                        .await
+                        .map(|state| state != super::EmptyPidReservation::Stale)
+                }
+                Probe::Cancelled => {
+                    // Occupy the sole blocking worker so the PID read cannot finish
+                    // before cancellation. No timing assumptions or sleeps are needed.
+                    let (started_tx, started_rx) = std::sync::mpsc::channel();
+                    let (release_tx, release_rx) = std::sync::mpsc::channel();
+                    let blocker = tokio::task::spawn_blocking(move || {
+                        started_tx.send(()).expect("worker started");
+                        release_rx.recv().expect("release worker");
+                    });
+                    started_rx.recv().expect("wait for worker");
+                    let mut inspection = Box::pin(super::inspect_empty_pid_reservation_with_file(
+                        &backend.pid_file,
+                        file,
+                    ));
+                    let pending = futures::poll!(&mut inspection).is_pending();
+                    let contender = tokio::fs::File::from_std(
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&backend.lock_file)
+                            .expect("open competing reservation"),
+                    );
+                    cancellation = Some((pending, try_lock_file(&contender)));
+                    drop(contender);
+                    drop(inspection);
+                    release_tx.send(()).expect("unblock PID read");
+                    blocker.await.expect("blocking worker");
+                    Ok(false)
+                }
+            };
+            if matches!(case, Probe::ReadError) {
+                std::fs::remove_dir(&backend.pid_file).expect("remove unreadable pid file");
+            }
+            let running = backend.is_starting_or_running().await;
+
+            drop(inherited);
+            match case {
+                Probe::ReadError => assert!(probe.is_err(), "{case:?}"),
+                Probe::Missing | Probe::Empty | Probe::Cancelled => {
+                    assert!(!probe.expect("probe reservation"), "{case:?}");
+                }
+            }
+            if let Some((pending, acquired)) = cancellation {
+                assert_eq!(
+                    (pending, acquired.expect("competing reservation")),
+                    (true, false)
+                );
+            }
+            assert!(!running.expect("read daemon status"), "{case:?}");
+        }
+    });
+}
+
 #[tokio::test]
 async fn stop_waits_for_live_reservation_to_resolve() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -109,16 +229,16 @@ async fn stop_waits_for_live_reservation_to_resolve() {
         .await
         .expect("open pid lock file");
     assert!(try_lock_file(&reservation).expect("lock reservation"));
-    let cleanup = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let release_reservation = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        // Let stop() remove the stale PID file under the reservation lock.
+        // Deleting it here would race with the backend's read on Windows.
         drop(reservation);
-        tokio::fs::remove_file(pid_file)
-            .await
-            .expect("remove pid file");
     });
 
     backend.stop().await.expect("stop");
-    cleanup.await.expect("cleanup task");
+    release_reservation.await.expect("release reservation task");
+    assert!(!pid_file.exists());
 }
 
 #[tokio::test]
@@ -153,6 +273,10 @@ async fn start_retries_stale_empty_pid_file_under_its_own_lock() {
         err.to_string()
             .starts_with("failed to spawn detached app-server process using ")
     );
+    assert_eq!(
+        crate::telemetry::StartError::from(err).failure_reason(),
+        "spawn"
+    );
 }
 
 #[cfg(unix)]
@@ -184,7 +308,6 @@ async fn legacy_launch_clears_recovery_best_effort() {
         assert_eq!(recovery_file.exists(), snapshot_is_directory);
     }
 }
-
 #[tokio::test]
 async fn stale_record_cleanup_preserves_replacement_record() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -601,7 +724,13 @@ fn app_server_remote_control_uses_runtime_flag() {
 
     assert_eq!(
         backend.command_args(),
-        vec!["app-server", "--remote-control", "--listen", "unix://"]
+        vec![
+            "app-server",
+            "--remote-control",
+            "--listen",
+            "unix://",
+            "--analytics-default-enabled"
+        ]
     );
 }
 
@@ -615,7 +744,12 @@ fn app_server_disabled_remote_control_uses_compatible_args_and_runtime_env() {
 
     assert_eq!(
         backend.command_args(),
-        vec!["app-server", "--listen", "unix://"]
+        vec![
+            "app-server",
+            "--listen",
+            "unix://",
+            "--analytics-default-enabled"
+        ]
     );
     assert_eq!(
         backend.command_env(),
@@ -744,6 +878,7 @@ async fn failed_updater_handoff_preserves_predecessor_record() {
 #[tokio::test]
 async fn updater_readiness_and_post_publication_failure_preserve_ownership() {
     use futures::FutureExt;
+    use tokio::io::AsyncWriteExt;
     use windows_sys::Win32::Security::ImpersonateAnonymousToken;
     use windows_sys::Win32::Security::RevertToSelf;
     use windows_sys::Win32::System::Threading::GetCurrentThread;
@@ -758,13 +893,23 @@ async fn updater_readiness_and_post_publication_failure_preserve_ownership() {
         .acquire_reservation_lock()
         .await
         .expect("reservation lock");
+    let mut predecessor_stderr = backend.open_stderr_log().await.expect("predecessor log");
+    predecessor_stderr
+        .write_all(&vec![b'x'; 512 * 1024])
+        .await
+        .unwrap();
+    predecessor_stderr.flush().await.unwrap();
+    let successor_stderr = backend.open_stderr_log().await.expect("successor log");
+    let ready = backend.pid_file.with_extension("ready");
     let mut child = tokio::process::Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Start-Sleep 60",
+            "[Console]::Error.WriteLine('successor startup'); [IO.File]::WriteAllText($env:CODEX_TEST_UPDATER_READY, ''); Start-Sleep 60",
         ])
+        .env("CODEX_TEST_UPDATER_READY", &ready)
+        .stderr(Stdio::from(successor_stderr.into_std().await))
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .kill_on_drop(true)
         .spawn()
@@ -789,12 +934,21 @@ async fn updater_readiness_and_post_publication_failure_preserve_ownership() {
     tokio::fs::write(&backend.pid_file, serde_json::to_vec(&successor).unwrap())
         .await
         .unwrap();
-    let ready = backend.pid_file.with_extension("ready");
-    tokio::fs::write(&ready, b"").await.unwrap();
     backend
         .finish_updater_start(&successor, Some(&predecessor))
         .await
         .expect("ready successor");
+    predecessor_stderr
+        .write_all(b"predecessor handoff complete\n")
+        .await
+        .unwrap();
+    predecessor_stderr.flush().await.unwrap();
+    let log_path = stderr_log_file_for_pid_file(&backend.pid_file);
+    let log = tokio::fs::read(&log_path).await.unwrap();
+    assert!(log.len() < 256 * 1024);
+    let log = String::from_utf8(log).expect("no stale-offset gap");
+    assert!(log.contains("successor startup"));
+    assert!(log.contains("predecessor handoff complete"));
     assert!(!ready.exists());
     assert_eq!(
         backend.read_pid_file_state().await.unwrap(),
@@ -921,4 +1075,48 @@ fn inaccessible_pid_preserves_identity_check_error() {
     })
     .join()
     .expect("anonymous identity check");
+}
+
+#[tokio::test]
+async fn stderr_preservation_failure_does_not_prevent_opening_new_log() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let pid_file = home.path().join("daemon.pid");
+    let path = stderr_log_file_for_pid_file(&pid_file);
+    let backend = PidBackend::new(
+        home.path().join("codex"),
+        pid_file,
+        /*remote_control_enabled*/ false,
+    );
+    tokio::fs::write(&path, b"previous failure").await?;
+    tokio::fs::create_dir(path.with_extension("log.previous")).await?;
+    let _log = backend.open_stderr_log().await?;
+    assert_eq!(tokio::fs::read(&path).await?, b"");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stderr_handoff_appends_after_truncation_without_gaps() -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let home = TempDir::new()?;
+    let backend = PidBackend::new_update_loop(
+        home.path().join("codex"),
+        home.path().join("updater.pid"),
+        /*restore_release*/ None,
+    );
+    let mut predecessor = backend.open_stderr_log().await?;
+    predecessor.write_all(&vec![b'x'; 512 * 1024]).await?;
+    predecessor.flush().await?;
+    let mut successor = backend.open_stderr_log().await?;
+    successor.write_all(b"successor startup failure\n").await?;
+    successor.flush().await?;
+    predecessor
+        .write_all(b"predecessor handoff complete\n")
+        .await?;
+    predecessor.flush().await?;
+    assert_eq!(
+        tokio::fs::read(stderr_log_file_for_pid_file(&backend.pid_file)).await?,
+        b"successor startup failure\npredecessor handoff complete\n"
+    );
+    Ok(())
 }

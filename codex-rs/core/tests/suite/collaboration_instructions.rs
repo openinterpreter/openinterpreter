@@ -25,7 +25,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -74,10 +74,12 @@ fn model_with_collaboration_messages(
 ) -> codex_protocol::openai_models::ModelInfo {
     let mut model = model_info_from_slug(slug);
     let model_messages = model.model_messages.get_or_insert(ModelMessages {
+        apps: None,
+        plugins: None,
+        content_filter_guidance: None,
         persistent_instructions: None,
         tools: None,
         instructions_template: None,
-        instructions_variables: None,
         approvals: None,
         collaboration_modes: None,
         auto_review: None,
@@ -542,9 +544,9 @@ async fn collaboration_instructions_added_on_user_turn() -> Result<()> {
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(test.config.permissions.approval_policy.value()),
-                sandbox_policy: Some(test.config.legacy_sandbox_policy()),
+                permission_profile: Some(test.config.permissions.effective_permission_profile()),
                 summary: Some(
                     test.config
                         .model_reasoning_summary
@@ -589,9 +591,9 @@ async fn collaboration_instructions_omitted_when_disabled() -> Result<()> {
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(test.config.permissions.approval_policy.value()),
-                sandbox_policy: Some(test.config.legacy_sandbox_policy()),
+                permission_profile: Some(test.config.permissions.effective_permission_profile()),
                 summary: Some(
                     test.config
                         .model_reasoning_summary
@@ -647,9 +649,9 @@ async fn user_turn_overrides_collaboration_instructions_after_override() -> Resu
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 approval_policy: Some(test.config.permissions.approval_policy.value()),
-                sandbox_policy: Some(test.config.legacy_sandbox_policy()),
+                permission_profile: Some(test.config.permissions.effective_permission_profile()),
                 summary: Some(
                     test.config
                         .model_reasoning_summary

@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codex_exec_server_protocol::JSONRPCErrorError;
+use codex_file_system::metadata_batch_fits;
 use codex_utils_path_uri::PathUri;
 use tokio::io;
 use tokio_util::io::ReaderStream;
@@ -9,7 +10,8 @@ use crate::CapabilityRootsDiscoverParams;
 use crate::CapabilityRootsDiscoverResponse;
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
-use crate::ExecServerRuntimePaths;
+use crate::DiscoverV2CapabilitiesResponse;
+use crate::ExecServerRuntimeOptions;
 use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FILE_READ_CHUNK_SIZE;
@@ -24,13 +26,16 @@ use crate::RemoveOptions;
 use crate::WalkOptions;
 use crate::WalkOutcome;
 use crate::WriteFileOptions;
+use crate::discover_v2::capability_locations::CapabilityLocation;
 use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
 use crate::fs_sandbox::FileSystemSandboxRunner;
 use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCreateDirectoryParams;
+use crate::protocol::FsGetMetadataBatchParams;
 use crate::protocol::FsGetMetadataParams;
+use crate::protocol::FsOpenMode;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsRemoveParams;
@@ -43,6 +48,25 @@ pub struct SandboxedFileSystem {
 }
 
 impl SandboxedFileSystem {
+    pub(crate) async fn load_sandboxed_capability_discoveries(
+        &self,
+        locations: Vec<CapabilityLocation>,
+        warnings: Vec<String>,
+        sandbox: &FileSystemSandboxContext,
+    ) -> FileSystemResult<DiscoverV2CapabilitiesResponse> {
+        require_platform_sandbox(Some(sandbox))?;
+        self.run_sandboxed(
+            sandbox,
+            FsHelperRequest::LoadCapabilityDiscoveries {
+                locations,
+                warnings,
+            },
+        )
+        .await?
+        .expect_capability_discoveries()
+        .map_err(map_sandbox_error)
+    }
+
     #[tracing::instrument(
         name = "capability_roots.discover_v1",
         skip_all,
@@ -59,23 +83,25 @@ impl SandboxedFileSystem {
             .map_err(map_sandbox_error)
     }
 
-    pub(crate) async fn open_file_for_read(
+    pub(crate) async fn open_file(
         &self,
         path: &PathUri,
+        mode: FsOpenMode,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<tokio::fs::File> {
         let sandbox = require_platform_sandbox(sandbox)?;
         validate_native_path(path)?;
         let command = self
             .sandbox_runner
-            .sandbox_command(sandbox)
+            .prepare_command(sandbox)
+            .await
             .map_err(map_sandbox_error)?;
-        crate::sandboxed_file_open::open(command, path.clone())
+        crate::sandboxed_file_open::open(command, path.clone(), mode)
             .await
             .map_err(map_sandbox_error)
     }
 
-    pub fn new(runtime_paths: ExecServerRuntimePaths) -> Self {
+    pub fn new(runtime_paths: ExecServerRuntimeOptions) -> Self {
         Self {
             sandbox_runner: FileSystemSandboxRunner::new(runtime_paths),
         }
@@ -346,7 +372,7 @@ impl ExecutorFileSystem for SandboxedFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
         Box::pin(async move {
-            let file = self.open_file_for_read(path, sandbox).await?;
+            let file = self.open_file(path, FsOpenMode::Read, sandbox).await?;
             Ok(FileSystemReadStream::new(ReaderStream::with_capacity(
                 file,
                 FILE_READ_CHUNK_SIZE,
@@ -386,6 +412,36 @@ impl ExecutorFileSystem for SandboxedFileSystem {
         Box::pin(SandboxedFileSystem::get_metadata(
             self, path, options, sandbox,
         ))
+    }
+
+    fn get_metadata_batch<'a>(
+        &'a self,
+        paths: &'a [PathUri],
+        options: GetMetadataOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<io::Result<FileMetadata>>> {
+        Box::pin(async move {
+            if paths.is_empty() {
+                return Ok(Vec::new());
+            }
+            if !metadata_batch_fits(paths) {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            let sandbox = require_platform_sandbox(sandbox)?;
+            let response = self
+                .run_sandboxed(
+                    sandbox,
+                    FsHelperRequest::GetMetadataBatch(FsGetMetadataBatchParams {
+                        paths: paths.to_vec(),
+                        follow_symlinks: (!options.follow_symlinks).then_some(false),
+                        sandbox: None,
+                    }),
+                )
+                .await?
+                .expect_get_metadata_batch()
+                .map_err(map_sandbox_error)?;
+            crate::fs_helper::decode_metadata_batch(response, paths.len())
+        })
     }
 
     fn read_directory<'a>(
@@ -453,7 +509,7 @@ fn require_platform_sandbox(
         })
 }
 
-fn map_sandbox_error(error: JSONRPCErrorError) -> io::Error {
+pub(crate) fn map_sandbox_error(error: JSONRPCErrorError) -> io::Error {
     match error.code {
         -32004 => io::Error::new(io::ErrorKind::NotFound, error.message),
         -32600 => io::Error::new(io::ErrorKind::InvalidInput, error.message),

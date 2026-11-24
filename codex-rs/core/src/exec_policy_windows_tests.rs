@@ -61,7 +61,7 @@ fn commands_for_exec_policy_parses_powershell_shell_wrapper() {
         commands_for_exec_policy(&command),
         ExecPolicyCommands {
             commands: vec![vec!["echo".to_string(), "blocked".to_string()]],
-            command_origin: ExecPolicyCommandOrigin::PowerShell,
+            command_origin: ExecPolicyCommandOrigin::PowerShellLiteral,
         }
     );
 }

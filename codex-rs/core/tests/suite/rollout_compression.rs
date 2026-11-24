@@ -137,8 +137,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         .features
         .enable(Feature::LocalThreadStoreCompression)?;
     // Use production feature wiring, rather than manually writing zstd files or calling the worker.
-    let store =
-        codex_core::thread_store_from_config(&config, codex_core::init_state_db(&config).await);
+    let store = codex_core::ThreadStoreBuilder::from_config(
+        &config,
+        codex_core::init_state_db(&config).await,
+    )
+    .build();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if paths
@@ -169,6 +172,7 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         .resume_thread_with_history(
             config,
             InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
                 conversation_id: context.thread_id,
                 history: Arc::new(context.items),
                 rollout_path: Some(child_path),

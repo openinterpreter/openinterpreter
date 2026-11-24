@@ -54,6 +54,9 @@ use wiremock::matchers::body_partial_json;
 #[path = "command_lifecycle_tests.rs"]
 mod command_lifecycle;
 
+#[path = "tool_observation_tests.rs"]
+mod tool_observation_tests;
+
 struct RecordedHistory {
     call_id: String,
     arguments: String,
@@ -108,7 +111,7 @@ impl ToolLifecycleContributor for ConversationHistoryRecorder {
                     items: input.conversation_history.items().cloned().collect(),
                     mcp_tool: input.mcp_tool.map(|tool| {
                         (
-                            tool.tool_info().server_name.clone(),
+                            tool.tool_info().server_name().to_owned(),
                             tool.tool_info().connector_id.clone(),
                             tool.source().clone(),
                         )
@@ -302,6 +305,12 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
             .and_then(Value::as_str),
         Some("calendar_list_events")
     );
+    if matches!(owner, AppsServerOwner::Extension) {
+        assert_eq!(
+            executed_call.pointer("/params/_meta/_codex_apps/root_turn_id"),
+            None
+        );
+    }
 
     Ok(())
 }

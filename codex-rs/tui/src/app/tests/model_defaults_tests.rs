@@ -1,7 +1,11 @@
 use super::*;
 use crate::collaboration_modes;
 use codex_app_server_client::AppServerClient;
+use codex_app_server_client::CloudOperation;
+use codex_app_server_client::CloudUserMessageReceipt;
 use codex_config::LoaderOverrides;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use crossterm::event::KeyCode;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -38,6 +42,7 @@ async fn session_model_selection_preserves_defaults_and_updates_active_thread() 
                 AppEvent::SelectSessionModel {
                     model: "gpt-5.6-terra".into(),
                     effort: Some(effort.clone()),
+                    service_tier: None,
                 },
             ))
             .await?;
@@ -136,9 +141,11 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            Default::default(),
         )
         .await?;
         let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Remote,
         );

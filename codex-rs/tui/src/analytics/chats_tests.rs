@@ -36,6 +36,7 @@ async fn incomplete_chat_batches_retain_available_estimates_without_inventing_ze
             thread_id: "available".into(),
             estimated_usage_credits_micros: 1250000,
             estimated_usage_usd_micros: None,
+            native_usage_usd_micros: None,
             groups: Vec::new(),
         }]
     );
@@ -115,6 +116,7 @@ async fn slow_repairing_chat_listing_keeps_estimate_budget_and_ranks_across_page
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: 16,
+        required_human_approval: true,
     })
     .await
     .unwrap();

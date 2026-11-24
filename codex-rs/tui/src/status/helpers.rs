@@ -1,3 +1,4 @@
+use crate::clock_format::ClockFormat;
 use crate::exec_command::relativize_to_home;
 use crate::legacy_core::config::Config;
 use crate::status::StatusAccountDisplay;
@@ -97,23 +98,9 @@ pub(crate) fn compose_account_display(
 }
 
 pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
-    if plan_type == PlanType::EnterpriseCbpAutomation {
-        "Enterprise (Automation)".to_string()
-    } else if plan_type == PlanType::SelfServeBusinessProLite {
-        "Business Premium".to_string()
-    } else if plan_type.is_team_like() {
-        "Business".to_string()
-    } else if plan_type.is_business_like() {
-        "Enterprise".to_string()
-    } else if plan_type == PlanType::ProLite {
-        "Pro Lite".to_string()
-    } else if plan_type == PlanType::EduPlus {
-        "Edu Plus".to_string()
-    } else if plan_type == PlanType::EduPro {
-        "Edu Pro".to_string()
-    } else {
-        title_case(format!("{plan_type:?}").as_str())
-    }
+    crate::subscription::SubscriptionDisplay::Status
+        .label(plan_type)
+        .to_string()
 }
 
 pub(crate) fn format_tokens_compact(value: i64) -> String {
@@ -126,11 +113,12 @@ pub(crate) fn format_tokens_compact(value: i64) -> String {
     }
 
     let value_f64 = value as f64;
-    let (scaled, suffix) = if value >= 1_000_000_000_000 {
+    // Promote values that would round to 1000 in the smaller unit.
+    let (scaled, suffix) = if value >= 999_500_000_000 {
         (value_f64 / 1_000_000_000_000.0, "T")
-    } else if value >= 1_000_000_000 {
+    } else if value >= 999_500_000 {
         (value_f64 / 1_000_000_000.0, "B")
-    } else if value >= 1_000_000 {
+    } else if value >= 999_500 {
         (value_f64 / 1_000_000.0, "M")
     } else {
         (value_f64 / 1_000.0, "K")
@@ -180,25 +168,17 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
     formatted
 }
 
-pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
+pub(crate) fn format_reset_timestamp(
+    dt: DateTime<Local>,
+    captured_at: DateTime<Local>,
+    clock_format: ClockFormat,
+) -> String {
+    let time = dt.format(clock_format.time_format()).to_string();
     if dt.date_naive() == captured_at.date_naive() {
         time
     } else {
         format!("{time} on {}", dt.format("%-d %b"))
     }
-}
-
-fn title_case(s: &str) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let rest = chars.as_str().to_ascii_lowercase();
-    first.to_uppercase().collect::<String>() + &rest
 }
 
 #[cfg(test)]
@@ -224,8 +204,9 @@ mod tests {
             (PlanType::Free, "Free"),
             (PlanType::Go, "Go"),
             (PlanType::Plus, "Plus"),
-            (PlanType::Pro, "Pro"),
-            (PlanType::ProLite, "Pro Lite"),
+            (PlanType::Pro, "Pro 200"),
+            (PlanType::ProLite, "Pro 100"),
+            (PlanType::ProMax, "Pro 500"),
             (PlanType::Team, "Business"),
             (PlanType::SelfServeBusinessUsageBased, "Business"),
             (PlanType::Business, "Enterprise"),
@@ -248,6 +229,12 @@ mod tests {
             [PlanType::Edu, PlanType::EduPlus, PlanType::EduPro]
                 .map(plan_type_display_name)
                 .join("\n")
+        );
+        insta::assert_snapshot!(
+            [PlanType::Sci, PlanType::SciPlus]
+                .map(plan_type_display_name)
+                .join("\n"),
+            @"Academic Researchers\nAcademic Researchers Plus"
         );
     }
 

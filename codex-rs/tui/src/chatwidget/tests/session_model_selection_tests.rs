@@ -49,7 +49,7 @@ async fn session_model_selection_accepts_final_choices_without_saving() {
         while rx.try_recv().is_ok() {}
         chat.handle_key_event(KeyEvent::from(KeyCode::Char('s')));
         let selected = rx.try_recv().expect("session-only selection");
-        assert_matches!(selected, AppEvent::SelectSessionModel { model, effort: selected_effort }
+        assert_matches!(selected, AppEvent::SelectSessionModel { model, effort: selected_effort, .. }
             if model == expected_model && selected_effort.as_ref() == Some(&effort));
         assert!(chat.bottom_pane.no_modal_or_popup_active(), "{picker}");
         assert!(
@@ -100,8 +100,8 @@ async fn session_model_selection_notifies_the_original_task_after_each_final_ast
         assert_matches!(events.try_recv(), Ok(AppEvent::AstraSelectedFromModelPicker {
             thread_id: selected_thread,
             model,
-            action: AstraModelPickerAction::SelectSessionModel { effort: selected_effort },
-        }) if selected_thread == thread_id && model == "gpt-6-astra" && selected_effort == Some(effort));
+            action: AstraModelPickerAction::SelectSessionModel { effort: selected_effort, service_tier },
+        }) if selected_thread == thread_id && model == "gpt-6-astra" && selected_effort == Some(effort) && service_tier.is_none());
         assert!(
             std::iter::from_fn(|| events.try_recv().ok()).all(|event| matches!(
                 event,

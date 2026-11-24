@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use crate::context::world_state::test_support::render_section_cases;
 use codex_execpolicy::Decision;
 use codex_models_manager::model_info::model_info_from_slug;
@@ -11,6 +12,7 @@ use codex_protocol::openai_models::ApprovalMessages;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::PermissionMessages;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::Path;
@@ -24,6 +26,32 @@ fn snapshots() {
     let read_only = permissions_state(PermissionProfile::read_only(), AskForApproval::OnRequest);
     let full_access = permissions_state(PermissionProfile::Disabled, AskForApproval::OnRequest);
     let never_ask = permissions_state(PermissionProfile::read_only(), AskForApproval::Never);
+    let approval_context =
+        ApprovalPromptContext::new(ApprovalsReviewer::User, ResolvedModelMessages::bundled());
+    let scoped = PermissionsState::new(
+        BTreeMap::from([
+            (Some("A".to_string()), read_only.descriptions[&None].clone()),
+            (
+                Some("B".to_string()),
+                full_access.descriptions[&None].clone(),
+            ),
+        ]),
+        &Policy::empty(),
+        approval_context,
+        /*per_environment*/ true,
+    );
+    let only_a = PermissionsState::new(
+        BTreeMap::from([(Some("A".to_string()), read_only.descriptions[&None].clone())]),
+        &Policy::empty(),
+        approval_context,
+        /*per_environment*/ true,
+    );
+    let fallback = PermissionsState::new(
+        read_only.descriptions.clone(),
+        &Policy::empty(),
+        approval_context,
+        /*per_environment*/ true,
+    );
 
     insta::assert_snapshot!(render_section_cases(&[
         (Absent, Absent),
@@ -32,6 +60,11 @@ fn snapshots() {
         (Known(&read_only), Known(&full_access)),
         (Known(&read_only), Known(&never_ask)),
         (Unknown, Known(&read_only)),
+        (Known(&read_only), Known(&only_a)),
+        (Known(&scoped), Known(&only_a)),
+        (Known(&only_a), Known(&only_a)),
+        (Known(&only_a), Known(&fallback)),
+        (Known(&only_a), Known(&read_only)),
     ]));
 }
 
@@ -49,28 +82,44 @@ fn approved_prefix_is_rendered_without_reinjecting_permissions() {
         .expect("test prefix should be valid");
     let with_approved_prefix = permissions_state_with_default_messages(&exec_policy);
     let approved_prefix = r#"["touch", "allow-prefix.txt"]"#;
-    let without_snapshot = without_approved_prefix.snapshot();
-    let with_snapshot = with_approved_prefix.snapshot();
+    let without_snapshot = without_approved_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+    let with_snapshot = with_approved_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
     let rendered_update = with_approved_prefix
-        .render_diff(Known(&without_snapshot))
+        .render_fragment_diff(Known(&without_snapshot))
+        .1
         .expect("approving a prefix should render a world-state update")
-        .render();
+        .render()
+        .expect_text();
 
     assert_ne!(without_snapshot, with_snapshot);
     assert_ne!(
-        without_approved_prefix.instructions.body(),
-        with_approved_prefix.instructions.body()
-    );
-    assert!(
-        !without_approved_prefix
+        without_approved_prefix.descriptions[&None]
             .instructions
             .body()
+            .expect_text(),
+        with_approved_prefix.descriptions[&None]
+            .instructions
+            .body()
+            .expect_text()
+    );
+    assert!(
+        !without_approved_prefix.descriptions[&None]
+            .instructions
+            .body()
+            .expect_text()
             .contains(approved_prefix)
     );
     assert!(
-        with_approved_prefix
+        with_approved_prefix.descriptions[&None]
             .instructions
             .body()
+            .expect_text()
             .contains(approved_prefix)
     );
     assert_eq!(
@@ -80,9 +129,11 @@ fn approved_prefix_is_rendered_without_reinjecting_permissions() {
     assert!(!rendered_update.contains("<permissions instructions>"));
 
     let before_approval_permissions =
-        permissions_state(PermissionProfile::read_only(), AskForApproval::OnRequest)
+        permissions_state(PermissionProfile::read_only(), AskForApproval::OnRequest).descriptions
+            [&None]
             .instructions
-            .render();
+            .render()
+            .expect_text();
     let model_visible_before_and_after = format!(
         "BEFORE APPROVAL — PERMISSIONS ALREADY IN CONTEXT (CONDENSED)\n{before_approval_permissions}\n\nAFTER APPROVAL — WORLD-STATE DIFF APPENDS\n{rendered_update}\n\nFULL PERMISSIONS BLOCK APPENDED AFTER APPROVAL\nNone",
     );
@@ -96,28 +147,49 @@ fn approved_prefix_is_rendered_without_reinjecting_permissions() {
 fn renders_only_newly_approved_prefixes() {
     use PreviousSectionState::Known;
 
+    let scoped = |policy: &Policy| {
+        let mut legacy = permissions_state_with_default_messages(policy);
+        let description = legacy.descriptions.remove(&None).unwrap();
+        PermissionsState::new(
+            BTreeMap::from([(Some("A".to_string()), description)]),
+            policy,
+            ApprovalPromptContext::new(ApprovalsReviewer::User, ResolvedModelMessages::bundled()),
+            /*per_environment*/ true,
+        )
+    };
+
     let mut exec_policy = Policy::empty();
     exec_policy
         .add_prefix_rule(&["git".to_string(), "pull".to_string()], Decision::Allow)
         .expect("test prefix should be valid");
-    let with_existing_prefix = permissions_state_with_default_messages(&exec_policy);
+    let with_existing_prefix = scoped(&exec_policy);
     exec_policy
         .add_prefix_rule(&["cargo".to_string(), "test".to_string()], Decision::Allow)
         .expect("test prefix should be valid");
-    let with_new_prefix = permissions_state_with_default_messages(&exec_policy);
-    let existing_snapshot = with_existing_prefix.snapshot();
-    let current_snapshot = with_new_prefix.snapshot();
+    let with_new_prefix = scoped(&exec_policy);
+    let existing_snapshot = with_existing_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
+    let current_snapshot = with_new_prefix
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
 
     assert_eq!(
         with_new_prefix
-            .render_diff(Known(&existing_snapshot))
-            .map(|fragment| fragment.render()),
+            .render_fragment_diff(Known(&existing_snapshot))
+            .1
+            .map(|fragment| fragment.render().expect_text()),
         Some("Approved command prefix saved:\n- [\"cargo\", \"test\"]".to_string())
     );
-    assert!(
-        with_new_prefix
-            .render_diff(Known(&current_snapshot))
-            .is_none()
+    let (snapshot, fragment) = with_new_prefix.render_fragment_diff(Known(&current_snapshot));
+    assert_eq!(
+        (
+            snapshot,
+            fragment.map(|fragment| fragment.render().expect_text())
+        ),
+        (None, None)
     );
 }
 
@@ -133,23 +205,37 @@ fn legacy_snapshot_deserializes_and_only_suppresses_matching_full_permissions() 
         .expect("test prefix should be valid");
     let with_approved_prefix = permissions_state_with_default_messages(&exec_policy);
     let matching_legacy: WorldStateSnapshot = serde_json::from_value(json!({
-        "permissions": WorldStateHash::from_fragment(&with_approved_prefix.instructions),
+        "permissions": WorldStateHash::from_fragment(&with_approved_prefix.descriptions[&None].instructions),
     }))
     .expect("legacy world-state snapshot should deserialize");
     let stale_legacy: WorldStateSnapshot = serde_json::from_value(json!({
-        "permissions": WorldStateHash::from_fragment(&without_approved_prefix.instructions),
+        "permissions": WorldStateHash::from_fragment(&without_approved_prefix.descriptions[&None].instructions),
     }))
     .expect("legacy world-state snapshot should deserialize");
-    let expected_permissions = with_approved_prefix.instructions.render();
+    let expected_permissions = with_approved_prefix.descriptions[&None]
+        .instructions
+        .render()
+        .expect_text();
+    let retained = ContextualUserFragment::into(
+        with_approved_prefix.descriptions[&None]
+            .instructions
+            .clone(),
+    );
     let mut world_state = WorldState::default();
     world_state.add_section(with_approved_prefix);
 
-    assert!(world_state.render_diff(&matching_legacy).is_empty());
+    assert!(
+        world_state
+            .render_history_fragment_diff(Some(&matching_legacy), std::slice::from_ref(&retained))
+            .1
+            .is_empty()
+    );
     assert_eq!(
         world_state
-            .render_diff(&stale_legacy)
+            .render_history_fragment_diff(Some(&stale_legacy), &[retained])
+            .1
             .into_iter()
-            .map(|fragment| fragment.render())
+            .map(|fragment| fragment.render().expect_text())
             .collect::<Vec<_>>(),
         vec![expected_permissions]
     );
@@ -167,20 +253,33 @@ fn removing_an_approved_prefix_renders_full_permissions() {
     let without_approved_prefix = permissions_state_with_default_messages(&Policy::empty());
 
     let rendered = without_approved_prefix
-        .render_diff(Known(&with_approved_prefix.snapshot()))
+        .render_fragment_diff(Known(
+            &with_approved_prefix
+                .render_fragment_diff(PreviousSectionState::Absent)
+                .0
+                .unwrap(),
+        ))
+        .1
         .expect("removing a prefix should refresh permissions")
-        .render();
+        .render()
+        .expect_text();
 
-    assert_eq!(rendered, without_approved_prefix.instructions.render());
+    assert_eq!(
+        rendered,
+        without_approved_prefix.descriptions[&None]
+            .instructions
+            .render()
+            .expect_text()
+    );
 }
 
 #[test]
 fn persisted_permissions_are_detected_inside_bundled_developer_messages() {
     let state = permissions_state(PermissionProfile::read_only(), AskForApproval::OnRequest);
-    let retained = ContextualUserFragment::into(state.instructions.clone());
+    let retained = ContextualUserFragment::into(state.descriptions[&None].instructions.clone());
     let mut world_state = super::super::WorldState::default();
     world_state.add_section(state);
-    let snapshot = world_state.snapshot();
+    let snapshot = world_state.render_full().0;
     let mut bundled_retained = retained.clone();
     let ResponseItem::Message { content, .. } = &mut bundled_retained else {
         panic!("permissions should render as a message");
@@ -194,17 +293,22 @@ fn persisted_permissions_are_detected_inside_bundled_developer_messages() {
 
     assert_eq!(
         world_state
-            .render_history_diff(/*previous*/ None, std::slice::from_ref(&retained))
+            .render_history_fragment_diff(/*previous*/ None, std::slice::from_ref(&retained))
+            .1
             .len(),
         1,
     );
     assert_eq!(
-        world_state.render_history_diff(Some(&snapshot), &[]).len(),
+        world_state
+            .render_history_fragment_diff(Some(&snapshot), &[])
+            .1
+            .len(),
         1,
     );
     assert!(
         world_state
-            .render_history_diff(Some(&snapshot), &[bundled_retained])
+            .render_history_fragment_diff(Some(&snapshot), &[bundled_retained])
+            .1
             .is_empty()
     );
 }
@@ -218,11 +322,15 @@ fn permissions_state(
         on_request_auto_review: None,
         never: None,
         unless_trusted: None,
+        granular: None,
+        ..Default::default()
     };
     let permission_messages = PermissionMessages {
         danger_full_access: Some("Full access.".to_string()),
         workspace_write: Some("Workspace write.".to_string()),
         read_only: Some("Read only.".to_string()),
+        approved_prefixes: None,
+        ..PermissionMessages::default()
     };
     let mut model = model_info_from_slug("test-model");
     model.model_messages = Some(ModelMessages {
@@ -231,26 +339,42 @@ fn permissions_state(
         ..Default::default()
     });
     let model_messages = ResolvedModelMessages::from_model(&model);
-    PermissionsState::new(
+    let approval_context = ApprovalPromptContext::new(ApprovalsReviewer::User, model_messages);
+    let description = PermissionDescription::new(
         &permission_profile,
         approval_policy,
-        ApprovalPromptContext::new(ApprovalsReviewer::User, model_messages),
+        approval_context,
         &Policy::empty(),
         Path::new("/workspace"),
+        /*paths*/ None,
         /*exec_permission_approvals_enabled*/ false,
         /*request_permissions_tool_enabled*/ false,
+    );
+    PermissionsState::new(
+        BTreeMap::from([(None, description)]),
+        &Policy::empty(),
+        approval_context,
+        /*per_environment*/ false,
     )
 }
 
 fn permissions_state_with_default_messages(exec_policy: &Policy) -> PermissionsState {
     let model_messages = ResolvedModelMessages::bundled();
-    PermissionsState::new(
+    let approval_context = ApprovalPromptContext::new(ApprovalsReviewer::User, model_messages);
+    let description = PermissionDescription::new(
         &PermissionProfile::read_only(),
         AskForApproval::OnRequest,
-        ApprovalPromptContext::new(ApprovalsReviewer::User, model_messages),
+        approval_context,
         exec_policy,
         Path::new("/workspace"),
+        /*paths*/ None,
         /*exec_permission_approvals_enabled*/ false,
         /*request_permissions_tool_enabled*/ false,
+    );
+    PermissionsState::new(
+        BTreeMap::from([(None, description)]),
+        exec_policy,
+        approval_context,
+        /*per_environment*/ false,
     )
 }

@@ -1,0 +1,28 @@
+---
+source: tui/src/app/owned_transcript_input_tests.rs
+expression: scrolled
+---
+  • Plan step 29
+  • Plan step 30
+  • Plan step 31
+  • Plan step 32
+  • Plan step 33
+  • Plan step 34
+  • Plan step 35
+  • Plan step 36
+  • Plan step 37
+  • Plan step 38
+  • Plan step 39
+  • Plan step 40
+
+
+
+
+  Implement this plan?
+
+
+› 1. Yes, implement this plan          Switch to Default and start coding
+  2. Yes, clear context and implement  Fresh thread with this plan
+  3. No, stay in Plan mode             Continue planning with the model
+
+  enter select · esc back

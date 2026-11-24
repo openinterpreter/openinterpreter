@@ -11,6 +11,9 @@ use std::time::Instant;
 
 use crossterm::event::Event;
 use crossterm::event::KeyCode;
+use tokio_stream::StreamExt;
+
+use super::TuiEvent;
 
 const STARTUP_INPUT_CHILD_TEST: &str = "tui::startup_tests::startup_typeahead_pty_child";
 
@@ -93,8 +96,10 @@ fn startup_preserves_typeahead_and_discards_buffered_action_key_after_first_draw
 
     let result = (|| -> Result<(), String> {
         wait_for_file(&draft_ready)?;
+        // Warp emits Cmd+Left, Cmd+Right, and Cmd+Backspace using these Kitty protocol
+        // sequences: CSI 1;9D, CSI 1;9C, and CSI 127;9u.
         master
-            .write_all(b"abc\r\x1b[DZ")
+            .write_all(b"abc\r\x1b[DZ\x1b[C\x1b[127;9umiddle\x1b[1;9DL\x1b[1;9CR")
             .map_err(|err| format!("failed to queue editable startup input: {err}"))?;
         std::fs::write(&draft_queued, [])
             .map_err(|err| format!("failed to signal editable startup input: {err}"))?;
@@ -211,6 +216,7 @@ async fn startup_typeahead_pty_child() {
             use_alt_screen: false,
             transcript_mode: crate::transcript_mode::TranscriptMode::Terminal,
             status_line_enabled: true,
+            welcome_motion: crate::motion::MotionMode::Animated,
             keymap: crate::keymap::RuntimeKeymap::defaults(),
             disable_paste_burst: false,
         },
@@ -284,10 +290,10 @@ async fn startup_typeahead_pty_child() {
     tui.pause_events();
     let draft = startup_draft.into_draft();
     assert_eq!(
-        draft.text, "abZ!c",
+        draft.text, "LmiddleR!",
         "startup Enter must not submit the draft"
     );
-    assert_eq!(draft.cursor, 3, "startup cursor edits must survive handoff");
+    assert_eq!(draft.cursor, 8, "startup cursor edits must survive handoff");
     assert!(draft.local_images.is_empty());
 
     tui.draw(u16::MAX, |_| {}).expect("draw actionable screen");
@@ -302,6 +308,65 @@ async fn startup_typeahead_pty_child() {
         Event::Key(key) if key.code == KeyCode::Esc
     ));
     assert!(escape_started_at.elapsed() < Duration::from_millis(/*millis*/ 250));
+
+    // Focus changes buffered alongside typeahead must still reach the app in order.
+    crossterm::event::buffer_input(b"\x1b[O\r\x1b[I\x1b")
+        .expect("buffer focus changes, Enter and Escape");
+    assert!(
+        tui.discard_pending_input_after_thread_transition()
+            .is_ready()
+    );
+    crossterm::event::buffer_input(b"x").expect("buffer fresh input");
+    let mut events = tui
+        .event_stream()
+        .filter(|event| !matches!(event, TuiEvent::Draw | TuiEvent::Resize(_)));
+    assert!(matches!(events.next().await, Some(TuiEvent::FocusLost)));
+    assert!(!tui.is_terminal_focused());
+    assert!(matches!(events.next().await, Some(TuiEvent::FocusGained)));
+    assert!(tui.is_terminal_focused());
+    assert!(
+        matches!(events.next().await, Some(TuiEvent::Key(key)) if key.code == KeyCode::Char('x'))
+    );
+
+    // Hold the boundary open past the drain deadline. An Enter behind the delayed
+    // paste terminator still belongs to the old screen, but the next edit is fresh.
+    crossterm::event::buffer_input(b"\x1b[200~unfinished").expect("begin a paste");
+    assert!(
+        tui.discard_pending_input_after_thread_transition()
+            .is_pending()
+    );
+    // The final draw must sample geometry even if a resize was consumed during a retry.
+    let old_size = tui
+        .screen_size_for_event(&TuiEvent::Resume)
+        .expect("sample initial size");
+    let resized = libc::winsize {
+        ws_row: old_size.height,
+        ws_col: old_size.width + 1,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // Safety: stdin is the child PTY and resized is valid for this ioctl.
+    assert_eq!(
+        unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCSWINSZ, &resized) },
+        0
+    );
+    crossterm::event::buffer_input(b"\x1b[201~\r\x1b[O").expect("finish paste and queue Enter");
+    assert!(
+        tui.discard_pending_input_after_thread_transition()
+            .is_ready()
+    );
+    assert_eq!(
+        tui.screen_size_for_event(&TuiEvent::Draw)
+            .expect("size after drain")
+            .width,
+        resized.ws_col
+    );
+    assert!(matches!(events.next().await, Some(TuiEvent::FocusLost)));
+    crossterm::event::buffer_input(b"z").expect("buffer fresh post-timeout input");
+    assert!(
+        matches!(events.next().await, Some(TuiEvent::Key(key)) if key.code == KeyCode::Char('z'))
+    );
+    tui.pause_events();
 
     for suffix in ["y", "1"] {
         crossterm::event::buffer_input(b"\x1b")

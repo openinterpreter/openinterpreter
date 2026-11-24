@@ -41,6 +41,7 @@ fn sample_turn_steer_request(
     ClientRequest::TurnSteer {
         request_id: RequestId::Integer(request_id),
         params: TurnSteerParams {
+            responsesapi_client_metadata_patch: None,
             thread_id: thread_id.to_string(),
             expected_turn_id: expected_turn_id.to_string(),
             client_user_message_id: None,

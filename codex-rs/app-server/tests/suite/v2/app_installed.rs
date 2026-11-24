@@ -18,6 +18,8 @@ use axum::extract::State;
 use axum::routing::get;
 use codex_app_server_protocol::AppsInstalledParams;
 use codex_app_server_protocol::AppsInstalledResponse;
+use codex_app_server_protocol::AppsListParams;
+use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::InstalledApp;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -36,7 +38,7 @@ use rmcp::model::CallToolResult;
 use rmcp::model::ContentBlock;
 use rmcp::model::ListToolsResult;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::Tool;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::StreamableHttpService;
@@ -461,8 +463,8 @@ struct InstalledAppsMcpServer {
 }
 
 impl ServerHandler for InstalledAppsMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     async fn call_tool(
@@ -559,6 +561,10 @@ impl InstalledAppsFixture {
             StreamableHttpServerConfig::default(),
         );
         let router = Router::new()
+            .route(
+                "/api/codex/config/bundle",
+                get(|| async { Json(json!({})) }),
+            )
             .route("/connectors/directory/list", get(list_directory_apps))
             .route(
                 "/connectors/directory/list_workspace",

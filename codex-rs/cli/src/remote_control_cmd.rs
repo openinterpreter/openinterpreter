@@ -5,7 +5,6 @@ use anyhow::Context;
 use clap::Args;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
-use codex_app_server::AppServerWebsocketAuthSettings;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::LifecycleOutput as AppServerLifecycleOutput;
 use codex_app_server_daemon::LifecycleStatus as AppServerLifecycleStatus;
@@ -16,9 +15,12 @@ use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::LoaderOverrides;
+use codex_core::config::ConfigBuilder;
+use codex_features::Feature;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
+use codex_websocket_auth::WebsocketAuthSettings;
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -34,8 +36,12 @@ pub(crate) struct RemoteControlCommand {
     #[arg(long = "json", global = true)]
     json: bool,
 
+    /// Run an embedded app-server in the foreground until Ctrl-C.
+    #[arg(long = "no-daemon")]
+    pub(super) no_daemon: bool,
+
     #[command(subcommand)]
-    subcommand: Option<RemoteControlSubcommand>,
+    pub(super) subcommand: Option<RemoteControlSubcommand>,
 }
 
 impl RemoteControlCommand {
@@ -50,7 +56,7 @@ impl RemoteControlCommand {
 }
 
 #[derive(Debug, Clone, Copy, clap::Subcommand)]
-enum RemoteControlSubcommand {
+pub(super) enum RemoteControlSubcommand {
     /// Start the app-server daemon with remote control enabled.
     Start,
 
@@ -66,14 +72,57 @@ pub(crate) async fn run(
     arg0_paths: Arg0DispatchPaths,
     root_config_overrides: CliConfigOverrides,
 ) -> anyhow::Result<()> {
-    match command.subcommand {
-        None => {
+    if command.no_daemon && command.subcommand.is_some() {
+        anyhow::bail!("`--no-daemon` cannot be used with a remote-control subcommand");
+    }
+
+    if command.subcommand.is_none() {
+        if command.no_daemon || command.json || !daemon_eligible(&root_config_overrides).await? {
+            run_foreground_remote_control(command.json, arg0_paths, root_config_overrides).await?;
+        } else {
             print_remote_control_progress(
                 command.json,
-                "Starting app-server with remote control enabled...",
+                "Starting app-server daemon with remote control enabled...",
             )?;
-            run_foreground_remote_control(command.json, arg0_paths, root_config_overrides).await?;
+            let daemon = match codex_app_server_daemon::start_with_features(&Default::default())
+                .await
+            {
+                Ok(daemon) => daemon,
+                #[cfg(windows)]
+                Err(error) if error.is::<codex_app_server_daemon::DetachedLaunchRestricted>() => {
+                    return run_foreground_remote_control(
+                        command.json,
+                        arg0_paths,
+                        root_config_overrides,
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            };
+            if daemon.backend.is_none() {
+                return run_foreground_remote_control(
+                    command.json,
+                    arg0_paths,
+                    root_config_overrides,
+                )
+                .await;
+            }
+            let remote_control = codex_app_server_daemon::enable_remote_control_on_socket(
+                &daemon.socket_path,
+                FOREGROUND_SOCKET_CONNECT_TIMEOUT,
+                FOREGROUND_SOCKET_CONNECT_RETRY_DELAY,
+            )
+            .await?;
+            let output = AppServerRemoteControlReadyOutput {
+                daemon: AppServerRemoteControlStartOutput::Start(daemon),
+                remote_control,
+            };
+            print_remote_control_start_output(&output, command.json)?;
         }
+        return Ok(());
+    }
+
+    match command.subcommand {
         Some(RemoteControlSubcommand::Start) => {
             print_remote_control_progress(
                 command.json,
@@ -91,8 +140,29 @@ pub(crate) async fn run(
             let output = codex_app_server_daemon::start_remote_control_pairing().await?;
             print_remote_control_pairing_output(&output, command.json)?;
         }
+        None => unreachable!("bare remote-control returned before explicit subcommand dispatch"),
     }
     Ok(())
+}
+
+async fn daemon_eligible(root_config_overrides: &CliConfigOverrides) -> anyhow::Result<bool> {
+    if !root_config_overrides.raw_overrides.is_empty()
+        || codex_login::is_workload_identity_selected()
+        || std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).is_some()
+    {
+        return Ok(false);
+    }
+
+    #[cfg(windows)]
+    if codex_app_server_daemon::is_elevated()? {
+        return Ok(false);
+    }
+
+    let Ok(config) = ConfigBuilder::default().build().await else {
+        return Ok(false);
+    };
+    Ok(config.features.enabled(Feature::DaemonAutoStart)
+        && !codex_tui::uses_wsl_drvfs(&config.codex_home))
 }
 
 fn print_remote_control_progress(json: bool, message: &str) -> anyhow::Result<()> {
@@ -112,12 +182,21 @@ async fn run_foreground_remote_control(
     arg0_paths: Arg0DispatchPaths,
     root_config_overrides: CliConfigOverrides,
 ) -> anyhow::Result<()> {
+    print_remote_control_progress(json, "Starting app-server with remote control enabled...")?;
+    #[cfg(not(windows))]
     let socket_dir = tempfile::Builder::new()
         .prefix("codex-rc-")
         .tempdir_in("/tmp")
         .or_else(|_| tempfile::tempdir())
         .context("failed to create private app-server socket directory")?;
+    #[cfg(not(windows))]
     let socket_path = socket_dir.path().join("rc.sock");
+    // Let the transport create this parent with a protected DACL instead of
+    // inheriting the broader ACL from a directory created under `%TEMP%`.
+    #[cfg(windows)]
+    let socket_path = std::env::temp_dir()
+        .join("codex-remote-control")
+        .join(format!("rc-{}.sock", std::process::id()));
     let socket_path = AbsolutePathBuf::from_absolute_path(&socket_path)
         .context("private app-server socket path was not absolute")?;
     let transport = AppServerTransport::UnixSocket {
@@ -137,7 +216,7 @@ async fn run_foreground_remote_control(
         /*default_analytics_enabled*/ false,
         transport,
         SessionSource::VSCode,
-        AppServerWebsocketAuthSettings::default(),
+        WebsocketAuthSettings::default(),
         runtime_options,
     );
     let mut app_server_task = tokio::spawn(async move { app_server.await.map(|_| ()) });

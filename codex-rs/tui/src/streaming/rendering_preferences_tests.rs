@@ -24,6 +24,7 @@ fn rendering_preferences_match_incremental_final_and_emitted_responses() {
                     mermaid,
                     math,
                     tables,
+                    lists: true,
                 });
                 // A disabled table must retain even the prose preceding it inside its fence.
                 let mut source = if tables {

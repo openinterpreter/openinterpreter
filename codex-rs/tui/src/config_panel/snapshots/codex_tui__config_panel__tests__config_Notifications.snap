@@ -1,0 +1,18 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&panel, 140)"
+---
+
+  Configuration
+  Changes save automatically
+
+   Appearance   Notifications   Input   Sessions   Text selection
+
+› Notifications         [x] On               Let your terminal notify you when a turn finishes or approval is needed
+  Notify when           Unfocused ›          Notify only while you are away or while this terminal is focused too
+  Test notification     Send in 5s           Send in 5 seconds so you can switch apps before the notification appears
+
+
+
+
+  left/right group · / search · enter toggle · esc clear search/close

@@ -14,7 +14,9 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider::test_support::seed_gateway_auth;
 use codex_model_provider_info::GatewayOAuthConfig;
 use codex_model_provider_info::GatewayOAuthDelivery;
+use codex_model_provider_info::GatewayOAuthSettings;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OAuthCredentialsStore;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -69,18 +71,20 @@ async fn sampling_requires_gateway_and_primary_auth(expected_error: Option<&str>
     let mut provider =
         ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     provider.supports_websockets = false;
-    provider.gateway_oauth = Some(GatewayOAuthConfig {
+    provider.gateway_oauth = Some(GatewayOAuthConfig::OAuth(GatewayOAuthSettings {
         authorization_url: format!("{}/authorize", server.uri()),
+        device_authorization_url: None,
         token_url: format!("{}/token", server.uri()),
         client_id: "client".into(),
         resource: None,
         scopes: vec![],
         redirect_port: None,
+        credentials_store: OAuthCredentialsStore::File,
         delivery: GatewayOAuthDelivery::Header {
             name: "x-gateway-auth".into(),
             scheme: "Bearer".into(),
         },
-    });
+    }));
     let primary = AuthManager::from_auth_for_testing_with_home(
         CodexAuth::from_api_key("primary-token"),
         home.path().to_path_buf(),

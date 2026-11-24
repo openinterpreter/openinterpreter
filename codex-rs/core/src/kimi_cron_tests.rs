@@ -3,6 +3,7 @@ use chrono::TimeZone;
 
 use crate::context::ContextualUserFragment;
 use crate::context::KimiCronFire;
+use codex_protocol_test_support::ContentItemTestExt;
 
 use super::CronTask;
 use super::KimiCronService;
@@ -20,7 +21,9 @@ fn renders_the_captured_same_thread_envelope() {
     };
 
     assert_eq!(
-        KimiCronFire::new(&task.id, &task.cron, task.recurring, 1, false, &task.prompt,).render(),
+        KimiCronFire::new(&task.id, &task.cron, task.recurring, 1, false, &task.prompt,)
+            .render()
+            .expect_text(),
         "<cron-fire jobId=\"3957c2ae\" cron=\"* * * * *\" recurring=\"false\" coalescedCount=\"1\" stale=\"false\">\n<prompt>\nKIMI_CRON_SAME_THREAD_PROOF\n</prompt>\n</cron-fire>"
     );
 }

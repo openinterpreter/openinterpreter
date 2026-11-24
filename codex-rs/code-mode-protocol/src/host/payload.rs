@@ -8,6 +8,7 @@ use serde_json::Value as JsonValue;
 
 use crate::CellId;
 use crate::CodeModeNestedToolCall;
+use crate::CodeModeOutputTruncation;
 use crate::CodeModeSessionCellExecutionLimits;
 use crate::CodeModeToolKind;
 use crate::ExecuteRequest;
@@ -48,6 +49,32 @@ impl TryFrom<WireSessionCellExecutionLimits> for CodeModeSessionCellExecutionLim
             max_yield_time_ms: value.max_yield_time_ms,
             max_heap_size_bytes: value.max_heap_size_bytes.map(usize::try_from).transpose()?,
         })
+    }
+}
+
+/// The output truncation setting carried by a V1 session-open request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireOutputTruncation {
+    Client,
+    Server,
+}
+
+impl From<CodeModeOutputTruncation> for WireOutputTruncation {
+    fn from(value: CodeModeOutputTruncation) -> Self {
+        match value {
+            CodeModeOutputTruncation::Client => Self::Client,
+            CodeModeOutputTruncation::Server => Self::Server,
+        }
+    }
+}
+
+impl From<WireOutputTruncation> for CodeModeOutputTruncation {
+    fn from(value: WireOutputTruncation) -> Self {
+        match value {
+            WireOutputTruncation::Client => Self::Client,
+            WireOutputTruncation::Server => Self::Server,
+        }
     }
 }
 
@@ -166,6 +193,7 @@ impl From<WireToolDefinition> for ToolDefinition {
             description: value.description,
             kind: value.kind.into(),
             input_schema: value.input_schema,
+            input_schema_max_bytes: None,
             output_schema: value.output_schema,
         }
     }
@@ -210,7 +238,8 @@ impl TryFrom<WireExecuteRequest> for ExecuteRequest {
     }
 }
 
-/// The complete wait request shape supported by protocol V1.
+/// The nested wait payload for protocol V1. Its optional budget is carried by
+/// the enclosing `HostRequest::Wait`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireWaitRequest {
@@ -232,6 +261,7 @@ impl From<WireWaitRequest> for WaitRequest {
         Self {
             cell_id: value.cell_id.into(),
             yield_time_ms: value.yield_time_ms,
+            max_output_tokens: None,
         }
     }
 }
@@ -334,6 +364,8 @@ pub enum WireRuntimeResponse {
         cell_id: WireCellId,
         content_items: Vec<WireContentItem>,
         error_text: Option<String>,
+        #[serde(default)]
+        result_buffered_for_ns: u64,
         code_mode_host_duration_ns: u64,
     },
 }
@@ -376,6 +408,7 @@ impl TryFrom<RuntimeResponse> for WireRuntimeResponse {
                 cell_id,
                 content_items,
                 error_text,
+                result_buffered_for,
                 code_mode_host_duration,
             } => {
                 let code_mode_host_duration =
@@ -384,6 +417,8 @@ impl TryFrom<RuntimeResponse> for WireRuntimeResponse {
                     cell_id: cell_id.into(),
                     content_items: content_items.into_iter().map(Into::into).collect(),
                     error_text,
+                    result_buffered_for_ns: u64::try_from(result_buffered_for.as_nanos())
+                        .unwrap_or(u64::MAX),
                     code_mode_host_duration_ns: u64::try_from(code_mode_host_duration.as_nanos())
                         .unwrap_or(u64::MAX),
                 }
@@ -417,11 +452,13 @@ impl From<WireRuntimeResponse> for RuntimeResponse {
                 cell_id,
                 content_items,
                 error_text,
+                result_buffered_for_ns,
                 code_mode_host_duration_ns,
             } => Self::Result {
                 cell_id: cell_id.into(),
                 content_items: content_items.into_iter().map(Into::into).collect(),
                 error_text,
+                result_buffered_for: Duration::from_nanos(result_buffered_for_ns),
                 code_mode_host_duration: Some(Duration::from_nanos(code_mode_host_duration_ns)),
             },
         }

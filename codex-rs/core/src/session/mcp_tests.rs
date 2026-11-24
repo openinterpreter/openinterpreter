@@ -1,7 +1,10 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use rmcp::model::BooleanSchema;
 use rmcp::model::ElicitationSchema;
 use rmcp::model::PrimitiveSchemaDefinition;
+use rmcp::model::RequestMetaObject;
+use serde_json::Value;
 use serde_json::json;
 
 fn meta(value: Value) -> Option<RequestMetaObject> {
@@ -29,6 +32,7 @@ fn guardian_meta(tool_params: Option<Value>) -> Option<RequestMetaObject> {
 fn form_request(meta: Option<RequestMetaObject>) -> ElicitationReviewRequest {
     ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
         request_id: rmcp::model::NumberOrString::Number(7),
         elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
             meta,
@@ -41,68 +45,11 @@ fn form_request(meta: Option<RequestMetaObject>) -> ElicitationReviewRequest {
 }
 
 #[test]
-fn guardian_elicitation_review_request_builds_mcp_tool_call() {
-    let request = form_request(guardian_meta(Some(json!({
-        "origin": "https://example.com",
-    }))));
-
-    let GuardianElicitationReview::ApprovalRequest(guardian_request) =
-        guardian_elicitation_review_request(&request, /*originating_call_id*/ None)
-    else {
-        panic!("expected Guardian MCP tool call request");
-    };
-    let crate::guardian::GuardianApprovalRequest::McpToolCall {
-        id,
-        server,
-        tool_name,
-        arguments,
-        connector_id,
-        connector_name,
-        connector_description,
-        connected_account_email,
-        tool_title,
-        tool_description,
-        annotations,
-    } = *guardian_request
-    else {
-        panic!("expected Guardian MCP tool call request");
-    };
-
-    assert_eq!(id, "mcp_elicitation:browser-use:7");
-    assert_eq!(server, "browser-use");
-    assert_eq!(tool_name, "access_browser_origin");
-    assert_eq!(arguments, Some(json!({ "origin": "https://example.com" })));
-    assert_eq!(connector_id.as_deref(), Some("browser-use"));
-    assert_eq!(connector_name.as_deref(), Some("Browser Use"));
-    assert_eq!(connector_description, None);
-    assert_eq!(connected_account_email, None);
-    assert_eq!(tool_title.as_deref(), Some("Access browser origin"));
-    assert_eq!(tool_description, None);
-    assert_eq!(annotations, None);
-}
-
-#[test]
-fn guardian_elicitation_review_request_defaults_missing_tool_params() {
-    let request = form_request(guardian_meta(/*tool_params*/ None));
-
-    let GuardianElicitationReview::ApprovalRequest(guardian_request) =
-        guardian_elicitation_review_request(&request, /*originating_call_id*/ None)
-    else {
-        panic!("expected Guardian MCP tool call request");
-    };
-    let crate::guardian::GuardianApprovalRequest::McpToolCall { arguments, .. } = *guardian_request
-    else {
-        panic!("expected Guardian MCP tool call request");
-    };
-
-    assert_eq!(arguments, Some(json!({})));
-}
-
-#[test]
 fn plugin_install_elicitation_telemetry_metadata_requires_install_tool_suggestion() {
     let event = EventMsg::ElicitationRequest(ElicitationRequestEvent {
         turn_id: Some("turn-1".to_string()),
         server_name: "codex_apps".to_string(),
+        environment_id: None,
         id: codex_protocol::mcp::RequestId::String("request-1".to_string()),
         request: codex_protocol::approvals::ElicitationRequest::Form {
             meta: Some(json!({
@@ -132,6 +79,7 @@ fn plugin_install_elicitation_telemetry_metadata_requires_install_tool_suggestio
     let enable_event = EventMsg::ElicitationRequest(ElicitationRequestEvent {
         turn_id: Some("turn-1".to_string()),
         server_name: "codex_apps".to_string(),
+        environment_id: None,
         id: codex_protocol::mcp::RequestId::String("request-2".to_string()),
         request: codex_protocol::approvals::ElicitationRequest::Form {
             meta: Some(json!({
@@ -172,6 +120,7 @@ fn guardian_elicitation_review_request_requires_opt_in() {
 fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
     let url_request = ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
         request_id: rmcp::model::NumberOrString::Number(8),
         elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::UrlElicitationParams {
             meta: guardian_meta(Some(json!({}))),
@@ -187,6 +136,7 @@ fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
 
     let non_empty_schema_request = ElicitationReviewRequest {
         server_name: "browser-use".to_string(),
+        server_key: McpServerKey::unscoped("browser-use"),
         request_id: rmcp::model::NumberOrString::Number(9),
         elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
             meta: guardian_meta(Some(json!({}))),

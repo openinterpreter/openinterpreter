@@ -1,10 +1,12 @@
 //! Bounded, chronological review evidence independent of the parent's compaction.
 //!
 //! User messages and other entries have separate limits and keep their original order.
-//! Hosts append original items, restore bounded checkpoints, and trim rolled-back turns.
+//! Hosts append original envelopes, restore bounded checkpoints, and trim rolled-back turns.
+//! Compaction output is excluded, and acceptance order survives parent compaction and resume.
 //! Clones share immutable payloads; eviction changes the generation so readers cannot
 //! reuse an offset into a different retained prefix. Prompt selection remains caller-owned.
-//! Non-user overflow drops the oldest half, leaving room for appends without more evictions.
+//! Fixed storage bounds entry counts; elastic storage uses byte limits only.
+//! Non-user overflow evicts whole entries in chunks to leave room for appends.
 //! User messages retain as much history as their separate limits allow.
 
 use std::collections::VecDeque;
@@ -12,22 +14,31 @@ use std::io;
 use std::io::Write;
 use std::sync::Arc;
 
+use codex_context_fragments::COMPACTION_SUMMARY_KIND;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::executed_tool_call_metadata_bytes;
 
+use crate::ContextBudgeting;
 use crate::SectionHistory;
+use codex_history::GuardianHistoryCheckpoint;
+use codex_history::ResponseItemEnvelope;
+use codex_history::RetainedInputSource;
 
 const MAX_ITEMS_PER_KIND: usize = 128;
+const NON_USER_RETENTION_DIVISOR: usize = 2;
 // Encoded payloads (including omitted reasoning) plus the fixed ResponseItem size.
 // Each kind gets half the storage budget; tool traffic cannot evict user messages.
 const MAX_BYTES_PER_KIND: usize = 4 * 1024 * 1024;
+const NON_USER_LOW_WATERMARK_BYTES: usize = MAX_BYTES_PER_KIND / NON_USER_RETENTION_DIVISOR;
 
 /// Thread-owned review history with shared payloads and bounded storage.
 #[derive(Clone, Default)]
 pub struct TranscriptHistory {
-    items: VecDeque<(Arc<ResponseItem>, usize)>,
+    items: VecDeque<(Arc<ResponseItemEnvelope>, usize)>,
     generation: u64,
+    budgeting: ContextBudgeting,
 }
 
 impl std::fmt::Debug for TranscriptHistory {
@@ -41,24 +52,53 @@ impl std::fmt::Debug for TranscriptHistory {
 }
 
 impl TranscriptHistory {
-    /// Starts retention in a generation newer than the host's previous review snapshot.
-    pub fn new(generation: u64) -> Self {
+    /// Selects storage policy before capture; clones and reset keep the selected policy.
+    pub fn new(generation: u64, budgeting: ContextBudgeting) -> Self {
         Self {
             generation,
+            budgeting,
             ..Self::default()
         }
     }
 
     /// Appends one original item, evicting only older entries of the same kind.
-    /// Non-user overflow removes at least half the existing entries; byte limits may need more.
+    /// Fixed non-user overflow removes at least half the existing entries.
+    /// Elastic overflow evicts whole non-user entries toward half the byte allowance.
     /// Oversized user images fall back to bounded text; other oversized items are skipped.
-    pub fn record(&mut self, item: &ResponseItem) {
+    pub fn record(&mut self, envelope: &ResponseItemEnvelope) {
+        let item = &envelope.item;
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.compaction_output)
+            || matches!(
+                item,
+                ResponseItem::Compaction { .. }
+                    | ResponseItem::ContextCompaction { .. }
+                    | ResponseItem::CompactionTrigger { .. }
+            )
+            || matches!(
+                item,
+                ResponseItem::Message {
+                    internal_chat_message_metadata_passthrough: Some(
+                        InternalChatMessageMetadataPassthrough {
+                            content_item_kinds: Some(kinds),
+                            ..
+                        }
+                    ),
+                    ..
+                } if kinds.iter().any(|kind| kind.as_str() == COMPACTION_SUMMARY_KIND)
+            )
+        {
+            return;
+        }
         let metadata_bytes = executed_tool_call_metadata_bytes(item);
         let mut size = BoundedSize {
-            bytes: std::mem::size_of::<ResponseItem>(),
+            bytes: std::mem::size_of::<ResponseItemEnvelope>(),
             max_bytes: MAX_BYTES_PER_KIND.saturating_add(metadata_bytes),
         };
         let measured = serde_json::to_writer(&mut size, item).and_then(|()| {
+            serde_json::to_writer(&mut size, &envelope.metadata)?;
             // ResponseItem serialization can omit reasoning content that cloning retains.
             // Charge it separately, conservatively counting serialized reasoning twice.
             if let ResponseItem::Reasoning { content, .. } = item {
@@ -73,6 +113,7 @@ impl TranscriptHistory {
                 content,
                 phase,
                 internal_chat_message_metadata_passthrough,
+                ..
             } = item
                 && role == "user"
                 && content
@@ -80,7 +121,7 @@ impl TranscriptHistory {
                     .any(|item| matches!(item, ContentItem::InputImage { .. }))
             {
                 // Measure text and metadata before cloning, without copying image data.
-                size.bytes = std::mem::size_of::<ResponseItem>();
+                size.bytes = std::mem::size_of::<ResponseItemEnvelope>();
                 if serde_json::to_writer(
                     &mut size,
                     &(id, role, phase, internal_chat_message_metadata_passthrough),
@@ -102,13 +143,18 @@ impl TranscriptHistory {
                     text.push(item.clone());
                 }
                 if !text.is_empty() {
-                    self.record(&ResponseItem::Message {
-                        id: id.clone(),
-                        role: role.clone(),
-                        content: text,
-                        phase: phase.clone(),
-                        internal_chat_message_metadata_passthrough:
-                            internal_chat_message_metadata_passthrough.clone(),
+                    self.record(&ResponseItemEnvelope {
+                        item: ResponseItem::Message {
+                            status: None,
+                            encrypted_content: None,
+                            id: id.clone(),
+                            role: role.clone(),
+                            content: text,
+                            phase: phase.clone(),
+                            internal_chat_message_metadata_passthrough:
+                                internal_chat_message_metadata_passthrough.clone(),
+                        },
+                        metadata: envelope.metadata.clone(),
                     });
                 }
             }
@@ -124,15 +170,22 @@ impl TranscriptHistory {
             .fold((0, size.bytes), |(count, bytes), (_, size)| {
                 (count + 1, bytes + size)
             });
-        if count >= MAX_ITEMS_PER_KIND || bytes > MAX_BYTES_PER_KIND {
-            let retained_count = if is_user {
-                MAX_ITEMS_PER_KIND - 1
+        if (self.budgeting == ContextBudgeting::Fixed && count >= MAX_ITEMS_PER_KIND)
+            || bytes > MAX_BYTES_PER_KIND
+        {
+            let retained_count = match (self.budgeting, is_user) {
+                (ContextBudgeting::Elastic, _) => count,
+                (ContextBudgeting::Fixed, true) => MAX_ITEMS_PER_KIND - 1,
+                (ContextBudgeting::Fixed, false) => count / NON_USER_RETENTION_DIVISOR,
+            };
+            let retained_bytes = if self.budgeting == ContextBudgeting::Elastic && !is_user {
+                NON_USER_LOW_WATERMARK_BYTES.max(size.bytes)
             } else {
-                count / 2
+                MAX_BYTES_PER_KIND
             };
             self.items.retain(|(item, size)| {
                 if item.is_user_message() == is_user
-                    && (count > retained_count || bytes > MAX_BYTES_PER_KIND)
+                    && (count > retained_count || bytes > retained_bytes)
                 {
                     count -= 1;
                     bytes -= size;
@@ -143,11 +196,12 @@ impl TranscriptHistory {
             });
             self.generation = self.generation.saturating_add(1);
         }
-        self.items.push_back((Arc::new(item.clone()), size.bytes));
+        self.items
+            .push_back((Arc::new(envelope.clone()), size.bytes));
     }
 
     /// Replaces evidence after a host history reset; compaction must not call this.
-    pub fn reset<'a>(&mut self, items: impl IntoIterator<Item = &'a ResponseItem>) {
+    pub fn reset<'a>(&mut self, items: impl IntoIterator<Item = &'a ResponseItemEnvelope>) {
         self.items.clear();
         self.generation = self.generation.saturating_add(1);
         for item in items {
@@ -157,15 +211,49 @@ impl TranscriptHistory {
 
     /// Removes a rolled-back boundary and everything after it. If retention already
     /// evicted the boundary, discard the remaining evidence rather than keep later grants.
-    pub fn truncate_before(&mut self, boundary: &ResponseItem) {
+    pub fn truncate_before(&mut self, boundary: &ResponseItemEnvelope) {
         let index = self.items.iter().position(|(item, _)| {
             item.id()
                 .zip(boundary.id())
                 .is_some_and(|(item_id, boundary_id)| item_id == boundary_id)
-                || item.as_ref() == boundary
+                || item.item == boundary.item
         });
         self.items.truncate(index.unwrap_or(0));
+        if let Some(boundary_order) =
+            RetainedInputSource::from(boundary.metadata.as_ref()).acceptance_order()
+        {
+            self.items.retain(|(entry, _)| {
+                match RetainedInputSource::from(entry.metadata.as_ref()) {
+                    RetainedInputSource::Local(Some(order)) => order < boundary_order,
+                    // Old backups may lack delivery ordering. Do not keep ambiguous assistant
+                    // sources ahead of a queued input; retained facts preserve earlier evidence.
+                    RetainedInputSource::Local(None) => {
+                        !matches!(&entry.item, ResponseItem::Message { role, .. } if role == "assistant")
+                            && !matches!(&entry.item, ResponseItem::FunctionCall { .. })
+                    }
+                    RetainedInputSource::Inherited => true,
+                }
+            });
+        }
         self.generation = self.generation.saturating_add(1);
+    }
+
+    /// Saves the same bounded items and provenance used by live rollback.
+    pub fn checkpoint(&self) -> GuardianHistoryCheckpoint {
+        GuardianHistoryCheckpoint(
+            self.items
+                .iter()
+                .map(|(item, _)| item.as_ref().clone())
+                .collect(),
+        )
+    }
+
+    /// Reviewable evidence with its host provenance still attached.
+    pub fn reviewable_items(&self) -> impl Iterator<Item = &ResponseItemEnvelope> + Send + '_ {
+        self.items
+            .iter()
+            .map(|(item, _)| item.as_ref())
+            .filter(|item| !crate::is_inherited_manual_approval(item))
     }
 
     /// Generation of the retained prefix, independent of parent compaction.
@@ -176,7 +264,7 @@ impl TranscriptHistory {
 
 impl SectionHistory for TranscriptHistory {
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.items.iter().map(|(item, _)| item.as_ref()))
+        Box::new(self.reviewable_items().map(|item| &item.item))
     }
 }
 

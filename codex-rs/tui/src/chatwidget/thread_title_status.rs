@@ -17,18 +17,6 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
-        let value = self.status_line_value(item);
-        if matches!(
-            item,
-            StatusLineItem::ThreadName | StatusLineItem::ThreadTitle | StatusLineItem::SessionId
-        ) {
-            self.with_thread_title_progress(value, Instant::now())
-        } else {
-            value
-        }
-    }
-
     pub(super) fn with_thread_title_progress(
         &self,
         value: Option<String>,

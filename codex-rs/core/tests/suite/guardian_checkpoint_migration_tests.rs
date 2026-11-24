@@ -67,8 +67,14 @@ pub(super) async fn resume(
     Ok(test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(environments),
+            environments: Some(
+                environments
+                    .into_iter()
+                    .map(codex_protocol::protocol::TurnEnvironmentSelection::into_request)
+                    .collect(),
+            ),
             initial_history: InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
                 conversation_id: thread_id,
                 history: Arc::new(history),
                 rollout_path: None,

@@ -11,7 +11,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
-fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     buffer
         .content()
         .chunks(usize::from(buffer.area.width))
@@ -38,6 +38,81 @@ async fn press_key(
         TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
     )
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interleaved_notices_preserve_the_answer_in_transcript_and_reflow() -> Result<()> {
+    let mut screens = Vec::new();
+    for trailing_error in [false, true] {
+        let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        app.transcript_cells = vec![
+            Arc::new(AgentMarkdownCell::new(
+                "Earlier answer".into(),
+                &app.config.cwd,
+            )),
+            Arc::new(AgentMessageCell::new(
+                vec!["Introduction".into()],
+                /*is_first_line*/ true,
+            )),
+            // Visible in Ctrl+T but hidden in native scrollback.
+            Arc::new(history_cell::new_warning_event("Diagnostic".into())),
+        ];
+        let error = Arc::new(history_cell::new_error_event(
+            "Failed to paste image: no image on clipboard".into(),
+        ));
+        let tail = Arc::new(AgentMessageCell::new(
+            vec!["Conclusion".into()],
+            /*is_first_line*/ false,
+        ));
+        let last: [Arc<dyn HistoryCell>; 2] = if trailing_error {
+            [tail, error]
+        } else {
+            [error, tail]
+        };
+        app.transcript_cells.extend(last);
+        app.open_transcript_overlay(&mut tui);
+        app.handle_consolidate_agent_message(
+            &mut tui,
+            AgentMarkdownCell::new("Introduction\n\nConclusion".into(), &app.config.cwd),
+            /*emitted_cells*/ 2,
+            ConsolidationScrollbackReflow::IfResizeReflowRan,
+            /*deferred_history_cell*/ None,
+        )?;
+
+        // Only a visible notice between fragments warrants clearing native scrollback.
+        assert_eq!(app.transcript_reflow.has_pending_reflow(), !trailing_error);
+        for width in [80, 60, 80] {
+            let rendered = app.render_transcript_lines_for_reflow(width);
+            let lines = rendered
+                .lines
+                .iter()
+                .map(rendered_line_text)
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines,
+                [
+                    "• Earlier answer",
+                    "• Introduction",
+                    "  Conclusion",
+                    "■ Failed to paste image: no image on clipboard",
+                ]
+            );
+        }
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 16,
+        );
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let Some(Overlay::Transcript(overlay)) = &mut app.overlay else {
+            panic!("viewer closed")
+        };
+        overlay.render(area, &mut buffer);
+        screens.push(buffer_text(&buffer));
+    }
+    assert_eq!(screens[0], screens[1]);
+    insta::assert_snapshot!(screens[0]);
     Ok(())
 }
 
@@ -238,6 +313,7 @@ async fn transcript_flag_off_preserves_viewer_and_backtracking() -> Result<()> {
                 local_image_paths: Vec::new(),
                 remote_image_urls: Vec::new(),
                 spoken: false,
+                async_replies: None,
             }) as Arc<dyn HistoryCell>
         })
         .to_vec();
@@ -358,5 +434,5 @@ async fn assert_transcript_close_repaints_inline_draft(mut app: App) -> Result<(
 
 #[tokio::test]
 async fn transcript_viewer_close_repaints_preserved_inline_draft() -> Result<()> {
-    assert_transcript_close_repaints_inline_draft(make_test_app().await).await
+    assert_transcript_close_repaints_inline_draft(*make_test_app().await).await
 }

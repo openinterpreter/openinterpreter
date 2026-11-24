@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
@@ -15,6 +17,7 @@ use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::error::CodexErrKind;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -511,12 +514,6 @@ async fn ignore_user_project_rules_keeps_system_policy_files() {
     let temp_dir = tempdir().expect("create temp dir");
     let config_dir = temp_dir.path().join("system");
     let policy_dir = config_dir.join(RULES_DIR_NAME);
-    fs::create_dir_all(&policy_dir).expect("create policy dir");
-    fs::write(
-        policy_dir.join("allow.rules"),
-        r#"prefix_rule(pattern=["curl"], decision="allow")"#,
-    )
-    .expect("write policy file");
     let config_file =
         AbsolutePathBuf::from_absolute_path(config_dir.join(codex_config::CONFIG_TOML_FILE))
             .expect("absolute config file");
@@ -532,6 +529,28 @@ async fn ignore_user_project_rules_keeps_system_policy_files() {
     .expect("ConfigLayerStack")
     .with_user_and_project_exec_policy_rules_ignored(
         /*ignore_user_and_project_exec_policy_rules*/ true,
+    );
+
+    let snapshot = InheritedExecPolicy {
+        policy: Arc::new(Policy::empty()),
+        source_requirements: None,
+    };
+    ExecPolicyManager::from_inherited(&snapshot, &config_stack)
+        .await
+        .expect("missing system rules directory allows inheritance");
+    fs::create_dir_all(&policy_dir).expect("create policy dir");
+    ExecPolicyManager::from_inherited(&snapshot, &config_stack)
+        .await
+        .expect("empty system rules directory allows inheritance");
+    fs::write(
+        policy_dir.join("allow.rules"),
+        r#"prefix_rule(pattern=["curl"], decision="allow")"#,
+    )
+    .expect("write policy file");
+    let result = ExecPolicyManager::from_inherited(&snapshot, &config_stack).await;
+    assert_eq!(
+        result.as_ref().err().map(CodexErrKind::from),
+        Some(CodexErrKind::InvalidRequest)
     );
 
     let policy = load_exec_policy(&config_stack)
@@ -1399,6 +1418,75 @@ async fn exec_approval_requirement_rejects_unmatched_sandbox_escalation_when_gra
     .await;
 }
 
+#[test_case::test_case(DangerousCommandPlatform::Posix, WindowsSandboxLevel::RestrictedToken; "posix")]
+#[test_case::test_case(DangerousCommandPlatform::Windows, WindowsSandboxLevel::RestrictedToken; "windows")]
+#[test_case::test_case(DangerousCommandPlatform::Windows, WindowsSandboxLevel::Disabled; "windows_without_sandbox")]
+#[tokio::test]
+async fn granular_dangerous_command_approval_does_not_authorize_escalation(
+    platform: DangerousCommandPlatform,
+    windows_sandbox_level: WindowsSandboxLevel,
+) {
+    let command = match platform {
+        DangerousCommandPlatform::Posix => vec!["rm", "-f", "recording.mp4"],
+        DangerousCommandPlatform::Windows => vec![
+            "powershell.exe",
+            "-Command",
+            "Remove-Item -Force recording.mp4",
+        ],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    for sandbox_permissions in [
+        SandboxPermissions::UseDefault,
+        SandboxPermissions::WithAdditionalPermissions,
+        SandboxPermissions::RequireEscalated,
+    ] {
+        let requirement = ExecPolicyManager::default()
+            .create_exec_approval_requirement_for_command_platform(
+                ExecApprovalRequest {
+                    command: &command,
+                    approval_policy: AskForApproval::Granular(GranularApprovalConfig {
+                        sandbox_approval: false,
+                        rules: false,
+                        skill_approval: false,
+                        request_permissions: true,
+                        mcp_elicitations: true,
+                    }),
+                    permission_profile: PermissionProfile::workspace_write(),
+                    environment_policy: None,
+                    windows_sandbox_level,
+                    sandbox_permissions,
+                    prefix_rule: None,
+                    allow_prefix_rules: AllowPrefixRules::Honor,
+                },
+                platform,
+            )
+            .await;
+        let expected = if sandbox_permissions == SandboxPermissions::UseDefault
+            && windows_sandbox_level == WindowsSandboxLevel::RestrictedToken
+        {
+            ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            }
+        } else {
+            ExecApprovalRequirement::Forbidden {
+                reason: match platform {
+                    DangerousCommandPlatform::Posix => {
+                        "rm -f style commands are not permitted. Use a safer approach".to_string()
+                    }
+                    DangerousCommandPlatform::Windows => REJECT_SANDBOX_APPROVAL_REASON.to_string(),
+                },
+            }
+        };
+        assert_eq!(
+            requirement, expected,
+            "{platform:?}: {sandbox_permissions:?}"
+        );
+    }
+}
+
 #[test]
 fn other_danger_preserves_rejected_prompt_reason() {
     assert_eq!(
@@ -1478,7 +1566,7 @@ async fn forced_rm_preserves_rule_rejection_when_granular_rules_are_disabled() {
         .create_exec_approval_requirement_for_command(ExecApprovalRequest {
             command: &command,
             approval_policy: AskForApproval::Granular(GranularApprovalConfig {
-                sandbox_approval: true,
+                sandbox_approval: false,
                 rules: false,
                 skill_approval: true,
                 request_permissions: true,
@@ -1487,7 +1575,7 @@ async fn forced_rm_preserves_rule_rejection_when_granular_rules_are_disabled() {
             permission_profile: PermissionProfile::read_only(),
             environment_policy: None,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            sandbox_permissions: SandboxPermissions::RequireEscalated,
+            sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
             allow_prefix_rules: AllowPrefixRules::Honor,
         })
@@ -2484,4 +2572,84 @@ async fn exec_policy_warnings_ignore_untrusted_project_rules_without_config_toml
     }
 
     Ok(())
+}
+
+#[tokio::test]
+async fn windows_powershell_policy_classifies_only_independent_literal_commands() {
+    for (script, expected) in [
+        (
+            "project-cli subtask start --text 'https://example.com'",
+            Decision::Allow,
+        ),
+        ("Write-Output start 'https://example.com'", Decision::Allow),
+        (
+            "Start-Process notepad.exe; Invoke-WebRequest 'http://127.0.0.1/health'",
+            Decision::Allow,
+        ),
+        ("Start-Process 'https://example.com'", Decision::Forbidden),
+        (
+            "Write-Output start 'https://example.com' | Out-String",
+            Decision::Forbidden,
+        ),
+        (
+            "$target = 'https://example.com/'; Start-Process $target",
+            Decision::Forbidden,
+        ),
+        (
+            "Write-Output 'Start-Process https://example.com'",
+            Decision::Forbidden,
+        ),
+        (
+            "wmic process call create 'powershell.exe -Command Start-Process https://example.com'",
+            Decision::Forbidden,
+        ),
+        ("cmd /c start https://example.com", Decision::Forbidden),
+        (
+            "wt cmd.exe /c start https://example.com",
+            Decision::Forbidden,
+        ),
+        (
+            "wt.exe cmd.exe /c start https://example.com",
+            Decision::Forbidden,
+        ),
+        ("wt.exe cmd.exe /c echo hello", Decision::Allow),
+        ("Remove-Item test -Force", Decision::Forbidden),
+    ] {
+        for flags in [&["-Command"][..], &["-NonInteractive", "-Command"][..]] {
+            for configured_executable in ["pwsh", "other-shell"] {
+                let manager = ExecPolicyManager::new(Arc::new(Policy::empty()));
+                let command = [vec_str(&["pwsh"]), vec_str(flags), vec_str(&[script])].concat();
+                let shell = crate::shell::Shell {
+                    shell_type: crate::shell::ShellType::PowerShell,
+                    shell_path: PathBuf::from(configured_executable),
+                };
+                let requirement = manager
+                    .create_exec_approval_requirement_for_shell(
+                        ExecApprovalRequest {
+                            command: &command,
+                            approval_policy: AskForApproval::Never,
+                            permission_profile: PermissionProfile::Disabled,
+                            environment_policy: None,
+                            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                            sandbox_permissions: SandboxPermissions::UseDefault,
+                            prefix_rule: None,
+                            allow_prefix_rules: AllowPrefixRules::Honor,
+                        },
+                        &shell,
+                        DangerousCommandPlatform::Windows,
+                    )
+                    .await;
+                let actual = match requirement {
+                    ExecApprovalRequirement::Skip { .. } => Decision::Allow,
+                    ExecApprovalRequirement::NeedsApproval { .. } => Decision::Prompt,
+                    ExecApprovalRequirement::NeedsHumanApproval { .. } => Decision::PromptUser,
+                    ExecApprovalRequirement::Forbidden { .. } => Decision::Forbidden,
+                };
+                assert_eq!(
+                    actual, expected,
+                    "{command:?}; shell: {configured_executable}"
+                );
+            }
+        }
+    }
 }

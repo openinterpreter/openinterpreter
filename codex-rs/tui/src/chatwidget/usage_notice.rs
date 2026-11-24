@@ -23,11 +23,16 @@ pub(super) struct UsageNoticeState {
     credits: Option<CreditsSnapshot>,
     latest_read_id: u64,
     stale_through: Option<u64>,
-    applying_stale_read: bool,
+    pub(super) applying_stale_read: bool,
 }
 
 impl UsageNoticeState {
-    fn line(&self, width: u16, now: DateTime<Local>) -> Option<Line<'static>> {
+    fn line(
+        &self,
+        width: u16,
+        now: DateTime<Local>,
+        clock_format: crate::clock_format::ClockFormat,
+    ) -> Option<Line<'static>> {
         let (window, is_secondary) = self.current()?;
         let label = limit_label_for_window(window.window_duration_mins, is_secondary);
         // Percentages are rounded by the protocol; 100% alone does not prove a hard stop.
@@ -49,7 +54,11 @@ impl UsageNoticeState {
             .map(|reset| {
                 format!(
                     " · resets at {}",
-                    crate::status::format_reset_timestamp(reset.with_timezone(&Local), now)
+                    crate::status::format_reset_timestamp(
+                        reset.with_timezone(&Local),
+                        now,
+                        clock_format,
+                    )
                 )
             })
             .unwrap_or_default();
@@ -157,7 +166,8 @@ impl ChatWidget {
         {
             return None;
         }
-        self.usage_notice_state.line(width, Local::now())
+        self.usage_notice_state
+            .line(width, Local::now(), self.clock_format)
     }
 
     pub(crate) fn start_usage_notice_read(&mut self, request_id: u64) {

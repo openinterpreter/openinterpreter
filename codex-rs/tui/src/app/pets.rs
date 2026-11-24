@@ -3,6 +3,37 @@
 use super::*;
 
 impl App {
+    pub(super) fn draw_pet_images(
+        &mut self,
+        tui: &mut tui::Tui,
+        screen_size: Size,
+        rendered_area: Rect,
+    ) -> Result<()> {
+        if self.chat_widget.ambient_pet_image_enabled() {
+            let ambient_pet_area = self.conversation_area(screen_size.into());
+            let request = self
+                .chat_widget
+                .ambient_pet_draw(ambient_pet_area, rendered_area.bottom())
+                .filter(|pet| {
+                    tui.shortcut_hud_area
+                        .is_none_or(|hud| !hud.intersects(pet.area()))
+                });
+            if let Err(err) = tui.draw_ambient_pet_image(request) {
+                self.handle_ambient_pet_image_render_error(tui, err)?;
+            }
+        }
+        if let Some(request) = self.chat_widget.pet_picker_preview_draw() {
+            if let Err(err) = tui.draw_pet_picker_preview_image(Some(request)) {
+                self.handle_pet_picker_preview_image_render_error(tui, err)?;
+            }
+        } else if self.chat_widget.should_clear_pet_picker_preview_image()
+            && let Err(err) = tui.draw_pet_picker_preview_image(/*request*/ None)
+        {
+            self.handle_pet_picker_preview_image_render_error(tui, err)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn disable_ambient_pet_before_shutdown(&mut self, tui: &mut tui::Tui) -> Result<()> {
         self.chat_widget.disable_ambient_pet_for_session();
         if let Err(clear_err) = tui.clear_ambient_pet_image() {
@@ -175,23 +206,15 @@ impl App {
     pub(super) fn handle_configured_pet_loaded(
         &mut self,
         tui: &mut tui::Tui,
+        generation: crate::chatwidget::ConfiguredPetLoadGeneration,
         pet_id: String,
         result: Result<Option<crate::pets::AmbientPet>, String>,
     ) {
-        if self.local_settings.tui.pet.as_deref() != Some(pet_id.as_str()) {
-            return;
-        }
-
-        match result {
-            Ok(ambient_pet) => {
-                self.chat_widget
-                    .set_tui_pet_loaded(Some(pet_id), ambient_pet);
-                tui.frame_requester().schedule_frame();
-            }
-            Err(err) => {
-                self.chat_widget
-                    .add_warning_message(format!("Failed to load configured pet: {err}"));
-            }
+        if self
+            .chat_widget
+            .finish_configured_pet_load(generation, pet_id, result)
+        {
+            tui.frame_requester().schedule_frame();
         }
     }
 }

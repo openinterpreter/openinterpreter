@@ -164,7 +164,14 @@ mod platform {
     }
 
     pub(super) async fn connect_stream(socket_path: &Path) -> IoResult<Stream> {
-        UnixStream::connect(socket_path).await
+        match UnixStream::connect(socket_path).await {
+            Err(err) if err.kind() == ErrorKind::InvalidInput => {
+                // The advertised path may exceed sun_path even when its symlink
+                // target is a short socket path. Resolve it before retrying.
+                UnixStream::connect(fs::canonicalize(socket_path).await?).await
+            }
+            result => result,
+        }
     }
 
     pub(super) async fn is_stale_socket_path(socket_path: &Path) -> IoResult<bool> {

@@ -158,7 +158,12 @@ pub(super) async fn mcp_server_elicitation_scenario(
         .thread_manager
         .start_thread(StartThreadOptions {
             session_source: Some(session_source),
-            environments: Some(vec![test.executor_environment().selection().clone()]),
+            environments: Some(vec![
+                test.executor_environment()
+                    .selection()
+                    .clone()
+                    .into_request(),
+            ]),
             ..StartThreadOptions::new(config)
         })
         .await?

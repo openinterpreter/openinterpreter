@@ -104,7 +104,9 @@ fn response_item_text(item: &ResponseItem) -> Option<&str> {
         return None;
     }
     content.iter().find_map(|item| match item {
-        ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
+        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+            Some(text.as_str())
+        }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
     })
 }
@@ -712,6 +714,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -722,6 +726,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -751,6 +757,8 @@ mod tests {
     fn deepseek_tui_request_preserves_image_content() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![
@@ -806,6 +814,8 @@ mod tests {
 
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {

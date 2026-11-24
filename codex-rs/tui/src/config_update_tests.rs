@@ -292,3 +292,24 @@ fn format_config_error_preserves_server_validation_message() {
          features.fast_mode=true violates managed requirements; allowed set [fast_mode=false]"
     );
 }
+
+#[test]
+fn effective_defaults_accept_foreign_layer_paths() -> Result<()> {
+    let layers = serde_json::json!([
+        {"name": {"type": "system", "file": "/etc/codex/config.toml"}, "version": "1", "config": {}},
+        {"name": {"type": "project", "dotCodexFolder": "C:\\work\\.codex"}, "disabledReason": "untrusted", "version": "1", "config": {}}
+    ]);
+    let response: EffectiveConfig = serde_json::from_value(serde_json::json!({
+        "config": {"model": "server-model"},
+        "origins": {"model": {"name": {"type": "user", "file": "C:\\Users\\user\\.codex\\config.toml", "profile": null}, "version": "1"}},
+        "layers": layers,
+    }))?;
+    assert_eq!(
+        (
+            response.config.model.as_deref(),
+            serde_json::to_value(response.layers)?
+        ),
+        (Some("server-model"), layers)
+    );
+    Ok(())
+}

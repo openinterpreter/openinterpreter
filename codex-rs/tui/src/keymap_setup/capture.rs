@@ -94,6 +94,9 @@ impl KeymapCaptureView {
             (KeymapCaptureMode::Chord, Some(first)) => {
                 format!("First key: {first}. Press the second key. Esc cancels.")
             }
+            (KeymapCaptureMode::LeaderChord, _) => {
+                "Press the key that follows the configured leader. Esc cancels.".to_string()
+            }
         };
         lines.extend(
             textwrap::wrap(&instructions, wrap_width)
@@ -130,6 +133,14 @@ impl Renderable for KeymapCaptureView {
 }
 
 impl BottomPaneView for KeymapCaptureView {
+    fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
+        crate::keymap::KeymapContextSet::raw_key_capture()
+    }
+
+    fn accepts_input_when_disconnected(&self) -> bool {
+        true
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         if key_event.kind == KeyEventKind::Release
             || (self.capture_mode == KeymapCaptureMode::Chord
@@ -146,14 +157,16 @@ impl BottomPaneView for KeymapCaptureView {
         match key_event_to_config_key_spec(key_event) {
             Ok(key) => {
                 self.error_message = None;
-                let key = if self.capture_mode == KeymapCaptureMode::Chord {
-                    let Some(first_stroke) = self.first_stroke.take() else {
-                        self.first_stroke = Some(key);
-                        return;
-                    };
-                    format!("{first_stroke} {key}")
-                } else {
-                    key
+                let key = match self.capture_mode {
+                    KeymapCaptureMode::SingleKey => key,
+                    KeymapCaptureMode::LeaderChord => format!("leader {key}"),
+                    KeymapCaptureMode::Chord => {
+                        let Some(first_stroke) = self.first_stroke.take() else {
+                            self.first_stroke = Some(key);
+                            return;
+                        };
+                        format!("{first_stroke} {key}")
+                    }
                 };
                 self.app_event_tx.send(AppEvent::KeymapCaptured {
                     context: self.context.clone(),

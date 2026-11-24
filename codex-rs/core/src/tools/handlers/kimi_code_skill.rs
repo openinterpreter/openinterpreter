@@ -4,6 +4,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use codex_file_system::EnvironmentAccess;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SkillScope;
@@ -58,7 +59,12 @@ pub(super) async fn handle(
                 /*success*/ Some(false),
             )));
         };
-        let contents = match skills_snapshot.read_skill_text(&skill).await {
+        let environments = invocation.step_context.environments();
+        let accessors: Vec<&dyn EnvironmentAccess> = environments
+            .iter()
+            .map(|(_, access)| access as &dyn EnvironmentAccess)
+            .collect();
+        let contents = match skills_snapshot.read_skill_text(&skill, &accessors).await {
             Ok(contents) => contents,
             Err(err) => {
                 return Ok(boxed_tool_output(FunctionToolOutput::from_text(
@@ -75,13 +81,14 @@ pub(super) async fn handle(
             .path_to_skills_md
             .parent()
             .unwrap_or_else(|| skill.path_to_skills_md.clone())
-            .to_string_lossy()
-            .into_owned();
+            .inferred_native_path_string();
         (contents, source, directory)
     };
     let body = expand_skill_body(&contents, args);
     let message = ResponseItem::Message {
         id: None,
+        encrypted_content: None,
+        status: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
             text: format!(

@@ -1,0 +1,670 @@
+//! Regression coverage for SQLite initialization, cached filesystem detection, and competing locks.
+
+use super::SqliteConfig;
+use codex_utils_absolute_path::test_support::PathExt;
+use pretty_assertions::assert_eq;
+use sqlx::sqlite::SqliteAutoVacuum;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
+use sqlx::sqlite::SqlitePoolOptions;
+
+#[tokio::test]
+async fn current_schema_opens_while_another_connection_has_writer_reservation() -> anyhow::Result<()>
+{
+    let home = tempfile::TempDir::new()?;
+    let sqlite = SqliteConfig::new_for_testing(home.path().abs());
+    sqlite.is_nfs.set(/*value*/ true)?;
+    let migrator = crate::migrations::runtime_thread_history_migrator();
+    let pool = sqlite
+        .open_thread_history_db(&migrator, /*telemetry_override*/ None)
+        .await?;
+    let transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let reopened = sqlite
+        .open_thread_history_db(&migrator, /*telemetry_override*/ None)
+        .await?;
+    let check: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&reopened)
+        .await?;
+    assert_eq!(check, "ok");
+    transaction.rollback().await?;
+    reopened.close().await;
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_openers_apply_schema_migrations_once() -> anyhow::Result<()> {
+    let home = tempfile::TempDir::new()?;
+    let sqlite = SqliteConfig::new_for_testing(home.path().abs());
+    sqlite.is_nfs.set(/*value*/ true)?;
+    let migrator = crate::migrations::runtime_thread_history_migrator();
+
+    let mut openers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let sqlite = sqlite.clone();
+        openers.spawn(async move {
+            sqlite
+                .open_thread_history_db(
+                    &crate::migrations::runtime_thread_history_migrator(),
+                    /*telemetry_override*/ None,
+                )
+                .await
+        });
+    }
+    while let Some(result) = openers.join_next().await {
+        let pool = result??;
+        let versions =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            versions,
+            migrator
+                .iter()
+                .map(|migration| migration.version)
+                .collect::<Vec<_>>()
+        );
+        pool.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_log_directory_is_initialized_on_use_and_retries_after_failure()
+-> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let logs_home = sqlite_home.join("logs");
+    tokio::fs::write(&logs_home, "not a directory").await?;
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    sqlite.is_nfs.set(/*value*/ true)?;
+    let fallback_logs_path = sqlite.logs_db_path();
+    let sqlite = sqlite.with_local_logs_home(logs_home.clone());
+    sqlite.logs_is_nfs.set(/*value*/ false)?;
+
+    // Opening unrelated state must not require the configured logs directory.
+    let pool = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;
+    pool.close().await;
+    let runtime = crate::StateRuntime::init(sqlite.clone(), "openai".to_string()).await?;
+    runtime.get_backfill_state().await?;
+    assert!(
+        runtime
+            .max_log_id(&crate::LogQuery::default())
+            .await
+            .is_err()
+    );
+    assert!(sqlite.goals_db_path().is_file());
+    assert!(sqlite.memories_db_path().is_file());
+    assert!(sqlite.queue_db_path().is_file());
+    runtime.close().await;
+    assert!(!fallback_logs_path.exists());
+
+    // A failed initialization must remain retryable without replacing the config.
+    tokio::fs::remove_file(&logs_home).await?;
+    let runtime = crate::StateRuntime::init(sqlite.clone(), "openai".to_string()).await?;
+    assert!(sqlite.logs_db_path().is_file());
+    assert!(!fallback_logs_path.exists());
+    runtime.close().await;
+    // The configured logs directory has its own filesystem, independent of the NFS state home.
+    let mut modes = Vec::new();
+    for path in [sqlite.state_db_path(), sqlite.logs_db_path()] {
+        let pool = sqlite
+            .open_read_only_pool(&path, /*busy_timeout*/ None)
+            .await?;
+        modes.push(
+            sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+                .fetch_one(&pool)
+                .await?,
+        );
+        pool.close().await;
+    }
+    assert_eq!(modes, vec!["delete".to_string(), "wal".to_string()]);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_log_directory_lock_is_shared_by_reader_and_writer_config_clones()
+-> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    let logs_home = sqlite_home.join("logs");
+    tokio::fs::create_dir_all(&logs_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let initial = SqliteConfig::new_for_testing(logs_home.as_path().abs());
+    let logs_path = initial.logs_db_path();
+    initial
+        .open_read_write_pool(&logs_path)
+        .await?
+        .close()
+        .await;
+
+    for read_only in [false, true] {
+        let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs())
+            .with_local_logs_home(logs_home.clone());
+        let clone = sqlite.clone();
+        let cleanup_lock = std::fs::File::open(&logs_home)?;
+        cleanup_lock.try_lock()?;
+        cleanup_lock.unlock()?;
+
+        let pool = if read_only {
+            sqlite
+                .open_read_only_pool(&logs_path, /*busy_timeout*/ None)
+                .await?
+        } else {
+            sqlite.open_read_write_pool(&logs_path).await?
+        };
+        assert!(matches!(
+            cleanup_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(sqlite);
+        assert!(matches!(
+            cleanup_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        pool.close().await;
+        drop(clone);
+        cleanup_lock.try_lock()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sqlite_home_filesystem_probe_is_shared_by_clones_until_config_replacement()
+-> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let clone = sqlite.clone();
+    let is_nfs = sqlite.is_nfs().await?;
+    tokio::fs::remove_dir(&sqlite_home).await?;
+    // This clone has never queried the home. It must reuse the original's probe,
+    // because a fresh filesystem lookup would fail now that the home is absent.
+    assert_eq!(clone.is_nfs().await?, is_nfs);
+
+    let fresh = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    assert_eq!(
+        fresh
+            .is_nfs()
+            .await
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_sqlite_home_filesystem_probe_recovers_after_home_creation() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    assert_eq!(
+        sqlite
+            .is_nfs()
+            .await
+            .unwrap_err()
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    sqlite.is_nfs().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_read_write_pool_initializes_fresh_database_settings() -> anyhow::Result<()> {
+    for (enforced, nfs, partial_journal) in [
+        (false, false, None),
+        (false, false, Some(SqliteJournalMode::Delete)),
+        (false, true, None),
+        (false, true, Some(SqliteJournalMode::Delete)),
+        (false, true, Some(SqliteJournalMode::Wal)),
+        (true, false, None),
+        (true, false, Some(SqliteJournalMode::Delete)),
+        (true, cfg!(unix), None),
+        (true, cfg!(unix), Some(SqliteJournalMode::Delete)),
+    ] {
+        let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+        tokio::fs::create_dir_all(&sqlite_home).await?;
+        let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+            let _ = std::fs::remove_dir_all(sqlite_home);
+        });
+        let sqlite = SqliteConfig::from_sqlite_home_with_nfs_enforcement(
+            sqlite_home.as_path().abs(),
+            enforced,
+        );
+        sqlite.is_nfs.set(nfs)?;
+        let path = sqlite.logs_db_path();
+        if let Some(journal_mode) = partial_journal {
+            // Startup must finish initialization when settings were written before the schema.
+            let partial = SqlitePoolOptions::new()
+                .max_connections(/*max*/ 1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&path)
+                        .create_if_missing(/*create*/ true)
+                        .auto_vacuum(SqliteAutoVacuum::Incremental)
+                        .journal_mode(journal_mode),
+                )
+                .await?;
+            partial.close().await;
+            assert!(tokio::fs::metadata(&path).await?.len() > 0);
+        }
+        let pool = sqlite.open_read_write_pool(&path).await?;
+        // Hold connections open so the assertions cover lazy pool connections too.
+        let mut connections = Vec::new();
+        let mut settings = Vec::new();
+        for _ in 0..5 {
+            let mut connection = pool.acquire().await?;
+            let current: (String, i64, i64) = sqlx::query_as(
+                "SELECT journal_mode, auto_vacuum, synchronous
+                 FROM pragma_journal_mode, pragma_auto_vacuum, pragma_synchronous",
+            )
+            .fetch_one(&mut *connection)
+            .await?;
+            settings.push(current);
+            connections.push(connection);
+        }
+        assert_eq!(
+            settings,
+            vec![
+                (
+                    if nfs { "delete" } else { "wal" }.to_string(),
+                    SqliteAutoVacuum::Incremental as i64,
+                    if nfs { 3 } else { 1 },
+                );
+                5
+            ]
+        );
+        drop(connections);
+        pool.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_read_write_pool_uses_database_directory_for_filesystem_probe() -> anyhow::Result<()> {
+    let directory = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&directory).await?;
+    let _cleanup = scopeguard::guard(directory.clone(), |directory| {
+        let _ = std::fs::remove_dir_all(directory);
+    });
+    let nfs = codex_file_system::is_nfs(&directory)?;
+    let missing_home = directory.join("absent");
+    for (index, cached_home_nfs) in [None, Some(!nfs)].into_iter().enumerate() {
+        let sqlite = SqliteConfig::new_for_testing(missing_home.as_path().abs());
+        if let Some(nfs) = cached_home_nfs {
+            sqlite.is_nfs.set(nfs)?;
+        }
+        // An unrelated missing home or its cached filesystem must not affect this database.
+        let path = directory.join(format!("database-{index}.sqlite"));
+        let pool = sqlite.open_read_write_pool(&path).await?;
+        let settings: (String, i64) = sqlx::query_as(
+            "SELECT journal_mode, synchronous FROM pragma_journal_mode, pragma_synchronous",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            settings,
+            (
+                if nfs { "delete" } else { "wal" }.to_string(),
+                if nfs { 3 } else { 1 },
+            )
+        );
+        pool.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_read_write_pool_preserves_existing_settings_under_write_lock() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    sqlite.is_nfs.set(/*value*/ true)?;
+    let database_path = sqlite.logs_db_path();
+    let existing_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(true)
+                .auto_vacuum(SqliteAutoVacuum::Full)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await?;
+    sqlx::query("CREATE TABLE existing (id INTEGER PRIMARY KEY)")
+        .execute(&existing_pool)
+        .await?;
+
+    let mut lock_holder = existing_pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock_holder)
+        .await?;
+
+    let pool = sqlite.open_read_write_pool(&database_path).await?;
+    let settings: (String, i64, i64) = sqlx::query_as(
+        "SELECT journal_mode, auto_vacuum, synchronous
+         FROM pragma_journal_mode, pragma_auto_vacuum, pragma_synchronous",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(settings, ("wal".into(), SqliteAutoVacuum::Full as i64, 1));
+    sqlx::query("ROLLBACK").execute(&mut *lock_holder).await?;
+    drop(lock_holder);
+    pool.close().await;
+    existing_pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_read_write_pool_preserves_delete_under_write_lock() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs())
+        .enable_delete_mode_on_nfs(/*enabled*/ true);
+    sqlite.is_nfs.set(cfg!(unix))?;
+    let database_path = sqlite.logs_db_path();
+    let existing_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await?;
+    sqlx::query("CREATE TABLE existing (id INTEGER PRIMARY KEY)")
+        .execute(&existing_pool)
+        .await?;
+    let mut lock_holder = existing_pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock_holder)
+        .await?;
+
+    let pool = sqlite.open_read_write_pool(&database_path).await?;
+    // Keep each acquired connection open to test connections that the pool initializes later.
+    let mut connections = Vec::new();
+    let mut settings = Vec::new();
+    for _ in 0..5 {
+        let mut connection = pool.acquire().await?;
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&mut *connection)
+            .await?;
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(&mut *connection)
+            .await?;
+        settings.push((journal, synchronous));
+        connections.push(connection);
+    }
+    assert_eq!(settings, vec![("delete".to_string(), 3); 5]);
+    drop(connections);
+    sqlx::query("ROLLBACK").execute(&mut *lock_holder).await?;
+    drop(lock_holder);
+    existing_pool.close().await;
+
+    sqlx::query("INSERT INTO existing VALUES(42)")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let reopened = sqlite.open_read_write_pool(&database_path).await?;
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&reopened)
+        .await?;
+    let rows: Vec<i64> = sqlx::query_scalar("SELECT id FROM existing")
+        .fetch_all(&reopened)
+        .await?;
+    assert_eq!((journal, rows), ("delete".into(), vec![42]));
+    reopened.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_read_write_pool_preserves_empty_database_lock_error() -> anyhow::Result<()> {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await?;
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let database_path = sqlite.logs_db_path();
+    let existing_pool = SqlitePoolOptions::new()
+        .max_connections(/*max*/ 1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(/*create*/ true)
+                .auto_vacuum(SqliteAutoVacuum::Incremental)
+                .journal_mode(SqliteJournalMode::Delete),
+        )
+        .await?;
+    // Leave the schema empty so startup must initialize WAL.
+    let mut lock_holder = existing_pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock_holder)
+        .await?;
+
+    let error = sqlite
+        .open_read_write_pool(&database_path)
+        .await
+        .expect_err("WAL setup must fail while another connection holds the writer lock");
+    assert_eq!(
+        error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(sqlx::error::DatabaseError::code),
+        Some("5".into())
+    );
+    assert!(crate::sqlite_error_detail_is_lock(&error.to_string()));
+
+    sqlx::query("ROLLBACK").execute(&mut *lock_holder).await?;
+    // A failed opener must release its locks before another writer can proceed.
+    sqlx::query("BEGIN EXCLUSIVE")
+        .execute(&mut *lock_holder)
+        .await?;
+    sqlx::query("ROLLBACK").execute(&mut *lock_holder).await?;
+    drop(lock_holder);
+    existing_pool.close().await;
+
+    let pool = sqlite.open_read_write_pool(&database_path).await?;
+    sqlx::query("CREATE TABLE initialized (id INTEGER PRIMARY KEY)")
+        .execute(&pool)
+        .await?;
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(journal, "wal");
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn required_nfs_migration_preserves_runtime_data_and_backups_after_restart()
+-> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir()?;
+    let original = SqliteConfig::new_for_testing(home.path().abs());
+    let runtime = crate::StateRuntime::init(original.clone(), "test-provider".into()).await?;
+    runtime.checkpoint_backfill("before-migration").await?;
+    let before = runtime.get_backfill_state().await?;
+    runtime.close().await;
+    original.open_memories_v2_db().await?.close().await;
+    crate::open_thread_history_db(&original)
+        .await?
+        .close()
+        .await;
+    let state_path = original.state_db_path();
+    assert!(crate::NfsDbMigration::needs_migration(&state_path).await?);
+    let bytes = std::fs::read(&state_path)?;
+    std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(/*mode*/ 0o060))?;
+    let staging = tempfile::tempdir()?;
+    let result = crate::NfsDbMigration::lock(home.path())?
+        .migrate(&state_path, staging.path())
+        .await;
+    std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(/*mode*/ 0o600))?;
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&state_path)?, bytes);
+    let mut backups = Vec::new();
+    for db in original
+        .runtime_db_paths()
+        .into_iter()
+        .filter(|db| db.path.exists())
+    {
+        std::fs::set_permissions(&db.path, std::fs::Permissions::from_mode(/*mode*/ 0o644))?;
+        let name = db.path.file_name().unwrap().to_str().unwrap();
+        backups.push((
+            home.path()
+                .join(format!("{name}_wal_migration_backup"))
+                .join(name),
+            std::fs::read(&db.path)?,
+        ));
+    }
+    let sqlite = SqliteConfig::from_sqlite_home_with_nfs_enforcement(
+        home.path().abs(),
+        /*enforce_delete_on_nfs*/ true,
+    );
+    sqlite.is_nfs.set(/*value*/ true)?;
+    assert!(crate::NfsDbMigration::needs_permission_confirmation(
+        &sqlite.state_db_path()
+    )?);
+    let migrated = crate::StateRuntime::init(sqlite.clone(), "test-provider".into()).await?;
+    assert_eq!(migrated.get_backfill_state().await?, before);
+    migrated.checkpoint_backfill("after-migration").await?;
+    let after = migrated.get_backfill_state().await?;
+    migrated.close().await;
+    assert!(!crate::NfsDbMigration::needs_migration(&state_path).await?);
+
+    // Simulate a crash after moving the original but before reinstalling a lazy database.
+    let lazy = sqlite.memories_v2_db_path();
+    let name = lazy.file_name().unwrap().to_str().unwrap();
+    std::fs::rename(
+        &lazy,
+        home.path()
+            .join(format!("{name}_wal_migration_backup/delete.sqlite")),
+    )?;
+    assert!(crate::NfsDbMigration::needs_permission_confirmation(&lazy)?);
+    assert!(crate::NfsDbMigration::needs_migration(&lazy).await?);
+    let restarted = crate::StateRuntime::init(sqlite.clone(), "test-provider".into()).await?;
+    assert_eq!(restarted.get_backfill_state().await?, after);
+    restarted.close().await;
+    // Include lazily created databases: they must also start in DELETE mode.
+    for db in sqlite.runtime_db_paths() {
+        let pool = sqlite.open_read_write_pool(&db.path).await?;
+        let settings: (String, i64) = sqlx::query_as(
+            "SELECT journal_mode, synchronous FROM pragma_journal_mode, pragma_synchronous",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(settings, ("delete".into(), 3));
+        pool.close().await;
+        if backups
+            .iter()
+            .any(|(backup, _)| backup.file_name() == db.path.file_name())
+        {
+            assert_eq!(
+                std::fs::metadata(&db.path)?.permissions().mode() & 0o777,
+                0o644
+            );
+        }
+    }
+    for (path, bytes) in backups {
+        assert_eq!(std::fs::read(path)?, bytes);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn required_nfs_migration_refuses_active_wal_and_retries_after_close() -> anyhow::Result<()> {
+    use std::future::Future;
+    use std::os::unix::fs::PermissionsExt;
+    use std::task::Poll;
+
+    let home = tempfile::tempdir()?;
+    let logs_home = home.path().join("local-logs");
+    let sqlite =
+        SqliteConfig::new_for_testing(home.path().abs()).with_local_logs_home(logs_home.clone());
+    let logs = sqlite.open_read_write_pool(&sqlite.logs_db_path()).await?;
+    sqlx::query("CREATE TABLE existing_logs (id INTEGER PRIMARY KEY)")
+        .execute(&logs)
+        .await?;
+    let path = sqlite.state_db_path();
+    let pool = sqlite.open_read_write_pool(&path).await?;
+    sqlx::raw_sql("CREATE TABLE entries(id); INSERT INTO entries VALUES(42);")
+        .execute(&pool)
+        .await?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(/*mode*/ 0o600))?;
+    let required = SqliteConfig::new_for_testing(home.path().abs())
+        .with_local_logs_home(logs_home)
+        .enable_delete_mode_on_nfs(/*enabled*/ true);
+    required.is_nfs.set(/*value*/ true)?;
+    required.logs_is_nfs.set(/*value*/ false)?;
+    assert!(crate::NfsDbMigration::needs_migration(&path).await?);
+    let error = required.open_read_write_pool(&path).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("required NFS database migration failed"),
+        "{error:#}"
+    );
+    assert!(!crate::is_sqlite_corruption_error(&error));
+    pool.close().await;
+    let migration_lock = crate::NfsDbMigration::lock(home.path())?;
+    let mut opening = Box::pin(required.open_read_write_pool(&path));
+    std::future::poll_fn(|cx| {
+        assert!(opening.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(migration_lock);
+    let migrated = opening.await?;
+    let rows: Vec<i64> = sqlx::query_scalar("SELECT id FROM entries")
+        .fetch_all(&migrated)
+        .await?;
+    assert_eq!(rows, vec![42]);
+    migrated.close().await;
+    // An active local logs database must remain in WAL while the NFS state database migrates.
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&logs)
+        .await?;
+    assert_eq!(journal, "wal");
+    logs.close().await;
+    // Old versions may create legacy WAL logs after startup. Managed cleanup must not write them.
+    let legacy = sqlite
+        .open_read_write_pool(&sqlite.legacy_logs_db_path().unwrap())
+        .await?;
+    assert!(required.open_legacy_logs_for_cleanup().await?.is_none());
+    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&legacy)
+        .await?;
+    assert_eq!(journal, "wal");
+    legacy.close().await;
+    Ok(())
+}

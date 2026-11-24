@@ -79,6 +79,11 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: None,
+            project_id: None,
+            location: None,
+            credential_file: None,
+            include_internal_metadata: false,
         };
 
         let telemetry =

@@ -4,12 +4,12 @@ use codex_core::config::Config;
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::MemoryContextFragment;
 use codex_extension_api::ConfigContributor;
-use codex_extension_api::ContentItemKind;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::PromptFragment;
+use codex_extension_api::PromptSlot;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolContributor;
@@ -72,32 +72,26 @@ impl ContextContributor for MemoriesExtension {
             else {
                 return Vec::new();
             };
-            let instructions = match config.version {
-                MemoryVersion::V1 => vec![instructions],
+            match config.version {
+                MemoryVersion::V1 => vec![PromptFragment::developer_policy(
+                    instructions,
+                    MemoryContextFragment::ReadInstructions(String::new()).content_kind(),
+                )],
                 MemoryVersion::V2 => {
                     // Keep the complete summary while respecting each fragment's byte cap.
                     let mut remaining = instructions.as_str();
                     let mut fragments = Vec::new();
                     while !remaining.is_empty() {
                         let end = remaining.floor_char_boundary(remaining.len().min(8_900));
-                        fragments.push(
-                            MemoryContextFragment::ReadInstructions(remaining[..end].to_string())
-                                .render(),
-                        );
+                        fragments.push(PromptFragment::from_fragment(
+                            PromptSlot::DeveloperPolicy,
+                            &MemoryContextFragment::ReadInstructions(remaining[..end].to_string()),
+                        ));
                         remaining = &remaining[end..];
                     }
                     fragments
                 }
-            };
-            instructions
-                .into_iter()
-                .map(|instructions| {
-                    PromptFragment::developer_policy(
-                        instructions,
-                        ContentItemKind("memories.instructions".to_string()),
-                    )
-                })
-                .collect()
+            }
         })
     }
 }

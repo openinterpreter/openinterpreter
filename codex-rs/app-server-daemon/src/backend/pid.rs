@@ -172,6 +172,7 @@ impl PidBackend {
             }
 
             let pid = record.pid;
+            crate::diagnostics::event("shutdown_requested", serde_json::json!({ "pid": pid }));
             let started_at = tokio::time::Instant::now();
             let force_after = Duration::from_secs(grace_seconds.into());
             let deadline = started_at + force_after + STOP_FORCE_TIMEOUT;
@@ -346,18 +347,28 @@ impl PidBackend {
     #[cfg(any(unix, windows))]
     async fn open_stderr_log(&self) -> Result<fs::File> {
         let stderr_log_file = stderr_log_file_for_pid_file(&self.pid_file);
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stderr_log_file)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to open stderr log for pid-managed app server {}",
-                    stderr_log_file.display()
-                )
-            })
+        super::stderr_log::preserve(&stderr_log_file).await;
+        let result = async {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&stderr_log_file)
+                .await?;
+            // The updater predecessor can still write after a Windows handoff
+            // truncates this file. Append handles prevent stale offsets and gaps.
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&stderr_log_file)
+                .await
+        }
+        .await;
+        result.with_context(|| {
+            format!(
+                "failed to open stderr log for pid-managed app server {}",
+                stderr_log_file.display()
+            )
+        })
     }
 
     #[cfg(any(unix, windows))]
@@ -427,6 +438,20 @@ impl PidBackend {
 
     async fn record_is_active(&self, record: &PidRecord) -> Result<bool> {
         process_matches_record(record).await
+    }
+}
+
+/// Wait for a published process to exit without modifying its PID reservation.
+pub(crate) async fn wait_for_process_exit(pid_file: &Path) {
+    loop {
+        // A missing or empty record can belong to a launch still publishing its PID.
+        if let Ok(contents) = fs::read(pid_file).await
+            && let Ok(record) = serde_json::from_slice::<PidRecord>(&contents)
+            && matches!(process_matches_record(&record).await, Ok(false))
+        {
+            return;
+        }
+        sleep(crate::START_POLL_INTERVAL).await;
     }
 }
 
@@ -659,7 +684,26 @@ async fn reservation_lock_is_active(path: &Path) -> Result<bool> {
                 .with_context(|| format!("failed to inspect pid lock file {}", path.display()));
         }
     };
-    Ok(!try_lock_file(&file)?)
+    probe_reservation_lock(file)
+}
+
+#[cfg(any(unix, windows))]
+fn probe_reservation_lock(file: fs::File) -> Result<bool> {
+    if !try_lock_file(&file)? {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        // A concurrent fork can inherit this descriptor before it closes. Release the
+        // probe's lock explicitly so the child cannot look like a live reservation.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to unlock pid reservation probe");
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -686,9 +730,36 @@ async fn inspect_empty_pid_reservation(
             });
         }
     };
+    inspect_empty_pid_reservation_with_file(pid_path, file).await
+}
+
+#[cfg(unix)]
+struct EmptyPidProbeLock(fs::File);
+
+#[cfg(unix)]
+impl Drop for EmptyPidProbeLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        // Closing alone leaves the lock held by any concurrent fork. Release it
+        // on every exit, including errors and cancellation while inspecting the PID.
+        if unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            let error = std::io::Error::last_os_error();
+            tracing::warn!(%error, "failed to unlock empty pid reservation probe");
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn inspect_empty_pid_reservation_with_file(
+    pid_path: &Path,
+    file: fs::File,
+) -> Result<EmptyPidReservation> {
     if !try_lock_file(&file)? {
         return Ok(EmptyPidReservation::Active);
     }
+    #[cfg(unix)]
+    let _probe_lock = EmptyPidProbeLock(file);
 
     let contents = match fs::read_to_string(pid_path).await {
         Ok(contents) => contents,
@@ -727,6 +798,7 @@ async fn read_process_start_time(pid: u32) -> Result<String> {
 async fn read_process_details(pid: u32) -> Result<(String, String)> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "stat=", "-o", "lstart="])
+        .kill_on_drop(true)
         .output()
         .await
         .context("failed to invoke ps for pid-managed app server")?;

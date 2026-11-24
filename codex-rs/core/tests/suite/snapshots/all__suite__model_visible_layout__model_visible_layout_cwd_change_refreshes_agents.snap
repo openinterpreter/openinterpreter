@@ -9,7 +9,11 @@ Scenario: Second turn changes cwd to a directory with different AGENTS.md and re
 00:message/developer[2]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/user[2]:
+    [03] <tools>
+        Deferred tool namespaces:
+        - multi_agent_v1: Tools for spawning and managing sub-agents.
+        </tools>
+02:message/user[2]:
     [01] <AGENTS_MD>
     [02] <ENVIRONMENT_CONTEXT>
 02:message/user:

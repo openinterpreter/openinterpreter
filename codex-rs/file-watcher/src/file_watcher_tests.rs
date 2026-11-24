@@ -296,6 +296,35 @@ fn recursive_registration_downgrades_to_non_recursive_after_drop() {
     drop(non_recursive);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn native_watcher_reports_changes_after_unwatch_and_rewatch() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let watcher = Arc::new(FileWatcher::new().expect("watcher"));
+    let (subscriber, mut rx) = watcher.add_subscriber();
+
+    for directory in ["first", "second"] {
+        let root = temp_dir.path().join(directory);
+        std::fs::create_dir(&root).expect("create watched directory");
+        let registration = subscriber.register_path(root.clone(), /*recursive*/ false);
+        assert!(registration.registration_succeeded());
+
+        let changed_path = root.join("changed.txt");
+        std::fs::write(&changed_path, "new content").expect("write watched file");
+        let event = timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("native watch event timeout");
+        assert_eq!(
+            event,
+            Some(FileWatcherEvent {
+                paths: vec![changed_path]
+            })
+        );
+
+        drop(registration);
+    }
+}
+
 #[test]
 fn unregister_holds_state_lock_until_unwatch_finishes() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -590,4 +619,105 @@ async fn dropping_live_watcher_releases_inner_watcher() {
     drop(watcher);
 
     assert_eq!(weak_inner.upgrade().is_none(), true);
+}
+
+#[tokio::test]
+async fn registration_reports_success_for_new_and_shared_watches()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let watcher = Arc::new(FileWatcher::new()?);
+    let (subscriber, _rx) = watcher.add_subscriber();
+    let (other_subscriber, _other_rx) = watcher.add_subscriber();
+    // Missing directories succeed through a non-recursive watch on their existing parent.
+    for path in [
+        directory.path().to_path_buf(),
+        directory.path().join("missing"),
+    ] {
+        let first = subscriber.register_path(path.clone(), /*recursive*/ true);
+        let shared = other_subscriber.register_path(path.clone(), /*recursive*/ false);
+        assert!(first.registration_succeeded(), "new watch for {path:?}");
+        assert!(shared.registration_succeeded(), "shared watch for {path:?}");
+        drop(first);
+        assert_eq!(
+            watcher.watch_counts_for_test(directory.path()),
+            Some((1, 0))
+        );
+        drop(shared);
+        assert_eq!(watcher.watch_counts_for_test(directory.path()), None);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_reports_missing_os_watches() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let missing = root.join("a-missing");
+    let watched = root.join("b-watched");
+    std::fs::create_dir(&watched)?;
+    let watcher = Arc::new(FileWatcher::new()?);
+    let (subscriber, _rx) = watcher.add_subscriber();
+    let paths = vec![
+        WatchPath {
+            path: missing.clone(),
+            recursive: true,
+        },
+        WatchPath {
+            path: watched.clone(),
+            recursive: true,
+        },
+    ];
+    // Model a path disappearing after resolution but before the OS registration.
+    let registrations = paths
+        .iter()
+        .map(|watch| SubscriberWatchRegistration {
+            key: SubscriberWatchKey {
+                requested: watch.clone(),
+                matched: watch.clone(),
+            },
+            actual: watch.clone(),
+            fallback: false,
+        })
+        .collect::<Vec<_>>();
+    assert!(!watcher.register_paths(subscriber.id, &registrations));
+
+    std::fs::create_dir(&missing)?;
+    // The directory now exists, but the unchanged mode does not retry its OS watch.
+    let repeated = subscriber.register_paths(paths);
+    assert!(!repeated.registration_succeeded());
+    // The other path registered successfully despite the first path's failure.
+    let successful = subscriber.register_path(watched.clone(), /*recursive*/ true);
+    assert!(successful.registration_succeeded());
+    {
+        let inner = watcher
+            .inner
+            .as_ref()
+            .ok_or("missing watcher backend")?
+            .lock()
+            .map_err(|_| "poisoned watcher lock")?;
+        assert_eq!(
+            inner.watched_paths,
+            HashMap::from([(watched.clone(), RecursiveMode::Recursive)])
+        );
+    }
+    drop(successful);
+    drop(repeated);
+    // Release the original registrations made directly through the subscriber ID.
+    drop(subscriber);
+    assert_eq!(watcher.watch_counts_for_test(&missing), None);
+    assert_eq!(watcher.watch_counts_for_test(&watched), None);
+    Ok(())
+}
+
+#[test]
+fn noop_registration_reports_failure() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let watcher = Arc::new(FileWatcher::noop());
+    let (subscriber, _rx) = watcher.add_subscriber();
+    let registration =
+        subscriber.register_path(directory.path().to_path_buf(), /*recursive*/ true);
+    assert!(!registration.registration_succeeded());
+    drop(registration);
+    assert_eq!(watcher.watch_counts_for_test(directory.path()), None);
+    Ok(())
 }

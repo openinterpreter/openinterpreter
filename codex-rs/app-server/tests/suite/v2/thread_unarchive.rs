@@ -124,6 +124,7 @@ async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result
         .await?;
     let ThreadReadResponse {
         thread: pinned_thread,
+        ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
     assert_eq!(pinned_thread.section, Some(pinned_section.clone()));
     let pinned_entered_at = pinned_thread
@@ -246,6 +247,9 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
     let parent_thread_id = ThreadId::from_string("00000000-0000-4000-8000-000000000127")?;
     store
         .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -261,7 +265,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
@@ -295,6 +299,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         loader_overrides,
         strict_config: false,
         cloud_config_bundle: CloudConfigBundleLoader::default(),
+        embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,

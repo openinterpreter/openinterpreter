@@ -18,4 +18,5 @@ codex-utils-string = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+codex-protocol-test-support = { workspace = true }
 pretty_assertions = { workspace = true }

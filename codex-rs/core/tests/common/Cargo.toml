@@ -12,6 +12,8 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-agent-message-board-host = { workspace = true }
+codex-agent-graph-store = { workspace = true }
 anyhow = { workspace = true }
 assert_cmd = { workspace = true }
 base64 = { workspace = true }
@@ -22,6 +24,7 @@ codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-exec-server = { workspace = true }
+codex-guardian-context = { workspace = true }
 codex-guardian-v2 = { workspace = true }
 codex-home = { workspace = true }
 codex-features = { workspace = true }
@@ -29,21 +32,26 @@ codex-hooks = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
+codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
 codex-thread-store = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-utils-path-uri = { workspace = true }
+codex-utils-rustls-provider = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }
 notify = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
+rcgen = { workspace = true }
 regex-lite = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["net", "test-util", "time"] }
+tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }

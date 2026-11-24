@@ -4,7 +4,7 @@
 use super::*;
 
 impl ChatWidget {
-    pub(in crate::chatwidget) fn toggle_realtime_microphone(&mut self) {
+    pub(crate) fn toggle_realtime_microphone(&mut self) {
         let muted = !self.realtime_conversation.microphone_muted;
         if let Some(handle) = self.realtime_conversation.handle.as_ref() {
             if let Err(error) = handle.set_microphone_muted(muted) {
@@ -147,8 +147,8 @@ impl ChatWidget {
         let Some(handle) = self.realtime_conversation.handle.as_ref() else {
             return;
         };
-        if let Some(error) = handle.take_error() {
-            self.on_realtime_error(format!("Voice conversation failed: {error}"));
+        if let Some((_cause, detail)) = handle.take_error() {
+            self.on_realtime_error(format!("Voice conversation failed: {detail}"));
             return;
         }
         if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {

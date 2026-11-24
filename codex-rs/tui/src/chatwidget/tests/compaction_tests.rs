@@ -9,21 +9,22 @@ fn normalize_compaction_snapshot(text: String) -> String {
 }
 
 fn compaction_started(id: &str) -> ServerNotification {
-    ServerNotification::ItemStarted(ItemStartedNotification {
-        thread_id: "thread-1".to_string(),
-        turn_id: "turn-1".to_string(),
-        started_at_ms: chrono::Utc::now().timestamp_millis(),
-        item: AppServerThreadItem::ContextCompaction { id: id.to_string() },
-    })
+    ServerNotification::ItemStarted(ItemStartedNotification::new(
+        "thread-1".to_string(),
+        "turn-1".to_string(),
+        AppServerThreadItemPayload::ContextCompaction { id: id.to_string() },
+        chrono::Utc::now().timestamp_millis(),
+    ))
 }
 
 fn compaction_completed(id: &str) -> ServerNotification {
-    ServerNotification::ItemCompleted(ItemCompletedNotification {
-        thread_id: "thread-1".to_string(),
-        turn_id: "turn-1".to_string(),
-        completed_at_ms: 0,
-        item: AppServerThreadItem::ContextCompaction { id: id.to_string() },
-    })
+    ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        "thread-1".to_string(),
+        "turn-1".to_string(),
+        AppServerThreadItemPayload::ContextCompaction { id: id.to_string() },
+        /*started_at_ms*/ None,
+        /*completed_at_ms*/ 0,
+    ))
 }
 
 #[tokio::test]
@@ -92,9 +93,10 @@ async fn compaction_status_survives_follow_up_and_preserves_turn_time() {
 async fn manual_compaction_shows_status_before_backend_events() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.dispatch_command(SlashCommand::Compact);
-    assert_chatwidget_snapshot!(
-        "manual_compaction_pending",
-        normalize_compaction_snapshot(render_bottom_popup(&chat, /*width*/ 80))
+    assert!(chat.bottom_pane.status_indicator_visible());
+    assert_eq!(
+        chat.bottom_pane.status_widget().unwrap().header(),
+        "Compacting context"
     );
     assert!(chat.handle_turn_start_rejection("Could not start compaction".to_string()));
     assert!(!chat.bottom_pane.status_indicator_visible());

@@ -19,7 +19,11 @@ async fn backup_moves_only_requested_runtime_db_files_to_backup_folder() -> std:
     let failed_db_path = sqlite.logs_db_path();
     let failed_paths = sqlite_paths(failed_db_path.as_path());
 
-    let backups = backup_runtime_db_for_fresh_start(failed_db_path.as_path()).await?;
+    let (result, report) =
+        collect_runtime_db_backups(backup_runtime_db_for_fresh_start(failed_db_path.as_path()))
+            .await;
+    let backups = result?;
+    assert_eq!(report, backups);
 
     assert_eq!(backups.len(), failed_paths.len());
     for path in &failed_paths {
@@ -68,12 +72,7 @@ async fn backup_replaces_blocking_sqlite_home_file() -> std::io::Result<()> {
 }
 
 #[test]
-fn sqlite_error_detail_classifies_corruption_and_lock_errors() {
-    assert!(sqlite_error_detail_is_corruption("file is not a database"));
-    assert!(sqlite_error_detail_is_corruption(
-        "error returned from database: (code: 11) database disk image is malformed"
-    ));
-    assert!(!sqlite_error_detail_is_corruption("database is locked"));
+fn sqlite_error_detail_classifies_lock_errors() {
     assert!(sqlite_error_detail_is_lock("database is locked"));
     assert!(sqlite_error_detail_is_lock("database is busy"));
 }

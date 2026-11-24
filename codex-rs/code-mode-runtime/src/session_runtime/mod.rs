@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+pub(crate) use codex_code_mode_protocol::FunctionCallOutputContentItem as OutputItem;
 use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
@@ -17,10 +18,9 @@ pub(crate) use self::types::CellEvent;
 pub(crate) use self::types::CellId;
 pub(crate) use self::types::CreateCellRequest;
 pub(crate) use self::types::Error;
-pub(crate) use self::types::ImageDetail;
 pub(crate) use self::types::NestedToolCall;
+pub(crate) use self::types::Observation;
 pub(crate) use self::types::ObserveMode;
-pub(crate) use self::types::OutputItem;
 pub(crate) use self::types::SessionRuntimeDelegate;
 pub(crate) use self::types::ToolDefinition;
 pub(crate) use self::types::ToolKind;
@@ -76,7 +76,7 @@ impl SessionRuntime {
     pub(crate) async fn execute<D: SessionRuntimeDelegate>(
         &self,
         request: CreateCellRequest,
-        initial_observe_mode: ObserveMode,
+        initial_observe_mode: impl Into<Observation>,
         delegate: Arc<D>,
     ) -> Result<StartedCell, Error> {
         if self.inner.shutdown_token.is_cancelled() {
@@ -103,7 +103,7 @@ impl SessionRuntime {
     pub(crate) async fn begin_observe(
         &self,
         cell_id: &CellId,
-        mode: ObserveMode,
+        observation: impl Into<Observation> + Send,
     ) -> Result<PendingEvent, Error> {
         let handle = self
             .inner
@@ -114,7 +114,7 @@ impl SessionRuntime {
             .cloned()
             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
         Ok(PendingEvent {
-            event: map_actor_event(cell_id.clone(), handle.observe(mode)),
+            event: map_actor_event(cell_id.clone(), handle.observe(observation)),
         })
     }
 
@@ -147,7 +147,7 @@ impl SessionRuntime {
     fn allocate_cell_id(&self) -> Result<CellId, Error> {
         self.inner
             .next_cell_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next_cell_id| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next_cell_id| {
                 next_cell_id.checked_add(1)
             })
             .map(|cell_id| CellId::new(cell_id.to_string()))
@@ -158,7 +158,7 @@ impl SessionRuntime {
         &self,
         cell_id: CellId,
         request: CreateCellRequest,
-        initial_observe_mode: ObserveMode,
+        initial_observe_mode: impl Into<Observation>,
         delegate: Arc<D>,
     ) -> Result<RuntimeEventFuture, Error> {
         let stored_values = self.inner.stored_values.lock().await.clone();
@@ -180,7 +180,7 @@ impl SessionRuntime {
             request,
             stored_values,
             host,
-            initial_observe_mode,
+            initial_observe_mode.into(),
             cell_state,
             self.inner.task_failure_handler.clone(),
         )
@@ -280,20 +280,20 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
     async fn commit_completion(
         &self,
         stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: CellEvent,
-        pending_initial_yield_items: Option<Vec<OutputItem>>,
+        event: impl FnOnce() -> CellEvent + Send,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
         let cancellation_token = cell_state.cancellation_token();
         let mut stored_values = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
-                return CompletionCommit::Rejected(event);
+                return CompletionCommit::Rejected;
             }
             stored_values = self.inner.stored_values.lock() => stored_values,
         };
-        cell_state.commit_completion(event, pending_initial_yield_items, || {
+        cell_state.commit_completion(event, || {
             stored_values.extend(stored_value_writes);
+            drop(stored_values);
         })
     }
 

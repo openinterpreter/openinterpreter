@@ -3,29 +3,37 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
+use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SessionSource as ApiSessionSource;
+use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_features::Feature;
 use codex_protocol::ThreadId as CoreThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -108,6 +116,10 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     .await??;
 
     let request = response_mock.single_request();
+    assert_eq!(
+        request.header("x-codex-exclude").as_deref(),
+        Some("tools,usage.attribution")
+    );
     let metadata = request
         .header("x-codex-turn-metadata")
         .as_deref()
@@ -449,8 +461,12 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
     Ok(())
 }
 
+#[test_case::test_case(false; "replacement")]
+#[test_case::test_case(true; "patch")]
 #[tokio::test]
-async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() -> Result<()> {
+async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2(
+    patch_steer: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let codex_home = TempDir::new()?;
@@ -489,7 +505,13 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
 
     let start_metadata = HashMap::from([
         ("fiber_run_id".to_string(), "fiber-start-123".to_string()),
-        ("source".to_string(), "initial-source".to_string()),
+        ("codex_app_used_dictation".to_string(), "false".to_string()),
+        ("source".to_string(), "snapshot-source".to_string()),
+        ("start_only".to_string(), "start-value".to_string()),
+        (
+            "misalignment_override".to_string(),
+            r#"{"review_target":"RB._~:-opaque"}"#.to_string(),
+        ),
     ]);
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -500,7 +522,11 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
                 text_elements: Vec::new(),
             }],
             turn_trigger: Some("user".to_string()),
-            responsesapi_client_metadata: Some(start_metadata.clone()),
+            responsesapi_client_metadata: Some(start_metadata),
+            responsesapi_client_metadata_patch: Some(HashMap::from([(
+                "source".to_string(),
+                "initial-source".to_string(),
+            )])),
             ..Default::default()
         })
         .await?;
@@ -517,9 +543,19 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
 
     let steer_metadata = HashMap::from([
         ("fiber_run_id".to_string(), "fiber-steer-456".to_string()),
+        ("codex_app_used_dictation".to_string(), "true".to_string()),
         ("origin".to_string(), "gaas".to_string()),
         ("source".to_string(), "steer-source".to_string()),
+        (
+            "misalignment_override".to_string(),
+            r#"{"review_target":"RC"}"#.to_string(),
+        ),
     ]);
+    let (responsesapi_client_metadata, responsesapi_client_metadata_patch) = if patch_steer {
+        (None, Some(steer_metadata))
+    } else {
+        (Some(steer_metadata), None)
+    };
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
@@ -528,7 +564,8 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
                 text: "Focus on the failure".to_string(),
                 text_elements: Vec::new(),
             }],
-            responsesapi_client_metadata: Some(steer_metadata.clone()),
+            responsesapi_client_metadata,
+            responsesapi_client_metadata_patch,
             additional_context: None,
             expected_turn_id: turn_id.clone(),
         })
@@ -556,6 +593,7 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
     assert_eq!(first_metadata["turn_id"].as_str(), Some(turn_id.as_str()));
     assert_eq!(first_metadata["turn_trigger"].as_str(), Some("user"));
     assert_eq!(first_metadata["source"].as_str(), Some("initial-source"));
+    assert!(first_metadata.get("codex_app_used_dictation").is_none());
 
     let second_metadata = requests[1]
         .header("x-codex-turn-metadata")
@@ -570,16 +608,348 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
     assert_eq!(second_metadata["turn_id"].as_str(), Some(turn_id.as_str()));
     assert_eq!(second_metadata["turn_trigger"].as_str(), Some("user"));
     assert_eq!(second_metadata["source"].as_str(), Some("steer-source"));
-
-    let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
+    assert!(second_metadata.get("codex_app_used_dictation").is_none());
     assert_eq!(
-        (
-            event["event_params"]["turn_trigger"].as_str(),
-            event["event_params"]["codex_turn_source"].as_str(),
-        ),
-        (Some("user"), Some("steer-source"))
+        second_metadata["start_only"].as_str(),
+        patch_steer.then_some("start-value")
+    );
+    assert_eq!(
+        second_metadata["misalignment_override"],
+        first_metadata["misalignment_override"],
     );
 
+    let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
+    let params = &event["event_params"];
+    assert_eq!(
+        json!([
+            params["thread_id"],
+            params["turn_id"],
+            params["turn_trigger"],
+            params["codex_turn_source"],
+            params["used_dictation"],
+        ]),
+        json!([thread.id, turn_id, "user", "steer-source", true]),
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_closed_subagent_retains_raw_usage_attribution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.6-luna")
+        .with_root_config("thread_unload_delay_secs = 0")
+        .with_extra_config("[features.multi_agent_v2]\nenabled = false")
+        .write(codex_home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let parent = app
+        .start_thread(ThreadStartParams {
+            experimental_raw_events: true,
+            ..Default::default()
+        })
+        .await?
+        .thread;
+    let turn = |thread_id: &str, prompt: &str| TurnStartParams {
+        thread_id: thread_id.to_owned(),
+        input: vec![V2UserInput::Text {
+            text: prompt.to_owned(),
+            text_elements: vec![],
+        }],
+        ..Default::default()
+    };
+    let tool = |name: &str, args: serde_json::Value| {
+        responses::sse(vec![
+            responses::ev_function_call_with_namespace(
+                name,
+                "multi_agent_v1",
+                name,
+                &args.to_string(),
+            ),
+            responses::ev_completed(name),
+        ])
+    };
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            tool("spawn_agent", json!({"message": "Inspect the example"})),
+            responses::sse_completed("done-1"),
+            responses::sse_completed("done-2"),
+        ],
+    )
+    .await;
+    app.start_turn_and_wait_for_completion(turn(&parent.id, "Spawn a child"))
+        .await?;
+    let child_turn: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_notification("turn/completed"),
+    )
+    .await??;
+    let child_id = child_turn.thread_id;
+
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            tool("close_agent", json!({"target": child_id})),
+            responses::sse_completed("closed"),
+        ],
+    )
+    .await;
+    app.start_turn_and_wait_for_completion(turn(&parent.id, "Close the child"))
+        .await?;
+    // Resume from the child's subscription after both original runtimes are gone.
+    let id = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: parent.id.clone(),
+        })
+        .await?;
+    let _: ThreadUnsubscribeResponse = app.read_response(id).await?;
+    let closed: ThreadClosedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+    assert_eq!(closed.thread_id, parent.id);
+    let id = app
+        .send_thread_loaded_list_request(Default::default())
+        .await?;
+    let loaded: ThreadLoadedListResponse = app.read_response(id).await?;
+    assert!(loaded.data.is_empty());
+
+    let id = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: child_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse = app.read_response(id).await?;
+    let request = responses::mount_sse_once(&server, responses::sse_completed("resumed")).await;
+    app.clear_message_buffer();
+    app.start_turn_and_wait_for_completion(turn(&child_id, "Continue"))
+        .await?;
+    assert_eq!(
+        request
+            .single_request()
+            .header("x-codex-exclude")
+            .as_deref(),
+        Some("tools")
+    );
+    let raw: RawResponseCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_notification("rawResponse/completed"),
+    )
+    .await??;
+    assert_eq!(raw.response_id, "resumed");
+    Ok(())
+}
+
+#[test_case::test_case(false, "none", false; "legacy")]
+#[test_case::test_case(true, "none", false; "v2 fresh")]
+#[test_case::test_case(true, "all", false; "v2 fork")]
+#[test_case::test_case(true, "none", true; "v2 fresh with raw events")]
+#[tokio::test]
+async fn subagents_inherit_spawn_metadata_without_live_parent_updates(
+    multi_agent_v2: bool,
+    fork_turns: &str,
+    experimental_raw_events: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let spawn_args = if multi_agent_v2 {
+        json!({"task_name": "worker", "message": "Inspect the example", "fork_turns": fork_turns})
+    } else {
+        json!({"message": "Inspect the example"})
+    };
+    let namespace = if multi_agent_v2 {
+        "collaboration"
+    } else {
+        "multi_agent_v1"
+    };
+    let parent_wait = responses::ev_completed("parent-wait");
+    let child_wait = responses::ev_response_created("child-spawn");
+    let server = responses::start_websocket_server(vec![
+        vec![
+            vec![responses::ev_completed("parent-warm")],
+            vec![
+                responses::ev_function_call_with_namespace(
+                    "spawn-worker",
+                    namespace,
+                    "spawn_agent",
+                    &spawn_args.to_string(),
+                ),
+                responses::ev_completed("parent-spawn"),
+            ],
+            vec![parent_wait.clone()],
+        ],
+        vec![
+            vec![responses::ev_completed("child-warm")],
+            vec![
+                child_wait.clone(),
+                responses::ev_function_call_with_namespace(
+                    "spawn-grandchild",
+                    namespace,
+                    "spawn_agent",
+                    &spawn_args.to_string(),
+                ),
+                responses::ev_completed("child-spawn"),
+            ],
+            vec![responses::ev_completed("child-done")],
+        ],
+        vec![
+            vec![responses::ev_completed("grandchild-warm")],
+            vec![responses::ev_completed("grandchild-done")],
+        ],
+    ])
+    .await;
+    let _hold_parent = server.gate_response_event(&parent_wait);
+    let release_child = server.gate_response_event(&child_wait);
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri().replacen("ws://", "http://", 1))
+        .with_model(if multi_agent_v2 {
+            "gpt-5.6-sol"
+        } else {
+            "gpt-5.6-luna"
+        })
+        .with_provider_config("supports_websockets = true")
+        .with_provider_config("supports_standalone_web_search = true")
+        .enable_feature(Feature::StandaloneWebSearch)
+        .with_root_config("web_search = \"live\"")
+        .with_extra_config(&format!(
+            "[agents]\nmax_depth = 3\n[features.multi_agent_v2]\nenabled = {multi_agent_v2}"
+        ))
+        .write(codex_home.path())?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let thread_req = app_server
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            experimental_raw_events,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(thread_req)).await??;
+    let turn_req = app_server
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Delegate the example".to_string(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: Some(HashMap::from([
+                ("cost_center".to_string(), "before".to_string()),
+                ("thread_id".to_string(), "spoofed-thread".to_string()),
+                ("turn_id".to_string(), "spoofed-turn".to_string()),
+                ("parent_response_id".to_string(), "root-only".to_string()),
+                (
+                    "mcp_request_meta".to_string(),
+                    r#"{"selected_connector_ids":["parent-connector"]}"#.to_string(),
+                ),
+                (
+                    "misalignment_override".to_string(),
+                    r#"{"review_target":"root-only"}"#.to_string(),
+                ),
+            ])),
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(turn_req)).await??;
+    let child_first = timeout(
+        DEFAULT_READ_TIMEOUT,
+        server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 1),
+    )
+    .await?;
+
+    let steer_req = app_server
+        .send_turn_steer_request(TurnSteerParams {
+            thread_id: thread.id.clone(),
+            client_user_message_id: None,
+            expected_turn_id: turn.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Update cost attribution".to_string(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: Some(HashMap::from([(
+                "cost_center".to_string(),
+                "after".to_string(),
+            )])),
+            responsesapi_client_metadata_patch: None,
+            additional_context: None,
+        })
+        .await?;
+    let _: TurnSteerResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(steer_req)).await??;
+    release_child.send(()).expect("child response is waiting");
+    let child_next = timeout(
+        DEFAULT_READ_TIMEOUT,
+        server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 2),
+    )
+    .await?;
+    let grandchild = timeout(
+        DEFAULT_READ_TIMEOUT,
+        server.wait_for_request(/*connection_index*/ 2, /*request_index*/ 1),
+    )
+    .await?;
+
+    let expected_exclusions = if experimental_raw_events {
+        "tools"
+    } else {
+        "tools,usage.attribution"
+    };
+    for handshake in server.handshakes() {
+        assert_eq!(
+            handshake.header("x-codex-exclude").as_deref(),
+            Some(expected_exclusions)
+        );
+    }
+    for request in [&child_first, &grandchild] {
+        let body = request.body_json();
+        let tools = body["input"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .rev()
+                    .find(|item| item["type"] == "additional_tools")
+            })
+            .unwrap_or(&body);
+        assert!(tools.to_string().contains("### `web__run`"));
+    }
+    let metadata = [child_first, child_next, grandchild].map(|request| {
+        let body = request.body_json();
+        let metadata = parse_json_header(
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("canonical turn metadata"),
+        );
+        assert_eq!(metadata["thread_id"], body["client_metadata"]["thread_id"]);
+        assert_eq!(metadata["turn_id"], body["client_metadata"]["turn_id"]);
+        assert_ne!(metadata["thread_id"], json!(thread.id));
+        assert_ne!(metadata["turn_id"], json!(turn.id));
+        assert_ne!(metadata["thread_id"], json!("spoofed-thread"));
+        assert_ne!(metadata["turn_id"], json!("spoofed-turn"));
+        metadata
+    });
+    assert_eq!(
+        metadata.each_ref().map(|metadata| (
+            metadata["cost_center"].as_str(),
+            metadata["misalignment_override"].as_str(),
+            metadata["parent_response_id"].as_str(),
+            metadata["mcp_request_meta"].as_str(),
+        )),
+        [(Some("before"), None, None, None); 3],
+    );
+    assert_eq!(metadata[0]["turn_id"], metadata[1]["turn_id"]);
+    assert_eq!(metadata[0]["parent_turn_id"], json!(turn.id));
+    assert_eq!(metadata[2]["parent_turn_id"], metadata[0]["turn_id"]);
+    assert_ne!(metadata[2]["thread_id"], metadata[0]["thread_id"]);
+    assert_ne!(metadata[2]["turn_id"], metadata[0]["turn_id"]);
     Ok(())
 }
 

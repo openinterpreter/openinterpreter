@@ -9,7 +9,9 @@ use pretty_assertions::assert_eq;
 
 fn snapshot(text: &str) -> ComposerDraftSnapshot {
     ComposerDraftSnapshot {
+        vim_normal_mode: false,
         text: text.to_string(),
+        shell_mode: None,
         cursor: text.len(),
         text_elements: Vec::new(),
         local_images: Vec::new(),
@@ -46,6 +48,35 @@ async fn recovery_keeps_edits_and_pastes_after_chatwidget_handoff() {
         })
         .await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_after_handoff_preserves_pending_vim_replace_key() {
+    scope(async {
+        let (mut chat, _sender, _rx, _op_rx) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let mut draft = snapshot("abcd");
+        draft.cursor = 0;
+        remember(draft.clone());
+        let mut pending = Some(draft);
+        let mut confirmed = false;
+        chat.restore_startup_input_when_ready(&mut pending, &mut confirmed);
+        chat.toggle_vim_mode_and_notify();
+        chat.handle_key_event(KeyEvent::from(KeyCode::Char('R')));
+        chat.handle_key_event(KeyEvent::from(KeyCode::Char('X')));
+
+        // A failure now prints the eventual edit but must not consume the live pending key.
+        assert_eq!(chat.composer_text_with_pending(), "abcd");
+        insta::assert_snapshot!(take_unsent_text().unwrap(), @"Xbcd");
+        assert_eq!(chat.composer_text_with_pending(), "abcd");
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !chat.handle_paste_burst_tick(crate::tui::FrameRequester::test_dummy()),
+            "the draw that commits the replacement key should render it"
+        );
+        assert_eq!(chat.composer_text_with_pending(), "Xbcd");
+    })
+    .await;
 }
 
 #[tokio::test]

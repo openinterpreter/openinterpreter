@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use codex_config::types::DEFAULT_OTEL_ENVIRONMENT;
@@ -26,8 +27,13 @@ pub(crate) fn resolve_config(
     let tracestate = resolve_tracestate(config.tracestate, startup_warnings);
 
     OtelConfig {
-        tool_result: config.tool_result,
+        headers_helper: config.headers_helper,
+        headers_helper_refresh_interval_ms: config.headers_helper_refresh_interval_ms,
+        tool_result: config.tool_result.unwrap_or_default(),
+        log_sse_deltas: config.log_sse_deltas.unwrap_or(true),
         log_user_prompt,
+        log_agent_responses: config.log_agent_responses.unwrap_or(false),
+        log_guardian_assessments: config.log_guardian_assessments.unwrap_or(false),
         environment,
         exporter,
         trace_exporter,
@@ -38,16 +44,16 @@ pub(crate) fn resolve_config(
 }
 
 fn resolve_span_attributes(
-    span_attributes: Option<BTreeMap<String, String>>,
+    span_attributes: Option<HashMap<String, String>>,
     startup_warnings: &mut Vec<String>,
-) -> BTreeMap<String, String> {
+) -> HashMap<String, String> {
     let Some(span_attributes) = span_attributes else {
-        return BTreeMap::new();
+        return HashMap::new();
     };
 
-    let mut valid_attributes = BTreeMap::new();
+    let mut valid_attributes = HashMap::new();
     for (key, value) in span_attributes {
-        let attribute = BTreeMap::from([(key.clone(), value.clone())]);
+        let attribute = HashMap::from([(key.clone(), value.clone())]);
         if let Err(err) = codex_otel::validate_span_attributes(&attribute) {
             push_invalid_config_warning("otel.span_attributes", err, startup_warnings);
             continue;

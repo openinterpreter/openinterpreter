@@ -32,18 +32,18 @@ bucket, and record any addition or removal in the release pull request.
 ## Upstream maintenance checklist
 
 - [ ] Preserve `--chat-completions` on both `interpreter` and
-  `interpreter exec`; confirm it selects `wire_api = "chat"` without requiring
-  an undocumented configuration override.
+      `interpreter exec`; confirm it selects `wire_api = "chat"` without requiring
+      an undocumented configuration override.
 - [ ] Exercise a Chat Completions provider with text, streaming, tool calls,
-  tool results, and usage metadata.
+      tool results, and usage metadata.
 - [ ] Run `interpreter --help`, `interpreter exec --help`, and
-  `interpreter --version`; none may present Codex as the installed product.
+      `interpreter --version`; none may present Codex as the installed product.
 - [ ] Generate completions for every supported shell and confirm the command
-  name is `interpreter` and all public flags, including `--chat-completions`,
-  are present.
+      name is `interpreter` and all public flags, including `--chat-completions`,
+      are present.
 - [ ] Sweep visible help, warnings, errors, onboarding, status, resume, update,
-  installer, and release output for inappropriate `Codex`, `codex`, or
-  `CODEX_` product names. Classify retained matches as upstream attribution,
-  model names, protocol/crate identifiers, or documented compatibility aliases.
+      installer, and release output for inappropriate `Codex`, `codex`, or
+      `CODEX_` product names. Classify retained matches as upstream attribution,
+      model names, protocol/crate identifiers, or documented compatibility aliases.
 - [ ] Run the focused product identity, CLI parsing, Chat wire compatibility,
-  installer, and release workflow tests before publishing.
+      installer, and release workflow tests before publishing.

@@ -12,7 +12,8 @@ use thiserror::Error;
 #[derive(Clone, Debug)]
 pub struct PluginListQuery {
     pub thread_id: String,
-    pub turn_id: String,
+    /// Absent for explicit discovery before turn admission.
+    pub turn_id: Option<String>,
     pub mcp_resources: Option<Arc<McpResourceClient>>,
 }
 

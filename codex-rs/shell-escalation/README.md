@@ -28,7 +28,8 @@ git apply /path/to/patches/zsh-exec-wrapper.patch
 make -j"$(nproc)"
 ```
 
-Release artifacts are built by `.github/workflows/rust-release-zsh.yml` when a
-`codex-zsh-vX.Y.Z` tag is pushed. When the zsh commit or patch changes, publish
-the next version tag and update the checked-in DotSlash manifests to use the new
-release.
+Release artifacts are built by manually dispatching
+`.github/workflows/rust-release-zsh.yml` from a `codex-zsh-vX.Y.Z` tag after
+review. The workflow validates that tag before building. When the zsh commit or
+patch changes, publish the next version tag and update the checked-in DotSlash
+manifests to use the new release.

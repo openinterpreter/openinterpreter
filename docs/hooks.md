@@ -25,13 +25,13 @@ hooks = false
 
 Open Interpreter discovers hooks next to active config layers:
 
-| Location | Scope |
-| -------- | ----- |
-| `~/.openinterpreter/hooks.json` | User |
-| `~/.openinterpreter/config.toml` | User inline hooks |
-| `.openinterpreter/hooks.json` | Trusted project |
-| `.openinterpreter/config.toml` | Trusted project inline hooks |
-| Enabled plugins | Plugin-bundled hooks |
+| Location                         | Scope                        |
+| -------------------------------- | ---------------------------- |
+| `~/.openinterpreter/hooks.json`  | User                         |
+| `~/.openinterpreter/config.toml` | User inline hooks            |
+| `.openinterpreter/hooks.json`    | Trusted project              |
+| `.openinterpreter/config.toml`   | Trusted project inline hooks |
+| Enabled plugins                  | Plugin-bundled hooks         |
 
 If multiple sources match, they all run. Higher-precedence config does not
 replace hooks from lower-precedence layers.
@@ -53,18 +53,18 @@ Automation that already validates hooks externally can pass
 
 ## Events
 
-| Event | When it runs |
-| ----- | ------------ |
-| `SessionStart` | A session starts, resumes, clears, or compacts. |
-| `UserPromptSubmit` | A user prompt is about to be sent. |
-| `PreToolUse` | Before supported shell, patch, or MCP tools run. |
-| `PermissionRequest` | Before an approval prompt is shown. |
-| `PostToolUse` | After supported shell, patch, or MCP tools finish. |
-| `PreCompact` | Before context compaction. |
-| `PostCompact` | After context compaction. |
-| `SubagentStart` | A subagent starts. |
-| `SubagentStop` | A subagent stops. |
-| `Stop` | A turn is about to finish. |
+| Event               | When it runs                                       |
+| ------------------- | -------------------------------------------------- |
+| `SessionStart`      | A session starts, resumes, clears, or compacts.    |
+| `UserPromptSubmit`  | A user prompt is about to be sent.                 |
+| `PreToolUse`        | Before supported shell, patch, or MCP tools run.   |
+| `PermissionRequest` | Before an approval prompt is shown.                |
+| `PostToolUse`       | After supported shell, patch, or MCP tools finish. |
+| `PreCompact`        | Before context compaction.                         |
+| `PostCompact`       | After context compaction.                          |
+| `SubagentStart`     | A subagent starts.                                 |
+| `SubagentStop`      | A subagent stops.                                  |
+| `Stop`              | A turn is about to finish.                         |
 
 ## JSON Form
 

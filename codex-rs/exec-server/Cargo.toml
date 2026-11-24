@@ -7,15 +7,19 @@ license.workspace = true
 [lib]
 doctest = false
 
-# Compiled through #[path] in src/client.rs; cargo-shear 1.11.2 does not normalize
-# the ../tests path and incorrectly reports this linked unit-test module as unlinked.
+# cargo-shear 1.11.2 misresolves these #[path] modules containing parent directories.
+# Both modules are compiled and exercised by the exec-server unit test target.
 [package.metadata.cargo-shear]
-ignored-paths = ["tests/unit/client_provisioning_tests.rs"]
+ignored-paths = [
+    "tests/unit/client_provisioning_tests.rs",
+    "src/discoverV2/tests/capability_watchers_tests.rs",
+]
 
 [lints]
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true, features = ["http1", "tokio", "ws"] }
 base64 = { workspace = true }
@@ -24,23 +28,29 @@ clatter = { workspace = true }
 codex-api = { workspace = true }
 codex-build-info = { workspace = true }
 codex-config = { workspace = true }
+codex-core-plugin-common = { workspace = true }
 codex-http-client = { workspace = true }
 codex-exec-server-protocol = { workspace = true }
 codex-file-system = { workspace = true }
+codex-file-watcher = { workspace = true }
 codex-network-proxy = { workspace = true }
 codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 codex-sandboxing = { workspace = true }
 codex-shell-command = { workspace = true }
+codex-skills = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-home-dir = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-utils-pty = { workspace = true }
+codex-utils-redacted-string = { workspace = true }
 codex-utils-rustls-provider = { workspace = true }
+codex-websocket-auth = { workspace = true }
 codex-websocket-client = { workspace = true }
 dirs = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+notify = { workspace = true }
 opentelemetry = { workspace = true }
 prost = "0.14.3"
 serde = { workspace = true, features = ["derive"] }
@@ -64,17 +74,22 @@ tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+codex-linux-sandbox = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
+codex-uds = { workspace = true }
 libc = { workspace = true }
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "process"] }
+tempfile = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = [
+codex-mxc-sandbox = { workspace = true }
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
-    "Win32_System_Kernel",
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

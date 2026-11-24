@@ -14,11 +14,14 @@ use uuid::Uuid;
 
 use super::App;
 use super::app_server_requests::ResolvedAppServerRequest;
-use super::user_verification_errors::verification_error_message;
+use super::user_verification_errors::verification_failure;
 use crate::app_command::AppCommand;
+use crate::app_command::UserVerificationFailure;
 use crate::app_command::UserVerificationResponse;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
+use codex_app_server_protocol::UserVerificationErrorDetails;
+use codex_app_server_protocol::UserVerificationUnavailableReason;
 
 impl App {
     pub(super) async fn start_user_verification(
@@ -47,15 +50,19 @@ impl App {
                 thread_id,
                 server_name,
                 request_id,
-                UserVerificationResponse::Cancel,
+                UserVerificationResponse::Failed {
+                    error: UserVerificationErrorDetails::Unavailable {
+                        reason: UserVerificationUnavailableReason::ProviderUnavailable,
+                    },
+                },
             );
             return Ok(());
         }
-        let Some(attempt) = self
-            .pending_app_server_requests
-            .user_verification
-            .begin(&server_name, &request_id)
-        else {
+        let Some(attempt) = self.pending_app_server_requests.user_verification.begin(
+            &thread_id.to_string(),
+            &server_name,
+            &request_id,
+        ) else {
             return Ok(());
         };
         let handle = app_server.request_handle();
@@ -74,7 +81,7 @@ impl App {
                 result = verification => result,
             }
             .map(|response| response.proof)
-            .map_err(|error| verification_error_message(&error).to_string());
+            .map_err(|error| verification_failure(&error));
             app_event_tx.send(AppEvent::UserVerificationFinished {
                 thread_id,
                 server_name,
@@ -94,30 +101,37 @@ impl App {
         server_name: String,
         request_id: RequestId,
         attempt_id: Uuid,
-        result: Result<UserVerificationProof, String>,
+        result: Result<UserVerificationProof, UserVerificationFailure>,
     ) -> color_eyre::Result<()> {
         if self.abandoned_side_threads.contains(&thread_id)
             || !self
                 .pending_app_server_requests
                 .user_verification
-                .is_pending(&server_name, &request_id, attempt_id)
+                .is_pending(
+                    &thread_id.to_string(),
+                    &server_name,
+                    &request_id,
+                    attempt_id,
+                )
         {
             return Ok(());
         }
         let response = match result {
             Ok(proof) => UserVerificationResponse::Accept { proof },
-            Err(message) => {
+            Err(failure) => {
                 self.enqueue_thread_notification(
                     thread_id,
                     ServerNotification::Warning(WarningNotification {
                         thread_id: Some(thread_id.to_string()),
-                        message,
+                        message: failure.message.to_string(),
                     }),
                 )
                 .await?;
                 // Another trusted device may be supported later. For now every incomplete
                 // verification cancels the original elicitation without a fallback provider.
-                UserVerificationResponse::Cancel
+                UserVerificationResponse::Failed {
+                    error: failure.details,
+                }
             }
         };
         self.chat_widget

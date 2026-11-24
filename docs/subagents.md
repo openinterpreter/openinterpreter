@@ -29,10 +29,10 @@ parallel work.
 
 Common built-in roles include:
 
-| Role | Purpose |
-| ---- | ------- |
-| `default` | General-purpose helper. |
-| `worker` | Focused execution or investigation. |
+| Role       | Purpose                                 |
+| ---------- | --------------------------------------- |
+| `default`  | General-purpose helper.                 |
+| `worker`   | Focused execution or investigation.     |
 | `explorer` | Read-heavy discovery and summarization. |
 
 Available roles can vary by build and config.
@@ -46,10 +46,10 @@ max_depth = 1
 job_max_runtime_seconds = 1800
 ```
 
-| Key | Meaning |
-| --- | ------- |
-| `max_threads` | Maximum concurrent agent threads. |
-| `max_depth` | How deeply agents can spawn other agents. |
+| Key                       | Meaning                                    |
+| ------------------------- | ------------------------------------------ |
+| `max_threads`             | Maximum concurrent agent threads.          |
+| `max_depth`               | How deeply agents can spawn other agents.  |
 | `job_max_runtime_seconds` | Default timeout for CSV/batch worker jobs. |
 
 ## Custom Agent

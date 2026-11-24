@@ -218,6 +218,7 @@ impl GatewayAuthManager {
                 .refresh::<TokenResponse>(RefreshTokenGrant {
                     refresh_token,
                     resource: self.state.config.resource.as_deref(),
+                    refresh_reason: None,
                 })
                 .await
             {

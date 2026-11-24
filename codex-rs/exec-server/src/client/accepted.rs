@@ -196,7 +196,7 @@ impl Inner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let current_rpc_client = match &connection.status {
                 ConnectionStatus::Failed(message) => {
-                    return Err(ExecServerError::Disconnected(message.clone()));
+                    return Err(message.clone().into());
                 }
                 ConnectionStatus::Connected(rpc_client) => Some(Arc::clone(rpc_client)),
                 ConnectionStatus::Recovering => None,
@@ -221,7 +221,7 @@ impl Inner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let ConnectionStatus::Failed(message) = &connection_state.status {
-            return Err(ExecServerError::Disconnected(message.clone()));
+            return Err(message.clone().into());
         }
         replacement_submission.submit(connection)
     }
@@ -251,6 +251,7 @@ impl LazyRemoteExecServerClient {
             reconnect: std::sync::Arc::new(std::sync::Mutex::new(None)),
             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             environment_connection_state_tx,
+            connection_observer: Default::default(),
         }
     }
 

@@ -1,6 +1,7 @@
 //! Turn lifecycle inputs and scheduling phases for host-owned contributors.
 
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
@@ -32,6 +33,31 @@ pub struct TurnStartInput<'a> {
     pub turn_store: &'a ExtensionData,
 }
 
+/// Inputs for refreshing catalogs before a model step.
+#[derive(Clone, Copy)]
+pub struct CatalogRefreshInput<'a> {
+    pub turn_id: &'a str,
+    pub session_store: &'a ExtensionData,
+    pub thread_store: &'a ExtensionData,
+    pub turn_store: &'a ExtensionData,
+}
+
+/// Inputs for explicit cloud discovery, including before a thread has any turns.
+#[derive(Clone, Copy)]
+pub struct CloudCatalogRefreshInput<'a> {
+    pub session_store: &'a ExtensionData,
+    pub thread_store: &'a ExtensionData,
+}
+
+impl<'a> From<CatalogRefreshInput<'a>> for CloudCatalogRefreshInput<'a> {
+    fn from(input: CatalogRefreshInput<'a>) -> Self {
+        Self {
+            session_store: input.session_store,
+            thread_store: input.thread_store,
+        }
+    }
+}
+
 /// Input supplied when the host completes a turn.
 pub struct TurnStopInput<'a> {
     /// Store scoped to the host session runtime.
@@ -60,6 +86,8 @@ pub struct TurnErrorInput<'a> {
     pub turn_id: &'a str,
     /// Error surfaced by the host for this turn.
     pub error: CodexErrorInfo,
+    /// Original error details, including backend metadata omitted from the public category.
+    pub error_details: &'a CodexErrorDetails,
     /// Store scoped to the host session runtime.
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.

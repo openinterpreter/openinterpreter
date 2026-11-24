@@ -2,6 +2,8 @@
 //!
 //! The CLI commands are thin app-server clients: resolve a user-provided UUID or exact session
 //! name, then call the corresponding app-server RPC.
+//! Explicit remote session commands, including queue, leave authentication and execution to
+//! the selected server without initializing the caller's credentials or runtime.
 
 use std::io::IsTerminal;
 use std::io::Write;
@@ -11,6 +13,7 @@ use std::sync::Arc;
 
 use crate::Cli;
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::ThreadParamsMode;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
@@ -25,7 +28,7 @@ use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_exec_server::EnvironmentManager;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_protocol::ThreadId;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_home_dir::find_codex_home;
@@ -172,7 +175,7 @@ async fn resolve_session_target(
         &[super::resume_source_kinds(
             /*include_non_interactive*/ false,
         )],
-        /*model_provider*/ None,
+        /*model_providers*/ None,
     )
     .await?
     {
@@ -249,6 +252,26 @@ pub(super) async fn start_app_server_for_session_command(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
 
+    if let Some(endpoint) = explicit_remote_endpoint {
+        // Validate config before connecting, but leave authentication and execution
+        // to the selected server even when this caller has workload identity set.
+        launch_loader_overrides.ignore_login_requirements = true;
+        ConfigBuilder::default()
+            .codex_home(codex_home)
+            .cli_overrides(cli_kv_overrides)
+            .loader_overrides(launch_loader_overrides)
+            .strict_config(strict_config)
+            .build()
+            .await
+            .wrap_err("failed to load config.toml")?;
+        return Ok(AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            super::connect_remote_app_server(endpoint).await?,
+            ThreadParamsMode::Remote,
+        )
+        .with_remote_cwd_override(cli.cwd.clone()));
+    }
+
     let workload_identity_selected = codex_login::is_workload_identity_selected();
     let reuse_implicit_local_daemon = !cli.no_daemon
         && !workload_identity_selected
@@ -276,7 +299,7 @@ pub(super) async fn start_app_server_for_session_command(
         .clone()
         .filter(|_| app_server_target.uses_remote_workspace());
 
-    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+    let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )
@@ -300,6 +323,8 @@ pub(super) async fn start_app_server_for_session_command(
         loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     loader_overrides.ignore_login_requirements = app_server_target.uses_remote_workspace();
+    let embedded_network_policy =
+        codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
 
     let bootstrap_config = load_config_toml_with_layer_stack(
         codex_home.as_path(),
@@ -318,6 +343,7 @@ pub(super) async fn start_app_server_for_session_command(
         &app_server_target,
         &bootstrap_config,
         codex_home.as_path(),
+        &embedded_network_policy,
     )
     .await?;
 
@@ -345,7 +371,6 @@ pub(super) async fn start_app_server_for_session_command(
             model_provider,
             codex_self_exe: arg0_paths.codex_self_exe.clone(),
             codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-            main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
             show_raw_agent_reasoning: cli.oss.then_some(true),
             bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
             ..Default::default()
@@ -358,7 +383,11 @@ pub(super) async fn start_app_server_for_session_command(
         .wrap_err("failed to load configuration")?;
     let environment_manager = Arc::new(
         prepared_environment_manager
-            .build(Some(local_runtime_paths), config.http_client_factory())
+            .build(
+                Some(local_runtime_paths),
+                app_server_target
+                    .environment_http_client_factory(&config, &embedded_network_policy),
+            )
             .wrap_err("failed to initialize environment manager")?,
     );
     let mut state_db = super::init_state_db_for_app_server_target(&config, &app_server_target)
@@ -376,12 +405,15 @@ pub(super) async fn start_app_server_for_session_command(
         /*log_db*/ None,
         &mut state_db,
         environment_manager,
+        embedded_network_policy,
     )
     .await?;
-    Ok(
-        AppServerSession::new(app_server, app_server_target.thread_params_mode())
-            .with_remote_cwd_override(remote_cwd_override),
+    Ok(AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        app_server,
+        app_server_target.thread_params_mode(),
     )
+    .with_remote_cwd_override(remote_cwd_override))
 }
 
 #[cfg(test)]

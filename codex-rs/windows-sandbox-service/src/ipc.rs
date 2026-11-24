@@ -237,7 +237,7 @@ pub(crate) fn wake(pipe_name: &str, is_stopped: impl Fn() -> bool) {
                 ptr::null(),
                 filesystem::OPEN_EXISTING,
                 /*dwflagsandattributes*/ 0,
-                /*htemplatefile*/ 0,
+                ptr::null_mut(),
             )
         };
         if handle != foundation::INVALID_HANDLE_VALUE {
@@ -254,7 +254,7 @@ fn pipe_security_descriptor(sandbox_sid: &str) -> String {
 }
 
 fn handle_request(
-    pipe: HANDLE,
+    pipe: BorrowedHandle<'_>,
     authorized_process: &crate::package_identity::AuthorizedClientProcess,
     sandbox_sid: &[u8],
     shutdown: &AtomicBool,
@@ -277,7 +277,7 @@ fn handle_request(
         let mut available = 0;
         if unsafe {
             pipes::PeekNamedPipe(
-                pipe,
+                pipe.as_raw_handle(),
                 ptr::null_mut(),
                 0,
                 ptr::null_mut(),
@@ -295,7 +295,7 @@ fn handle_request(
             let mut read = 0;
             if unsafe {
                 filesystem::ReadFile(
-                    pipe,
+                    pipe.as_raw_handle(),
                     request[request_length..].as_mut_ptr(),
                     available,
                     &mut read,
@@ -339,7 +339,7 @@ fn handle_request(
         }
         crate::service::log_error(
             crate::service::EVENT_REQUEST_REJECTED,
-            &format!("Codex sandbox provisioning was rejected by administrator policy: {error}"),
+            &policy_rejection_diagnostic(&error),
         );
         return Err(error)
             .context("requested sandbox settings violate administrator-controlled machine policy");

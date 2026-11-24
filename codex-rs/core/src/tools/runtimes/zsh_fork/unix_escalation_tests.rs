@@ -11,6 +11,7 @@ use crate::guardian::GuardianReviewContext;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::tests::make_session_and_context;
 use crate::tools::runtimes::tests::test_credential_broker_network_proxy;
+use crate::tools::sandboxing::ExecApprovalRequirement;
 use anyhow::Context;
 use codex_execpolicy::Decision;
 use codex_execpolicy::Evaluation;
@@ -31,7 +32,6 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GranularApprovalConfig;
-use codex_protocol::protocol::GuardianCommandSource;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_shell_escalation::EscalationExecution;
@@ -94,6 +94,18 @@ fn denied_read_file_system_sandbox_policy() -> FileSystemSandboxPolicy {
 
 fn test_sandbox_cwd() -> AbsolutePathBuf {
     AbsolutePathBuf::try_from(host_absolute_path(&["workspace"])).unwrap()
+}
+
+#[test]
+fn intercepted_exec_prompt_user_requires_fresh_human_approval() {
+    assert!(matches!(
+        super::intercepted_exec_approval_requirement(true),
+        ExecApprovalRequirement::NeedsHumanApproval { .. }
+    ));
+    assert!(matches!(
+        super::intercepted_exec_approval_requirement(false),
+        ExecApprovalRequirement::NeedsApproval { .. }
+    ));
 }
 
 #[test]
@@ -448,7 +460,6 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
         call_id: "preapproved-additional-permissions".to_string(),
         environment_id: "local".to_string(),
-        source: GuardianCommandSource::UnifiedExec,
         tool_name: ToolName::plain("exec_command"),
         approval_policy: AskForApproval::OnRequest,
         permission_profile: permission_profile.clone(),
@@ -616,7 +627,6 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
         review_context: GuardianReviewContext::from(turn_context),
         call_id: "execve-hook-call".to_string(),
         environment_id: "local".to_string(),
-        source: GuardianCommandSource::UnifiedExec,
         tool_name: ToolName::plain("exec_command"),
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::read_only(),
@@ -827,7 +837,6 @@ prefix_rule(pattern = ["{cat_path_literal}"], decision = "allow")
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
         call_id: "deny-read-prefix-allow".to_string(),
         environment_id: "local".to_string(),
-        source: GuardianCommandSource::UnifiedExec,
         tool_name: ToolName::plain("exec_command"),
         approval_policy: AskForApproval::OnRequest,
         permission_profile,
@@ -864,7 +873,6 @@ async fn denied_reads_keep_granular_sandbox_rejection_for_escalation() -> anyhow
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
         call_id: "deny-read-granular-sandbox-reject".to_string(),
         environment_id: "local".to_string(),
-        source: GuardianCommandSource::UnifiedExec,
         tool_name: ToolName::plain("exec_command"),
         approval_policy: AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: false,

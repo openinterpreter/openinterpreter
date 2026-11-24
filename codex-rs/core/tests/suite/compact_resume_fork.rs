@@ -5,7 +5,6 @@
 //! request payload that Codex would send to the model and assert that the
 //! model-visible history matches the expected sequence of messages.
 
-use super::compact::COMPACT_WARNING_MESSAGE;
 use super::compact::FIRST_REPLY;
 use super::compact::SUMMARY_TEXT;
 use anyhow::Context;
@@ -237,7 +236,9 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
     // input after compact is a prefix of input after resume/fork
     let input_after_compact = json!(requests[requests.len() - 3]["input"]);
     let input_after_resume = json!(requests[requests.len() - 2]["input"]);
-    let input_after_fork = json!(requests[requests.len() - 1]["input"]);
+    let mut input_after_fork = json!(requests[requests.len() - 1]["input"]);
+    // The request prefix has a thread-scoped ID; retained history IDs stay unchanged.
+    input_after_fork[0]["id"] = input_after_compact[0]["id"].clone();
 
     let compact_arr = input_after_compact
         .as_array()
@@ -277,18 +278,16 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
     let summary_after_compact = extract_summary_user_text(&requests[2], SUMMARY_TEXT);
     let summary_after_resume = extract_summary_user_text(&requests[3], SUMMARY_TEXT);
     let summary_after_fork = extract_summary_user_text(&requests[4], SUMMARY_TEXT);
-    let mut expected_after_compact_user_texts =
-        vec!["hello world".to_string(), summary_after_compact];
-    expected_after_compact_user_texts.extend_from_slice(seeded_user_prefix);
+    let mut expected_after_compact_user_texts = seeded_user_prefix.to_vec();
+    expected_after_compact_user_texts.extend(["hello world".to_string(), summary_after_compact]);
     expected_after_compact_user_texts.push("AFTER_COMPACT".to_string());
     assert_eq!(
         json_message_input_texts(&requests[2], "user"),
         expected_after_compact_user_texts
     );
 
-    let mut expected_after_resume_user_texts =
-        vec!["hello world".to_string(), summary_after_resume];
-    expected_after_resume_user_texts.extend_from_slice(seeded_user_prefix);
+    let mut expected_after_resume_user_texts = seeded_user_prefix.to_vec();
+    expected_after_resume_user_texts.extend(["hello world".to_string(), summary_after_resume]);
     expected_after_resume_user_texts.push("AFTER_COMPACT".to_string());
     let after_resume_user_texts = json_message_input_texts(&requests[3], "user");
     let (after_resume_last, after_resume_prefix) = after_resume_user_texts
@@ -317,9 +316,8 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
     }
 
     let after_fork_user_texts = json_message_input_texts(&requests[4], "user");
-    let mut expected_after_fork_history_prefix =
-        vec!["hello world".to_string(), summary_after_fork];
-    expected_after_fork_history_prefix.extend_from_slice(seeded_user_prefix);
+    let mut expected_after_fork_history_prefix = seeded_user_prefix.to_vec();
+    expected_after_fork_history_prefix.extend(["hello world".to_string(), summary_after_fork]);
     expected_after_fork_history_prefix.push("AFTER_COMPACT".to_string());
     let (after_fork_last, after_fork_prefix) = after_fork_user_texts
         .split_last()
@@ -450,15 +448,19 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
         "hello world".to_string(),
         "AFTER_COMPACT".to_string(),
         "AFTER_RESUME".to_string(),
-        "AFTER_FORK".to_string(),
-        summary_after_second_compact.clone(),
     ];
     expected_after_second_compact_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_after_second_compact_user_texts.push("AFTER_COMPACT_2".to_string());
-    let mut expected_fork_local_user_texts =
-        vec!["AFTER_FORK".to_string(), summary_after_second_compact];
-    expected_fork_local_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_fork_local_user_texts.push("AFTER_COMPACT_2".to_string());
+    expected_after_second_compact_user_texts.extend([
+        "AFTER_FORK".to_string(),
+        summary_after_second_compact.clone(),
+        "AFTER_COMPACT_2".to_string(),
+    ]);
+    let mut expected_fork_local_user_texts = seeded_user_prefix.to_vec();
+    expected_fork_local_user_texts.extend([
+        "AFTER_FORK".to_string(),
+        summary_after_second_compact,
+        "AFTER_COMPACT_2".to_string(),
+    ]);
     let final_user_texts = json_message_input_texts(&requests[requests.len() - 1], "user");
     let (final_last, final_prefix) = final_user_texts
         .split_last()
@@ -653,17 +655,6 @@ async fn compact_conversation(conversation: &Arc<CodexThread>) {
         .submit(Op::Compact)
         .await
         .expect("compact conversation");
-    let warning_event = wait_for_event(conversation, |ev| {
-        matches!(
-            ev,
-            EventMsg::Warning(WarningEvent { message }) if message == COMPACT_WARNING_MESSAGE
-        )
-    })
-    .await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(conversation, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
     ThreadIdle::wait(conversation).await;
 }
@@ -687,7 +678,7 @@ async fn resume_conversation(
     let auth_manager = codex_core::test_support::auth_manager_from_auth(
         codex_login::CodexAuth::from_api_key("dummy"),
     );
-    Box::pin(manager.resume_thread_from_rollout(
+    Box::pin(manager.resume_legacy_thread_from_rollout(
         config.clone(),
         path,
         auth_manager,
@@ -706,7 +697,7 @@ async fn fork_thread(
     path: std::path::PathBuf,
     nth_user_message: usize,
 ) -> Arc<CodexThread> {
-    Box::pin(manager.fork_thread(
+    Box::pin(manager.fork_legacy_thread(
         nth_user_message,
         codex_core::StartThreadOptions::new(config.clone()),
         path,

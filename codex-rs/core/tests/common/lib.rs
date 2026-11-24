@@ -17,6 +17,7 @@ use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 pub use codex_core::test_support::TestCodexResponsesRequestKind;
 pub use codex_core::test_support::responses_metadata;
+use codex_features::Feature;
 use codex_utils_absolute_path::AbsolutePathBuf;
 pub use codex_utils_absolute_path::test_support::PathBufExt;
 pub use codex_utils_absolute_path::test_support::PathExt;
@@ -25,10 +26,17 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub mod apps_test_server;
+#[cfg(unix)]
+pub mod code_mode_host;
 pub mod context_snapshot;
+pub mod exec_server;
+pub mod guardian;
 pub mod hooks;
+pub mod network_policy_mcp;
+pub mod oauth;
 pub mod process;
 pub mod responses;
+pub mod runtime_auth;
 pub mod startup;
 pub mod streaming_sse;
 pub mod test_codex;
@@ -208,14 +216,21 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
     codex_home: &TempDir,
     cloud_config_bundle: CloudConfigBundleLoader,
 ) -> Config {
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
         .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
-        .expect("defaults for test should always succeed")
+        .expect("defaults for test should always succeed");
+    for feature in [Feature::ToolSuggest, Feature::RecommendedPlugins] {
+        config
+            .features
+            .disable(feature)
+            .expect("test config should allow disabling plugin recommendations");
+    }
+    config
 }
 
 pub fn managed_network_requirements_loader() -> CloudConfigBundleLoader {
@@ -271,6 +286,16 @@ where
     wait_for_event_with_timeout(codex, predicate, Duration::from_secs(1)).await
 }
 
+pub async fn wait_for_successful_turn(codex: &CodexThread) {
+    use codex_protocol::protocol::EventMsg;
+
+    let event = wait_for_event(codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(
+        matches!(&event, EventMsg::TurnComplete(completed) if completed.error.is_none()),
+        "turn failed: {event:?}"
+    );
+}
+
 /// Waits for a configured MCP server to finish startup and requires it to be ready.
 pub async fn wait_for_mcp_server(codex: &CodexThread, server_name: &str) -> anyhow::Result<()> {
     use codex_protocol::protocol::EventMsg;
@@ -313,7 +338,12 @@ pub async fn submit_thread_settings(
     use tokio::time::Duration;
     use tokio::time::timeout;
 
-    let submission_id = codex.submit(Op::ThreadSettings { thread_settings }).await?;
+    let submission_id = codex
+        .submit(Op::ThreadSettings {
+            thread_settings,
+            reply: None,
+        })
+        .await?;
     loop {
         let ev = timeout(Duration::from_secs(10), codex.next_event())
             .await

@@ -10,7 +10,6 @@ use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
@@ -29,7 +28,7 @@ use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -64,11 +63,10 @@ fn read_only_text_turn_with_personality(
         text_elements: Vec::new(),
     }])
     .with_thread_settings(ThreadSettingsOverrides {
-        environments: Some(local_selections(test.config.cwd.clone())),
+        environments: Some(local_requests(test.config.cwd.clone())),
         approval_policy: Some(approval_policy),
         sandbox_policy: Some(sandbox_policy),
         permission_profile,
-        personality,
         collaboration_mode: Some(CollaborationMode {
             mode: ModeKind::Default,
             settings: Settings {
@@ -81,15 +79,31 @@ fn read_only_text_turn_with_personality(
     })
 }
 
+#[test_case(None, None; "default personality")]
+#[test_case(Some("none"), None; "none without feature config")]
+#[test_case(Some("none"), Some(false); "none with removed feature disabled")]
+#[test_case(Some("none"), Some(true); "none with removed feature enabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_personality_none_sends_no_personality() -> anyhow::Result<()> {
+async fn config_personality_none_sends_no_personality(
+    personality: Option<&'static str>,
+    legacy_feature_setting: Option<bool>,
+) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
-    let mut builder = test_codex().with_model("gpt-5.5").with_config(|config| {
-        config.personality = Some(Personality::None);
-    });
+    let mut builder = test_codex()
+        .with_model("gpt-5.5")
+        .with_pre_build_hook(move |home| {
+            let mut config = String::new();
+            if let Some(personality) = personality {
+                config.push_str(&format!("personality = \"{personality}\"\n"));
+            }
+            if let Some(enabled) = legacy_feature_setting {
+                config.push_str(&format!("[features]\npersonality = {enabled}\n"));
+            }
+            std::fs::write(home.join("config.toml"), config).expect("write personality config");
+        });
     let test = builder.build(&server).await?;
 
     test.codex
@@ -135,7 +149,6 @@ async fn config_personality_none_strips_baked_personality_section(
         .with_model_info_override("gpt-5.5", |model_info| {
             if let Some(model_messages) = model_info.model_messages.as_mut() {
                 model_messages.instructions_template = Some("Base instructions\n# Personality\nBaked personality\n## Writing Style\nNested writing style\n# General\nGeneral instructions".to_string());
-                model_messages.instructions_variables = None;
             }
         })
         .with_pre_build_hook(move |home| {
@@ -265,8 +278,6 @@ async fn remote_model_template_is_sent_literally_with_personality_feature() -> a
         .await;
 
     let remote_slug = "codex-remote-default-personality";
-    let default_personality_message = "Default from remote template";
-    let friendly_personality_message = "Friendly variant";
     let instructions_template = "Base instructions\n{{ personality }}\n";
     let remote_model = ModelInfo {
         slug: remote_slug.to_string(),
@@ -289,22 +300,8 @@ async fn remote_model_template_is_sent_literally_with_personality_feature() -> a
         available_access_programs: None,
         upgrade: None,
         model_messages: Some(ModelMessages {
-            persistent_instructions: None,
-            tools: None,
             instructions_template: Some(instructions_template.to_string()),
-            instructions_variables: Some(ModelInstructionsVariables {
-                personality_default: Some(default_personality_message.to_string()),
-                personality_friendly: Some(friendly_personality_message.to_string()),
-                personality_pragmatic: Some("Pragmatic variant".to_string()),
-            }),
-            approvals: None,
-            collaboration_modes: None,
-            auto_review: None,
-            permissions: None,
-            multi_agent: None,
-            token_budget: None,
-            confirmation_policies: None,
-            guardian_v2: None,
+            ..Default::default()
         }),
         include_skills_usage_instructions: false,
         include_plugin_usage_instructions: false,
@@ -316,6 +313,7 @@ async fn remote_model_template_is_sent_literally_with_personality_feature() -> a
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(128_000),
@@ -325,7 +323,6 @@ async fn remote_model_template_is_sent_literally_with_personality_feature() -> a
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -349,28 +346,15 @@ async fn remote_model_template_is_sent_literally_with_personality_feature() -> a
     .await;
 
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
-
-    let mut builder = test_codex()
-        .with_auth(codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Personality)
-                .expect("test config should allow feature update");
-            config.model = Some(remote_slug.to_string());
-            config.personality = Some(Personality::Friendly);
-        });
-    let test = builder.build(&server).await?;
-
-    wait_for_model_available(&test.thread_manager.get_models_manager(), remote_slug).await;
+    let mut builder = test_codex().with_model(remote_slug);
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.codex
-        .start_or_steer_turn(read_only_text_turn_with_personality(
+        .start_or_steer_turn(read_only_text_turn(
             &test,
             "hello",
-            remote_slug.to_string(),
-            AskForApproval::Never,
-            Some(Personality::Friendly),
+            test.session_configured.model.clone(),
+            test.config.permissions.approval_policy.value(),
         ))
         .await?;
 

@@ -279,6 +279,8 @@ mod tests {
     fn kimi_code_request_renders_kimi_code_builtin_skills() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -318,6 +320,8 @@ mod tests {
     fn kimi_code_request_matches_current_kimi_k3_transport_options_and_tools() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -404,6 +408,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "developer".to_string(),
                     )),
@@ -416,6 +422,8 @@ mod tests {
 
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -455,6 +463,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -467,6 +477,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Glob".to_string(),
                     namespace: None,
@@ -515,6 +527,8 @@ mod tests {
     fn kimi_code_request_preserves_image_content() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -568,6 +582,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -579,6 +595,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "ReadMediaFile".to_string(),
                     namespace: None,

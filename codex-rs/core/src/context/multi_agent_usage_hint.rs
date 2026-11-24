@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// Configured multi-agent instructions emitted as a standalone developer message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8,6 +10,8 @@ pub(crate) struct MultiAgentUsageHint {
 }
 
 impl MultiAgentUsageHint {
+    pub(crate) const KIND: &str = "multi_agent.usage_hint";
+
     pub(crate) fn new(text: &str) -> Self {
         Self {
             text: text.to_string(),
@@ -17,15 +21,11 @@ impl MultiAgentUsageHint {
 
 impl ContextualUserFragment for MultiAgentUsageHint {
     fn content_kind(&self) -> ContentItemKind {
-        ContentItemKind("multi_agent.usage_hint".to_string())
+        ContentItemKind(Self::KIND.to_string())
     }
 
     fn role(&self) -> &'static str {
         "developer"
-    }
-
-    fn requires_separate_message(&self) -> bool {
-        true
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
@@ -36,7 +36,7 @@ impl ContextualUserFragment for MultiAgentUsageHint {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        self.text.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.text.clone())
     }
 }

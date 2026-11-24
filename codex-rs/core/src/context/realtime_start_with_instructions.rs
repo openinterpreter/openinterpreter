@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::REALTIME_CONVERSATION_CLOSE_TAG;
 use codex_protocol::protocol::REALTIME_CONVERSATION_OPEN_TAG;
 
@@ -36,7 +38,7 @@ impl ContextualUserFragment for RealtimeStartWithInstructions {
         )
     }
 
-    fn body(&self) -> String {
-        format!("\n{}\n", self.instructions)
+    fn body(&self) -> ContentItem {
+        input_text(format!("\n{}\n", self.instructions))
     }
 }

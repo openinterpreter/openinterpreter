@@ -37,11 +37,16 @@ import { createInterface } from "node:readline";
 
 const port = 8787;
 const origin = `http://127.0.0.1:${port}`;
-const child = spawn(process.env.OIX_BINARY ?? "interpreter",
-  ["app-server", "--listen", "stdio://"], { stdio: ["pipe", "pipe", "inherit"] });
+const child = spawn(
+  process.env.OIX_BINARY ?? "interpreter",
+  ["app-server", "--listen", "stdio://"],
+  { stdio: ["pipe", "pipe", "inherit"] },
+);
 const pending = new Map();
-let nextId = 0, threadId, active;
-const write = message => child.stdin.write(JSON.stringify(message) + "\n");
+let nextId = 0,
+  threadId,
+  active;
+const write = (message) => child.stdin.write(JSON.stringify(message) + "\n");
 function call(method, params) {
   const id = ++nextId;
   return new Promise((resolve, reject) => {
@@ -63,7 +68,9 @@ function emit(a, event) {
 }
 function fail(a, reason) {
   if (a.closed) return;
-  a.res.end(JSON.stringify({ type: "error", fatal: true, text: reason }) + "\n");
+  a.res.end(
+    JSON.stringify({ type: "error", fatal: true, text: reason }) + "\n",
+  );
   interrupt(a);
 }
 function interrupt(a) {
@@ -87,39 +94,58 @@ function notification(message) {
   if (!a.turnId) {
     const size = Buffer.byteLength(JSON.stringify(message));
     if (a.queue.length < 32 && a.queueBytes + size <= 16384) {
-      a.queue.push(message); a.queueBytes += size;
-    }
-    else fail(a, "Too many early events; turn interrupted");
+      a.queue.push(message);
+      a.queueBytes += size;
+    } else fail(a, "Too many early events; turn interrupted");
     return;
   }
   if ((p.turnId ?? p.turn?.id) !== a.turnId) return;
-  if (method === "item/agentMessage/delta") emit(a, { type: "text", text: p.delta });
+  if (method === "item/agentMessage/delta")
+    emit(a, { type: "text", text: p.delta });
   if (method === "error") emit(a, { type: "error", text: p.error.message });
   if (method === "turn/completed") {
-    emit(a, { type: "done", status: p.turn.status,
-      error: p.turn.error?.message ?? null });
+    emit(a, {
+      type: "done",
+      status: p.turn.status,
+      error: p.turn.error?.message ?? null,
+    });
     if (!a.closed) a.res.end();
     a.closed = true;
     active = undefined;
   }
 }
-createInterface({ input: child.stdout }).on("line", line => {
+createInterface({ input: child.stdout }).on("line", (line) => {
   let m;
-  try { m = JSON.parse(line); } catch { return; }
+  try {
+    m = JSON.parse(line);
+  } catch {
+    return;
+  }
   if (m.id !== undefined && m.method) {
     // This teaching example has no approval UI. Explicitly decline requests;
     // never accept one just because a browser is connected.
-    const approval = ["item/commandExecution/requestApproval",
-      "item/fileChange/requestApproval"].includes(m.method);
-    write(approval ? { id: m.id, result: { decision: "decline" } }
-      : { id: m.id, error: { code: -32601, message: "No UI for this request" } });
+    const approval = [
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+    ].includes(m.method);
+    write(
+      approval
+        ? { id: m.id, result: { decision: "decline" } }
+        : {
+            id: m.id,
+            error: { code: -32601, message: "No UI for this request" },
+          },
+    );
     if (active) emit(active, { type: "error", text: `Declined: ${m.method}` });
   } else if (m.id !== undefined) {
     const p = pending.get(m.id);
-    if (p) { pending.delete(m.id); m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result); }
+    if (p) {
+      pending.delete(m.id);
+      m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result);
+    }
   } else if (m.method) notification(m);
 });
-child.on("error", error => {
+child.on("error", (error) => {
   console.error(`Cannot launch interpreter: ${error.message}`);
   for (const p of pending.values()) p.reject(error);
   pending.clear();
@@ -135,33 +161,52 @@ child.on("exit", () => {
 // The app server requires the initialize response before initialized, then
 // thread/start before turn/start. Keep a single read-only thread in this demo.
 try {
-  await call("initialize", { clientInfo: { name: "tiny-web-chat", version: "1.0" } });
+  await call("initialize", {
+    clientInfo: { name: "tiny-web-chat", version: "1.0" },
+  });
   write({ method: "initialized" });
-  threadId = (await call("thread/start", {
-    cwd: process.cwd(), sandbox: "read-only", approvalPolicy: "on-request"
-  })).thread.id;
+  threadId = (
+    await call("thread/start", {
+      cwd: process.cwd(),
+      sandbox: "read-only",
+      approvalPolicy: "on-request",
+    })
+  ).thread.id;
 } catch (error) {
   console.error(`App server start failed: ${error.message}`);
   process.exit(1);
 }
 
 const server = createServer(async (req, res) => {
-  if (req.headers.host !== `127.0.0.1:${port}` ||
-      (req.method === "POST" && req.headers.origin !== origin)) {
-    res.writeHead(403).end(); return;
+  if (
+    req.headers.host !== `127.0.0.1:${port}` ||
+    (req.method === "POST" && req.headers.origin !== origin)
+  ) {
+    res.writeHead(403).end();
+    return;
   }
   if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8",
-      "X-Content-Type-Options": "nosniff" });
-    res.end(readFileSync(new URL("./index.html", import.meta.url))); return;
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(readFileSync(new URL("./index.html", import.meta.url)));
+    return;
   }
   if (req.method !== "POST" || req.url !== "/chat") {
-    res.writeHead(404).end(); return;
+    res.writeHead(404).end();
+    return;
   }
-  if (active) { res.writeHead(409).end("Wait for the current turn"); return; }
-  if (req.headers["content-type"] !== "text/plain" ||
-      Number(req.headers["content-length"] || 0) > 4096) {
-    res.writeHead(413).end(); return;
+  if (active) {
+    res.writeHead(409).end("Wait for the current turn");
+    return;
+  }
+  if (
+    req.headers["content-type"] !== "text/plain" ||
+    Number(req.headers["content-length"] || 0) > 4096
+  ) {
+    res.writeHead(413).end();
+    return;
   }
   const chunks = [];
   let size = 0;
@@ -171,22 +216,46 @@ const server = createServer(async (req, res) => {
       if (size > 4096) throw Error("Prompt too long");
       chunks.push(chunk);
     }
-  } catch { res.writeHead(413).end(); return; }
+  } catch {
+    res.writeHead(413).end();
+    return;
+  }
   const prompt = Buffer.concat(chunks).toString("utf8");
-  if (!prompt.trim()) { res.writeHead(400).end(); return; }
+  if (!prompt.trim()) {
+    res.writeHead(400).end();
+    return;
+  }
   // Both bodies may have started while idle; only one may reserve the turn.
-  if (active) { res.writeHead(409).end("Wait for the current turn"); return; }
-  res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8",
-    "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
-  const a = active = { res, queue: [], queueBytes: 0, bytes: 0, closed: false };
-  res.on("close", () => { if (active === a && !a.closed) interrupt(a); });
+  if (active) {
+    res.writeHead(409).end("Wait for the current turn");
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  const a = (active = {
+    res,
+    queue: [],
+    queueBytes: 0,
+    bytes: 0,
+    closed: false,
+  });
+  res.on("close", () => {
+    if (active === a && !a.closed) interrupt(a);
+  });
   try {
-    a.turnId = (await call("turn/start", {
-      threadId, input: [{ type: "text", text: prompt }]
-    })).turn.id;
+    a.turnId = (
+      await call("turn/start", {
+        threadId,
+        input: [{ type: "text", text: prompt }],
+      })
+    ).turn.id;
     if (a.closed) interrupt(a);
     for (const event of a.queue) notification(event);
-    a.queue.length = 0; a.queueBytes = 0;
+    a.queue.length = 0;
+    a.queueBytes = 0;
   } catch (error) {
     fail(a, `Turn start failed: ${error.message}`);
     active = undefined;
@@ -200,102 +269,162 @@ server.listen(port, "127.0.0.1", () => console.log(origin));
 
 ```html
 <!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Local Open Interpreter chat</title>
 <style>
-  body { max-width: 48rem; margin: 3rem auto; padding: 0 1rem;
-    font: 1rem/1.5 system-ui; color: #20242c; background: #fafafa }
-  #chat { height: min(60vh, 32rem); overflow-y: auto; overflow-anchor: none;
-    padding: 1rem; background: white; border: 1px solid #ddd; border-radius: .8rem }
-  #chat > div { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 1rem }
-  .state { color: #58606c; font-size: .85rem }
-  form { display: flex; gap: .6rem; margin-top: 1rem }
-  textarea { flex: 1; min-height: 4rem; font: inherit }
+  body {
+    max-width: 48rem;
+    margin: 3rem auto;
+    padding: 0 1rem;
+    font: 1rem/1.5 system-ui;
+    color: #20242c;
+    background: #fafafa;
+  }
+  #chat {
+    height: min(60vh, 32rem);
+    overflow-y: auto;
+    overflow-anchor: none;
+    padding: 1rem;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 0.8rem;
+  }
+  #chat > div {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-bottom: 1rem;
+  }
+  .state {
+    color: #58606c;
+    font-size: 0.85rem;
+  }
+  form {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 1rem;
+  }
+  textarea {
+    flex: 1;
+    min-height: 4rem;
+    font: inherit;
+  }
 </style>
-<h1>Local chat</h1><div id="history" class="state" aria-live="polite"></div>
+<h1>Local chat</h1>
+<div id="history" class="state" aria-live="polite"></div>
 <div id="chat" role="log" aria-live="off"></div>
-<form><textarea aria-label="Your message" maxlength="4096" required></textarea>
-  <button>Send</button></form>
+<form>
+  <textarea aria-label="Your message" maxlength="4096" required></textarea>
+  <button>Send</button>
+</form>
 <script>
-const form = document.querySelector("form"), box = document.querySelector("#chat");
-const history = document.querySelector("#history");
-const input = form.querySelector("textarea"), button = form.querySelector("button");
-const nearBottom = () => box.scrollHeight - box.scrollTop - box.clientHeight < 48;
-function newTurn(prompt) {
-  const pinned = nearBottom(), row = document.createElement("div");
-  const user = document.createElement("div"), answer = document.createElement("div");
-  const state = document.createElement("div");
-  user.textContent = `You: ${prompt}`;
-  answer.textContent = "Assistant: ";
-  state.className = "state";
-  state.textContent = "Streaming…";
-  state.setAttribute("aria-live", "polite");
-  row.append(user, answer, state);
-  box.append(row);
-  while (box.children.length > 8) {
-    const oldest = box.firstElementChild, before = box.scrollHeight;
-    const oldTop = box.scrollTop;
-    oldest.remove(); // visible window only; the app-server thread is unchanged
-    history.textContent = "Earlier visible turns trimmed (conversation stays on server).";
-    if (!pinned) box.scrollTop = Math.max(0, oldTop + box.scrollHeight - before);
-  }
-  if (pinned) box.scrollTop = box.scrollHeight;
-  return { answer, state };
-}
-form.addEventListener("submit", async event => {
-  event.preventDefault(); button.disabled = true;
-  const prompt = input.value, { answer, state } = newTurn(prompt);
-  let tail = "", trimmed = false, label = "Streaming…", frame = 0, reader;
-  function paint() {
-    if (frame) cancelAnimationFrame(frame);
-    frame = 0;
-    const pinned = nearBottom();
-    answer.textContent = `Assistant: ${trimmed ? "[Earlier answer text trimmed]\n" : ""}${tail}`;
-    state.textContent = label;
-    if (pinned) box.scrollTop = box.scrollHeight; // instant, only if following
-  }
-  const schedule = () => { if (!frame) frame = requestAnimationFrame(paint); };
-  try {
-    const response = await fetch("/chat", { method: "POST",
-      headers: { "Content-Type": "text/plain" }, body: prompt });
-    if (!response.ok) throw Error(`HTTP ${response.status}`);
-    input.value = "";
-    reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "", finished = false, fatal = false, notice = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      if (buffer.length > 70000) throw Error("Stream line too large");
-      let newline;
-      while ((newline = buffer.indexOf("\n")) >= 0) {
-        const event = JSON.parse(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-        if (event.type === "text") {
-          if (tail.length + event.text.length > 12000) trimmed = true;
-          tail = (tail + event.text).slice(-12000); // rolling visible tail
-        } else if (event.type === "error") {
-          if (event.fatal) { finished = true; fatal = true; }
-          else notice = String(event.text).slice(0, 120);
-          label = `${event.fatal ? "Interrupted" : "Notice"}: ${String(event.text).slice(0, 300)}`;
-        } else if (event.type === "done") {
-          finished = true;
-          if (!fatal) label = event.status === "completed" ?
-            `Complete${notice ? ` (notice: ${notice})` : ""}` :
-            `${event.status}: ${String(event.error ?? "no details").slice(0, 300)}`;
-        }
-        schedule(); // at most one DOM update per animation frame
-      }
+  const form = document.querySelector("form"),
+    box = document.querySelector("#chat");
+  const history = document.querySelector("#history");
+  const input = form.querySelector("textarea"),
+    button = form.querySelector("button");
+  const nearBottom = () =>
+    box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+  function newTurn(prompt) {
+    const pinned = nearBottom(),
+      row = document.createElement("div");
+    const user = document.createElement("div"),
+      answer = document.createElement("div");
+    const state = document.createElement("div");
+    user.textContent = `You: ${prompt}`;
+    answer.textContent = "Assistant: ";
+    state.className = "state";
+    state.textContent = "Streaming…";
+    state.setAttribute("aria-live", "polite");
+    row.append(user, answer, state);
+    box.append(row);
+    while (box.children.length > 8) {
+      const oldest = box.firstElementChild,
+        before = box.scrollHeight;
+      const oldTop = box.scrollTop;
+      oldest.remove(); // visible window only; the app-server thread is unchanged
+      history.textContent =
+        "Earlier visible turns trimmed (conversation stays on server).";
+      if (!pinned)
+        box.scrollTop = Math.max(0, oldTop + box.scrollHeight - before);
     }
-    if (decoder.decode() || buffer || !finished)
-      throw Error("Stream closed without a complete final event");
-  } catch (error) {
-    label = `Error: ${String(error.message).slice(0, 300)}`;
-    if (reader) await reader.cancel().catch(() => {});
-  } finally { paint(); button.disabled = false; }
-});
+    if (pinned) box.scrollTop = box.scrollHeight;
+    return { answer, state };
+  }
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    const prompt = input.value,
+      { answer, state } = newTurn(prompt);
+    let tail = "",
+      trimmed = false,
+      label = "Streaming…",
+      frame = 0,
+      reader;
+    function paint() {
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      const pinned = nearBottom();
+      answer.textContent = `Assistant: ${trimmed ? "[Earlier answer text trimmed]\n" : ""}${tail}`;
+      state.textContent = label;
+      if (pinned) box.scrollTop = box.scrollHeight; // instant, only if following
+    }
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(paint);
+    };
+    try {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: prompt,
+      });
+      if (!response.ok) throw Error(`HTTP ${response.status}`);
+      input.value = "";
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "",
+        finished = false,
+        fatal = false,
+        notice = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > 70000) throw Error("Stream line too large");
+        let newline;
+        while ((newline = buffer.indexOf("\n")) >= 0) {
+          const event = JSON.parse(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          if (event.type === "text") {
+            if (tail.length + event.text.length > 12000) trimmed = true;
+            tail = (tail + event.text).slice(-12000); // rolling visible tail
+          } else if (event.type === "error") {
+            if (event.fatal) {
+              finished = true;
+              fatal = true;
+            } else notice = String(event.text).slice(0, 120);
+            label = `${event.fatal ? "Interrupted" : "Notice"}: ${String(event.text).slice(0, 300)}`;
+          } else if (event.type === "done") {
+            finished = true;
+            if (!fatal)
+              label =
+                event.status === "completed"
+                  ? `Complete${notice ? ` (notice: ${notice})` : ""}`
+                  : `${event.status}: ${String(event.error ?? "no details").slice(0, 300)}`;
+          }
+          schedule(); // at most one DOM update per animation frame
+        }
+      }
+      if (decoder.decode() || buffer || !finished)
+        throw Error("Stream closed without a complete final event");
+    } catch (error) {
+      label = `Error: ${String(error.message).slice(0, 300)}`;
+      if (reader) await reader.cancel().catch(() => {});
+    } finally {
+      paint();
+      button.disabled = false;
+    }
+  });
 </script>
 ```
 

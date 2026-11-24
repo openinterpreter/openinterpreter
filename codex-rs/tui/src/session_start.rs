@@ -16,14 +16,17 @@ use color_eyre::eyre::WrapErr;
 
 #[derive(Clone, Copy)]
 pub(crate) enum SessionStartAction {
-    Resume(ResumeModelSettings),
+    Resume(
+        ResumeModelSettings,
+        crate::resume_permissions::ResumePermissions,
+    ),
     Fork(ForkPermissionMode),
 }
 
 impl SessionStartAction {
     pub(crate) fn verb(self) -> &'static str {
         match self {
-            Self::Resume(_) => "resume",
+            Self::Resume(..) => "resume",
             Self::Fork(_) => "fork",
         }
     }
@@ -36,7 +39,7 @@ impl SessionStartAction {
         target: &SessionTarget,
     ) -> Result<AppServerStartedThread> {
         match self {
-            Self::Resume(settings) => {
+            Self::Resume(settings, permissions) => {
                 app_server
                     .resume_thread(local_settings, config.clone(), target.thread_id, settings)
                     .await
@@ -96,7 +99,8 @@ pub(crate) async fn complete_session_start(
         UnarchiveChoice::Cancel => {
             return Ok(match app_server_target {
                 crate::AppServerTarget::LocalDaemon { .. }
-                | crate::AppServerTarget::Remote { .. } => SessionStartOutcome::CommandCenter,
+                | crate::AppServerTarget::Remote { .. }
+                | crate::AppServerTarget::Cloud => SessionStartOutcome::CommandCenter,
                 crate::AppServerTarget::Embedded => SessionStartOutcome::Exit,
             });
         }
@@ -124,6 +128,7 @@ pub(crate) async fn cancel_session_start(app_server: AppServerSession) -> AppExi
         token_usage: Default::default(),
         thread_id: None,
         resume_hint: None,
+        archive_warnings: Vec::new(),
         disconnect_info: None,
         update_action: None,
         exit_reason: ExitReason::UserRequested,

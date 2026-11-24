@@ -22,9 +22,10 @@ use crossterm::event::MouseEventKind::Up;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 
-fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
+pub(crate) fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
         spoken: false,
+        async_replies: None,
         message: message.to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -32,8 +33,12 @@ fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     })
 }
 
-fn attach_thread(app: &mut App, thread_id: ThreadId) {
+pub(crate) fn attach_thread(app: &mut App, thread_id: ThreadId) {
     app.chat_widget.handle_thread_session(ThreadSessionState {
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        daybreak_enabled: false,
+        primary_environment_cwd: None,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -51,14 +56,13 @@ fn attach_thread(app: &mut App, thread_id: ThreadId) {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
     });
 }
 
-fn buffer_text(buffer: &Buffer) -> String {
+pub(crate) fn buffer_text(buffer: &Buffer) -> String {
     buffer
         .content()
         .chunks(usize::from(buffer.area.width))
@@ -102,9 +106,11 @@ async fn list_spacing_completion_preserves_the_scrolled_reader() -> Result<()> {
     assert!(buffer_text(&before).contains("- c"));
     app.handle_consolidate_agent_message(
         &mut tui,
-        "- First item wraps onto a second row\n- b\n- c".into(),
-        app.config.cwd.to_path_buf(),
-        /*inline_visualization_context*/ None,
+        crate::history_cell::AgentMarkdownCell::new(
+            "- First item wraps onto a second row\n- b\n- c".into(),
+            app.config.cwd.as_path(),
+        ),
+        /*emitted_cells*/ 1,
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;
@@ -457,6 +463,7 @@ async fn owned_details_escape_interrupts_work_without_starting_backtrack() -> Re
             thread_id: thread_id.to_string(),
             turn: codex_app_server_protocol::Turn {
                 id: "active-turn".to_string(),
+                root_turn_id: None,
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: codex_app_server_protocol::TurnStatus::InProgress,
@@ -686,13 +693,15 @@ async fn owned_search_and_selection_consume_input_before_composer_and_backtrack(
 async fn inline_transcript_search_draws_and_escape_precedes_backtrack() -> Result<()> {
     let mut app = crate::app::test_support::make_test_app().await;
     attach_thread(&mut app, ThreadId::new());
-    app.transcript_cells = vec![user_cell("needle in history")];
+    app.transcript_cells = vec![user_cell("older NEEDLE"), user_cell("newer needle")];
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.open_transcript_overlay(&mut tui);
     for event in [
         TuiEvent::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
         TuiEvent::Paste("needle".to_string()),
+        TuiEvent::Draw,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         TuiEvent::Draw,
     ] {
         app.handle_backtrack_overlay_event(&mut tui, &mut app_server, event)
@@ -705,6 +714,48 @@ async fn inline_transcript_search_draws_and_escape_precedes_backtrack() -> Resul
         rendered.contains("enter next"),
         "search advances on the inline overlay draw path"
     );
+    app.handle_backtrack_overlay_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Key(KeyCode::Enter.into()),
+    )
+    .await?;
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.has_active_interaction() && !overlay.is_search_editing())
+    );
+    // Completing a later split answer must preserve the older, non-default hit.
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::AgentMessageCell::new(
+            vec!["Introduction".into()],
+            /*is_first_line*/ true,
+        )),
+    );
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::new_warning_event("Diagnostic".into())),
+    );
+    app.handle_consolidate_agent_message(
+        &mut tui,
+        history_cell::AgentMarkdownCell::new("Introduction and conclusion".into(), &app.config.cwd),
+        /*emitted_cells*/ 2,
+        ConsolidationScrollbackReflow::IfResizeReflowRan,
+        Some(Box::new(history_cell::AgentMessageCell::new(
+            vec!["and conclusion".into()],
+            /*is_first_line*/ false,
+        ))),
+    )?;
+    app.handle_backtrack_overlay_event(&mut tui, &mut app_server, TuiEvent::Draw)
+        .await?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    let highlighted = buffer
+        .content()
+        .iter()
+        .filter(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert_eq!(highlighted, "NEEDLE");
+    assert!(!app.backtrack.overlay_preview_active);
     app.handle_backtrack_overlay_event(
         &mut tui,
         &mut app_server,
@@ -821,7 +872,7 @@ async fn find_owns_editor_chords_without_changing_the_composer_draft() -> Result
         )
         .await?;
         assert!(!match &app.overlay {
-            Some(Overlay::Transcript(overlay)) => overlay.is_search_active(),
+            Some(Overlay::Transcript(overlay)) => overlay.is_search_editing(),
             _ => app.transcript_view.is_search_active(),
         });
         assert_eq!(
@@ -950,7 +1001,7 @@ async fn offline_backtrack_keeps_the_preview_and_draft_without_reverting() -> Re
         assert!(if owned {
             app.transcript_view.is_search_active()
         } else {
-            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_active())
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_editing())
         });
         for (key, preview_active, draft) in [
             (KeyCode::Esc, true, "offline draft"),
@@ -1183,7 +1234,7 @@ async fn find_refreshes_live_details_before_searching_the_first_query() -> Resul
     Ok(())
 }
 
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
+pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
     TuiEvent::Mouse(MouseEvent {
         kind,
         column,

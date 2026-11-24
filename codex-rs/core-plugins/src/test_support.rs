@@ -19,8 +19,8 @@ use codex_exec_server::LOCAL_FS;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_http_client::RequestBuilder;
 use codex_http_client::RouteAwareClientPool;
-use codex_http_client::RouteAwareRequestBuilder;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -33,6 +33,7 @@ use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
+use codex_runtime_agent_instance::RuntimeAuthSlot;
 use codex_skills::LoadedSkillRoot;
 use codex_skills::LoadedSkills;
 use codex_skills::SkillError;
@@ -42,6 +43,7 @@ use codex_skills::SkillRootLoadRequest;
 use codex_skills::SkillRootLoader;
 use codex_skills::parse_skill_frontmatter_metadata;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::SkillDiscoveryMode;
 use codex_utils_plugins::migrated_command_skills_root;
@@ -50,6 +52,18 @@ use toml::Value;
 
 pub(crate) const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 pub(crate) const TEST_CURATED_PLUGIN_CACHE_VERSION: &str = "01234567";
+
+#[cfg(windows)]
+/// Model redirected directories without requiring Windows symlink privileges.
+pub(crate) fn create_directory_junction(target: &Path, alias: &Path) {
+    let output = codex_utils_process::background_command("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(alias)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "mklink /J failed: {output:?}");
+}
 
 pub(crate) fn test_plugins_manager(codex_home: PathBuf) -> PluginsManager {
     PluginsManager::new(
@@ -68,6 +82,7 @@ pub(crate) fn test_plugins_manager_with_options(
         codex_home,
         restriction_product,
         test_auth_manager(auth_mode),
+        RuntimeAuthSlot::default(),
         test_skill_root_loader(),
     )
 }
@@ -81,6 +96,7 @@ pub(crate) fn test_plugins_manager_with_auth_manager(
         codex_home,
         restriction_product,
         auth_manager,
+        RuntimeAuthSlot::default(),
         test_skill_root_loader(),
     )
 }
@@ -201,9 +217,17 @@ impl SkillRootLoader<PluginSkillRoot> for TestSkillRootLoader {
                 outcome.errors.extend(snapshot.errors);
             }
             outcome.skills.sort_by(|left, right| {
-                left.name
-                    .cmp(&right.name)
-                    .then_with(|| left.path_to_skills_md.cmp(&right.path_to_skills_md))
+                left.name.cmp(&right.name).then_with(|| {
+                    left.path_to_skills_md
+                        .to_abs_path()
+                        .expect("host test skill path")
+                        .cmp(
+                            &right
+                                .path_to_skills_md
+                                .to_abs_path()
+                                .expect("host test skill path"),
+                        )
+                })
             });
             outcome
         })
@@ -261,7 +285,10 @@ fn load_test_skill_root(root: &PluginSkillRoot) -> LoadedSkillRoot {
                 });
             match parsed {
                 Ok(parsed) => {
-                    discovery_paths.insert(canonical_path.clone(), path);
+                    discovery_paths.insert(
+                        PathUri::from_abs_path(&canonical_path),
+                        PathUri::from_abs_path(&path),
+                    );
                     skills.push(SkillMetadata {
                         name: format!("{}:{}", root.plugin_namespace, parsed.name),
                         description: parsed.description,
@@ -269,7 +296,7 @@ fn load_test_skill_root(root: &PluginSkillRoot) -> LoadedSkillRoot {
                         interface: None,
                         dependencies: None,
                         policy: None,
-                        path_to_skills_md: canonical_path,
+                        path_to_skills_md: PathUri::from_abs_path(&canonical_path),
                         scope: SkillScope::User,
                         plugin_id: Some(root.plugin_identity.plugin_id.clone()),
                         remote_plugin_id: root.plugin_identity.remote_plugin_id.clone(),
@@ -303,6 +330,13 @@ pub(crate) struct RecordingHttpClientSelector {
 }
 
 impl RecordingHttpClientSelector {
+    fn record_url(&self, url: &str) {
+        match self.selected_urls.lock() {
+            Ok(mut selected_urls) => selected_urls.push(url.to_string()),
+            Err(error) => panic!("selected URL recorder lock should not be poisoned: {error}"),
+        }
+    }
+
     pub(crate) fn new() -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
         let selected_urls = Arc::new(Mutex::new(Vec::new()));
         let delegate = RouteAwareClientPool::with_chatgpt_cloudflare_cookies(
@@ -320,12 +354,26 @@ impl RecordingHttpClientSelector {
 }
 
 impl HttpClientSelector for RecordingHttpClientSelector {
-    fn request(&self, method: Method, url: &str) -> RouteAwareRequestBuilder {
-        match self.selected_urls.lock() {
-            Ok(mut selected_urls) => selected_urls.push(url.to_string()),
-            Err(error) => panic!("selected URL recorder lock should not be poisoned: {error}"),
-        }
+    fn for_current_account(&self) -> Arc<dyn HttpClientSelector> {
+        Arc::new(Self {
+            selected_urls: Arc::clone(&self.selected_urls),
+            delegate: self.delegate.for_current_account(),
+        })
+    }
+
+    fn request(&self, method: Method, url: &str) -> RequestBuilder {
+        self.record_url(url);
         self.delegate.request(method, url)
+    }
+
+    fn request_for_account(
+        &self,
+        method: Method,
+        url: &str,
+        binding: &codex_http_client::NetworkPolicy,
+    ) -> Option<RequestBuilder> {
+        self.record_url(url);
+        self.delegate.request_for_account(method, url, binding)
     }
     fn outbound_proxy_policy(&self) -> OutboundProxyPolicy {
         self.delegate.outbound_proxy_policy()
@@ -338,7 +386,9 @@ pub(crate) fn recording_remote_plugin_service_config(
     let (http_clients, selected_urls) = RecordingHttpClientSelector::new();
     (
         RemotePluginServiceConfig {
+            runtime_auth: None,
             chatgpt_base_url,
+            product_sku: crate::remote::CODEX_PRODUCT_SKU.to_string(),
             http_clients,
         },
         selected_urls,
@@ -488,6 +538,11 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
         .to_string();
     PluginsConfigInput::new(
         config_layer_stack,
+        effective_config
+            .clone()
+            .try_into::<codex_config::config_toml::ConfigToml>()
+            .unwrap()
+            .plugins,
         model_provider_id,
         feature_enabled(&effective_config, "plugins", /*default_enabled*/ true),
         feature_enabled(
@@ -497,6 +552,7 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
         ),
         "https://chatgpt.com/backend-api/".to_string(),
         test_http_client_factory(),
+        /*product_sku*/ None,
     )
 }
 

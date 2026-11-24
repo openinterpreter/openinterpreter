@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// A scheduled Kimi Code prompt re-injected into its owning thread.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,13 +51,13 @@ impl ContextualUserFragment for KimiCronFire {
         ("<cron-fire", "</cron-fire>")
     }
 
-    fn body(&self) -> String {
+    fn body(&self) -> ContentItem {
         let job_id = escape_attribute(&self.job_id);
         let cron = escape_attribute(&self.cron);
-        format!(
+        input_text(format!(
             " jobId=\"{job_id}\" cron=\"{cron}\" recurring=\"{}\" coalescedCount=\"{}\" stale=\"{}\">\n<prompt>\n{}\n</prompt>\n",
             self.recurring, self.coalesced_count, self.stale, self.prompt
-        )
+        ))
     }
 }
 

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandToolOptions {
-    pub allow_login_shell: bool,
     pub exec_permission_approvals_enabled: bool,
 }
 
@@ -16,7 +15,6 @@ pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
     create_exec_command_tool_with_environment_id(
         options,
         /*include_environment_id*/ false,
-        /*include_shell_parameter*/ true,
         /*include_windows_shell_guidance*/ cfg!(windows),
     )
 }
@@ -24,7 +22,6 @@ pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
 pub(crate) fn create_exec_command_tool_with_environment_id(
     options: CommandToolOptions,
     include_environment_id: bool,
-    include_shell_parameter: bool,
     include_windows_shell_guidance: bool,
 ) -> ToolSpec {
     let yield_time_ms_description = if cfg!(windows) {
@@ -62,23 +59,19 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
             )),
         ),
     ]);
-    if include_shell_parameter {
-        properties.insert(
-            "shell".to_string(),
-            JsonSchema::string(Some(
-                "Shell binary to launch. Defaults to the user's default shell.".to_string(),
-            )),
-        );
-    }
-    if options.allow_login_shell {
-        properties.insert(
-            "login".to_string(),
-            JsonSchema::boolean(Some(
-                "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
-                    .to_string(),
-            )),
-        );
-    }
+    properties.insert(
+        "shell".to_string(),
+        JsonSchema::string(Some(
+            "Shell binary to launch. Defaults to the user's default shell.".to_string(),
+        )),
+    );
+    properties.insert(
+        "login".to_string(),
+        JsonSchema::boolean(Some(
+            "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                .to_string(),
+        )),
+    );
     if include_environment_id {
         properties.insert(
             "environment_id".to_string(),
@@ -269,7 +262,7 @@ fn create_approval_parameters(
         let mut additional_permissions = permission_profile_schema();
         additional_permissions.description = Some(
             "Sandboxed filesystem or network access for this command; only with `sandbox_permissions: \"with_additional_permissions\"`."
-                .to_string(),
+                .into(),
         );
         properties.insert("additional_permissions".to_string(), additional_permissions);
     }
@@ -286,7 +279,7 @@ fn permission_profile_schema() -> JsonSchema {
         /*required*/ None,
         Some(false.into()),
     );
-    schema.description = Some("Filesystem or network access request.".to_string());
+    schema.description = Some("Filesystem or network access request.".into());
     schema
 }
 
@@ -301,7 +294,7 @@ fn network_permissions_schema() -> JsonSchema {
         /*required*/ None,
         Some(false.into()),
     );
-    schema.description = Some("Network access request.".to_string());
+    schema.description = Some("Network access request.".into());
     schema
 }
 
@@ -332,7 +325,7 @@ fn file_system_permissions_schema() -> JsonSchema {
         /*required*/ None,
         Some(false.into()),
     );
-    schema.description = Some("Filesystem access request.".to_string());
+    schema.description = Some("Filesystem access request.".into());
     schema
 }
 

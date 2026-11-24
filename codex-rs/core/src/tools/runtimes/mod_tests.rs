@@ -21,6 +21,7 @@ use codex_network_proxy::PROXY_ENV_KEYS;
 use codex_network_proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::sandbox::SandboxOverride;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -119,6 +120,7 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
     let permissions = PermissionProfile::Disabled;
     let manager = SandboxManager::new();
     let attempt = SandboxAttempt {
+        sandbox_override: SandboxOverride::NoOverride,
         sandbox: SandboxType::None,
         sandbox_requested: false,
         permissions: &permissions,
@@ -145,6 +147,7 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
             ),
             /*environment_id*/ None,
         )
+        .await
         .expect("prepare exec request");
 
     assert_eq!(exec_request.cwd, PathUri::from_abs_path(&command_cwd));
@@ -247,56 +250,6 @@ fn runtime_path_prepends_ignores_empty_path_entry() {
         runtime_path_prepends,
         RuntimePathPrepends::default(),
         "empty runtime PATH prepend should not be recorded for snapshot replay"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn apply_zsh_fork_path_prepend_uses_shell_parent() {
-    let mut env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
-    let mut runtime_path_prepends = RuntimePathPrepends::default();
-
-    apply_zsh_fork_path_prepend(
-        &mut env,
-        &mut runtime_path_prepends,
-        PathBuf::from("/package/codex-resources/zsh/bin/zsh").as_path(),
-    );
-
-    let expected = "/package/codex-resources/zsh/bin:/usr/bin:/bin";
-    assert_eq!(env.get("PATH").map(String::as_str), Some(expected));
-    assert_eq!(
-        runtime_path_prepends,
-        RuntimePathPrepends {
-            entries: vec!["/package/codex-resources/zsh/bin".to_string()]
-        }
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn apply_zsh_fork_path_prepend_moves_existing_shell_parent_to_front() {
-    let mut env = HashMap::from([(
-        "PATH".to_string(),
-        "/usr/bin:/package/codex-resources/zsh/bin:/bin:/package/codex-resources/zsh/bin"
-            .to_string(),
-    )]);
-    let mut runtime_path_prepends = RuntimePathPrepends::default();
-
-    apply_zsh_fork_path_prepend(
-        &mut env,
-        &mut runtime_path_prepends,
-        PathBuf::from("/package/codex-resources/zsh/bin/zsh").as_path(),
-    );
-
-    assert_eq!(
-        env.get("PATH").map(String::as_str),
-        Some("/package/codex-resources/zsh/bin:/usr/bin:/bin")
-    );
-    assert_eq!(
-        runtime_path_prepends,
-        RuntimePathPrepends {
-            entries: vec!["/package/codex-resources/zsh/bin".to_string()]
-        }
     );
 }
 
@@ -549,7 +502,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_codex_metadata_from_env() {
     let snapshot_path = dir.path().join("snapshot.sh");
     std::fs::write(
         &snapshot_path,
-        "# Snapshot file\nexport CODEX_THREAD_ID='parent-thread'\nexport CODEX_VERSION='old-version'\n",
+        "# Snapshot file\nexport CODEX_THREAD_ID='parent-thread'\nexport CODEX_TOOL_CALL_ID='parent-call'\nexport CODEX_VERSION='old-version'\n",
     )
     .expect("write snapshot");
     let (session_shell, shell_snapshot) =
@@ -557,10 +510,12 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_codex_metadata_from_env() {
     let command = vec![
         "/bin/bash".to_string(),
         "-lc".to_string(),
-        "printf '%s|%s' \"$CODEX_THREAD_ID\" \"$CODEX_VERSION\"".to_string(),
+        "printf '%s|%s|%s' \"$CODEX_THREAD_ID\" \"$CODEX_TOOL_CALL_ID\" \"$CODEX_VERSION\""
+            .to_string(),
     ];
     let env = HashMap::from([
         ("CODEX_THREAD_ID".to_string(), "nested-thread".to_string()),
+        ("CODEX_TOOL_CALL_ID".to_string(), "nested-call".to_string()),
         (
             "CODEX_VERSION".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
@@ -583,7 +538,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_codex_metadata_from_env() {
     assert!(output.status.success(), "command failed: {output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        concat!("nested-thread|", env!("CARGO_PKG_VERSION")),
+        concat!("nested-thread|nested-call|", env!("CARGO_PKG_VERSION")),
     );
 }
 
@@ -625,21 +580,21 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_permission_profile_from_env() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "current-profile\n");
 }
 
-#[test]
-fn maybe_wrap_shell_lc_with_snapshot_unsets_absent_permission_profile() {
-    let dir = tempdir().expect("create temp dir");
+#[test_case::test_case(CODEX_PERMISSION_PROFILE_ENV_VAR; "permission profile")]
+#[test_case::test_case(CODEX_TOOL_CALL_ID_ENV_VAR; "tool call ID")]
+fn maybe_wrap_shell_lc_with_snapshot_unsets_absent_metadata(key: &str) -> anyhow::Result<()> {
+    let dir = tempdir()?;
     let snapshot_path = dir.path().join("snapshot.sh");
     std::fs::write(
         &snapshot_path,
-        "# Snapshot file\nexport CODEX_PERMISSION_PROFILE='stale-profile'\n",
-    )
-    .expect("write snapshot");
+        format!("# Snapshot file\nexport {key}='stale-value'\n"),
+    )?;
     let (session_shell, shell_snapshot) =
         shell_with_snapshot(ShellType::Bash, "/bin/bash", snapshot_path.abs());
     let command = vec![
         "/bin/bash".to_string(),
         "-lc".to_string(),
-        "printenv CODEX_PERMISSION_PROFILE".to_string(),
+        format!("printenv {key}"),
     ];
     let rewritten = maybe_wrap_shell_lc_with_snapshot(
         &command,
@@ -651,12 +606,12 @@ fn maybe_wrap_shell_lc_with_snapshot_unsets_absent_permission_profile() {
     );
     let output = Command::new(&rewritten[0])
         .args(&rewritten[1..])
-        .env_remove(CODEX_PERMISSION_PROFILE_ENV_VAR)
-        .output()
-        .expect("run rewritten command");
+        .env_remove(key)
+        .output()?;
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
+    Ok(())
 }
 
 #[test]
@@ -1299,7 +1254,7 @@ async fn snapshot_wrapper_replays_dummy_and_preserves_unbrokered_credentials() -
         let system_startup_dir = dir.path().join("system-startup");
         std::fs::create_dir(&system_startup_dir)?;
         let system_startup_zsh = system_startup_dir.join("zsh");
-        std::fs::write(
+        codex_utils_cargo_bin::write_executable(
             &system_startup_zsh,
             "#!/bin/sh\nexport OPENAI_API_KEY='sk-system-startup-secret'\nexport AUTH_HEADER='Bearer sk-system-startup-secret'\nexec /bin/zsh -ax \"$@\"\n",
         )?;
@@ -1757,56 +1712,6 @@ fn run_snapshot_path_probe_with_runtime_path_prepend(
         String::from_utf8_lossy(&output.stdout).into_owned(),
         package_path_dir,
     ))
-}
-
-#[cfg(unix)]
-#[test]
-fn maybe_wrap_shell_lc_with_snapshot_preserves_zsh_fork_path_prepend() {
-    let dir = tempdir().expect("create temp dir");
-    let snapshot_path = dir.path().join("snapshot.sh");
-    std::fs::write(
-        &snapshot_path,
-        "# Snapshot file\nexport PATH='/snapshot/bin'\n",
-    )
-    .expect("write snapshot");
-    let (session_shell, shell_snapshot) =
-        shell_with_snapshot(ShellType::Bash, "/bin/bash", snapshot_path.abs());
-    let command = vec![
-        "/bin/bash".to_string(),
-        "-lc".to_string(),
-        "printf '%s' \"$PATH\"".to_string(),
-    ];
-    let zsh_path = dir
-        .path()
-        .join("codex-resources")
-        .join("zsh")
-        .join("bin")
-        .join("zsh");
-    let zsh_bin_dir = zsh_path.parent().expect("zsh path should have parent");
-    let mut env = HashMap::from([("PATH".to_string(), "/worktree/bin".to_string())]);
-    let explicit_env_overrides = HashMap::new();
-    let mut runtime_path_prepends = RuntimePathPrepends::default();
-    apply_zsh_fork_path_prepend(&mut env, &mut runtime_path_prepends, zsh_path.as_path());
-    let rewritten = maybe_wrap_shell_lc_with_snapshot(
-        &command,
-        &session_shell,
-        Some(&shell_snapshot),
-        &explicit_env_overrides,
-        &env,
-        &runtime_path_prepends,
-    );
-    let output = Command::new(&rewritten[0])
-        .args(&rewritten[1..])
-        .env("PATH", env.get("PATH").expect("PATH should be set"))
-        .output()
-        .expect("run rewritten command");
-
-    assert!(output.status.success(), "command failed: {output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("{}:/snapshot/bin", zsh_bin_dir.display()),
-        "zsh fork path prepend should replay ahead of snapshot PATH"
-    );
 }
 
 #[test]

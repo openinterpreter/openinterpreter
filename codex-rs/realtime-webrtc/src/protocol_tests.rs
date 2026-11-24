@@ -26,3 +26,44 @@ fn signaling_bounds_apply_to_untrusted_wire_input() {
         assert_eq!(error.to_string(), "invalid voice frame");
     }
 }
+
+#[test]
+fn audio_device_selection_and_enumeration_roundtrip_strictly() {
+    let selection = AudioDeviceSelection {
+        microphone: Some("synthetic-input".into()),
+        speaker: Some("synthetic-output".into()),
+        channel: Some(vec![std::num::NonZeroU16::new(1).unwrap()]),
+    };
+    for message in [
+        Message::ListDevices {
+            kind: AudioDeviceKind::Input,
+        },
+        Message::DeviceList {
+            devices: vec![AudioDevice {
+                name: "synthetic-input".into(),
+                channels: 2,
+                is_default: true,
+            }],
+        },
+        Message::OpenDevices { selection },
+    ] {
+        assert_eq!(
+            decode_frame(&encode_frame(&message).unwrap()).unwrap(),
+            Some(message)
+        );
+    }
+    assert!(
+        serde_json::from_value::<Message>(serde_json::json!({
+            "type": "openDevices",
+            "selection": {"channel": [0]}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<Message>(serde_json::json!({
+            "type": "openDevices",
+            "selection": {"unknownDeviceField": "ignored"}
+        }))
+        .is_err()
+    );
+}

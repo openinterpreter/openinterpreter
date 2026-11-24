@@ -25,4 +25,5 @@ codex-utils-template = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+codex-protocol-test-support = { workspace = true }
 pretty_assertions = { workspace = true }

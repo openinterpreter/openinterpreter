@@ -1,5 +1,3 @@
-use crate::context::GuardianContextMode;
-use crate::context::GuardianReviewEvidence;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -66,7 +64,7 @@ impl RequestUserInputHandler {
             }
         };
 
-        if turn.session_source.is_non_root_agent() {
+        if turn.root_capabilities_restricted {
             return Err(FunctionCallError::RespondToModel(
                 "request_user_input can only be used by the root thread".to_string(),
             ));
@@ -102,18 +100,10 @@ impl RequestUserInputHandler {
                 "failed to serialize {REQUEST_USER_INPUT_TOOL_NAME} response: {err}"
             ))
         })?;
+        // Persist host-accepted answers even when an older reviewer checkpoint
+        // still needs compatibility review. The durable answer, not a legacy
+        // thread-local buffer, is the authorization source after resumption.
         if turn.config.features.enabled(Feature::GuardianApproval) {
-            let history = session.conversation_history_snapshot().await;
-            session
-                .services
-                .thread_extension_data
-                .get_or_init(GuardianReviewEvidence::default)
-                .record_user_input(history.as_ref(), &call_id, &questions, &response);
-        }
-        // Capture follows the session flag even while an older checkpoint uses legacy review.
-        if turn.config.features.enabled(Feature::GuardianApproval)
-            && session.guardian_context_mode == GuardianContextMode::ThreadOwned
-        {
             let user_input = questions
                 .iter()
                 .filter_map(|question| {
@@ -151,7 +141,7 @@ impl RequestUserInputHandler {
                             call_id,
                             questions: user_input,
                         },
-                        acceptance_order: accepted.acceptance_order,
+                        acceptance_order: Some(accepted.acceptance_order),
                     })
                     .await;
             }

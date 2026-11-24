@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::process_telemetry::ProcessTelemetry;
 use crate::process_telemetry::ProcessTelemetryEvent;
 use codex_exec_server_protocol::JSONRPCErrorError;
+use codex_exec_server_protocol::ProcessStartErrorData;
 use codex_network_proxy::NetworkPolicyAuditEvent;
 use codex_network_proxy::NetworkPolicyAuditObserver;
 use codex_network_proxy::NetworkProtocol;
@@ -19,6 +20,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::shell_environment;
+use codex_protocol::shell_environment::CODEX_THREAD_ID_ENV_VAR;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::is_likely_sandbox_denied;
 use codex_utils_pty::ExecCommandSession;
@@ -40,13 +42,14 @@ use crate::ExecProcessEvent;
 use crate::ExecProcessEventReceiver;
 use crate::ExecProcessFuture;
 use crate::ExecServerError;
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::ProcessId;
 use crate::StartedExecProcess;
 use crate::network_policy_decisions::network_policy_decider;
 use crate::process::ExecProcessEventLog;
 use crate::process::sandbox_type_from_protocol;
 use crate::process_sandbox::prepare_exec_request_with_telemetry;
+use crate::protocol::ByteChunk;
 use crate::protocol::EXEC_CLOSED_METHOD;
 use crate::protocol::ExecClosedNotification;
 use crate::protocol::ExecEnvPolicy;
@@ -81,6 +84,7 @@ use crate::rpc_server_requests::RpcServerRequestSender;
 use crate::shell_snapshot::CapturePurpose;
 use crate::telemetry::ExecServerTelemetry;
 use crate::telemetry::ProcessMetricGuard;
+use crate::telemetry::record_recovery_retention_expired;
 
 const RETAINED_OUTPUT_BYTES_PER_PROCESS: usize = 1024 * 1024;
 // Each process/read chunk needs four JSON values. Keep retained replay below the
@@ -95,19 +99,12 @@ const EXITED_PROCESS_RETENTION: Duration = Duration::from_millis(25);
 #[cfg(not(test))]
 const EXITED_PROCESS_RETENTION: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
-struct RetainedOutputChunk {
-    seq: u64,
-    stream: ExecOutputStream,
-    chunk: Vec<u8>,
-}
-
 struct RunningProcess {
     session: ExecCommandSession,
     tty: bool,
     pipe_stdin: bool,
     accepted_stdin_write_ids: Arc<Mutex<AcceptedStdinWriteIds>>,
-    output: VecDeque<RetainedOutputChunk>,
+    output: VecDeque<ProcessOutputChunk>,
     retained_bytes: usize,
     next_seq: u64,
     exit_code: Option<i32>,
@@ -166,6 +163,8 @@ struct Inner {
     notifications: std::sync::RwLock<Option<RpcNotificationSender>>,
     requests: Arc<std::sync::RwLock<Option<RpcServerRequestSender>>>,
     processes: Mutex<HashMap<ProcessId, ProcessEntry>>,
+    rpc_output_retention: Option<Duration>,
+    credential_brokers: codex_network_proxy::RemoteCredentialBrokerCache,
     #[cfg(unix)]
     shell_snapshots: crate::shell_snapshot::ShellSnapshotCache,
     telemetry: ExecServerTelemetry,
@@ -174,7 +173,7 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct LocalProcess {
     inner: Arc<Inner>,
-    runtime_paths: Option<ExecServerRuntimePaths>,
+    runtime_paths: Option<ExecServerRuntimeOptions>,
 }
 
 struct LocalExecProcess {
@@ -191,11 +190,11 @@ impl Default for LocalProcess {
 }
 
 impl LocalProcess {
-    pub(crate) fn with_local_runtime_paths(runtime_paths: ExecServerRuntimePaths) -> Self {
+    pub(crate) fn with_local_runtime_paths(runtime_paths: ExecServerRuntimeOptions) -> Self {
         Self::with_discarded_notifications(Some(runtime_paths))
     }
 
-    fn with_discarded_notifications(runtime_paths: Option<ExecServerRuntimePaths>) -> Self {
+    fn with_discarded_notifications(runtime_paths: Option<ExecServerRuntimeOptions>) -> Self {
         let (outgoing_tx, mut outgoing_rx) =
             mpsc::channel::<RpcServerOutboundMessage>(NOTIFICATION_CHANNEL_CAPACITY);
         tokio::spawn(async move { while outgoing_rx.recv().await.is_some() {} });
@@ -203,21 +202,29 @@ impl LocalProcess {
             RpcNotificationSender::new(outgoing_tx),
             ExecServerTelemetry::default(),
             runtime_paths,
+            /*rpc_output_retention*/ None,
         )
     }
 
     pub(crate) fn new(
         notifications: RpcNotificationSender,
         telemetry: ExecServerTelemetry,
-        runtime_paths: ExecServerRuntimePaths,
+        runtime_paths: ExecServerRuntimeOptions,
+        output_retention: Duration,
     ) -> Self {
-        Self::with_runtime_paths(notifications, telemetry, Some(runtime_paths))
+        Self::with_runtime_paths(
+            notifications,
+            telemetry,
+            Some(runtime_paths),
+            Some(output_retention),
+        )
     }
 
     fn with_runtime_paths(
         notifications: RpcNotificationSender,
         telemetry: ExecServerTelemetry,
-        runtime_paths: Option<ExecServerRuntimePaths>,
+        runtime_paths: Option<ExecServerRuntimeOptions>,
+        rpc_output_retention: Option<Duration>,
     ) -> Self {
         let requests = notifications.request_sender();
         Self {
@@ -225,6 +232,8 @@ impl LocalProcess {
                 notifications: std::sync::RwLock::new(Some(notifications)),
                 requests: Arc::new(std::sync::RwLock::new(Some(requests))),
                 processes: Mutex::new(HashMap::new()),
+                rpc_output_retention,
+                credential_brokers: codex_network_proxy::RemoteCredentialBrokerCache::default(),
                 #[cfg(unix)]
                 shell_snapshots: crate::shell_snapshot::ShellSnapshotCache::default(),
                 telemetry,
@@ -373,19 +382,22 @@ impl LocalProcess {
             self.runtime_paths.as_ref(),
             network_policy_decider,
             network_policy_audit_observer,
+            &self.inner.credential_brokers,
             &telemetry,
         )
         .await?;
         #[cfg(unix)]
         let mut prepared = prepared;
         #[cfg(unix)]
-        self.inner
+        let snapshot_file = self
+            .inner
             .shell_snapshots
             .prepare(
                 &params,
                 &mut prepared,
                 &self.inner.telemetry,
                 CapturePurpose::Execution,
+                &self.inner.credential_brokers,
             )
             .await?;
         if prepared.command.is_empty() {
@@ -413,6 +425,13 @@ impl LocalProcess {
             );
         }
 
+        #[cfg(unix)]
+        let inherited_fds = snapshot_file
+            .iter()
+            .map(std::os::fd::AsRawFd::as_raw_fd)
+            .collect::<Vec<_>>();
+        #[cfg(not(unix))]
+        let inherited_fds = Vec::new();
         let spawned_result = codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
             command: &prepared.command,
             cwd: prepared.cwd.as_path(),
@@ -422,9 +441,11 @@ impl LocalProcess {
             windows_sandbox: prepared.windows_sandbox_spawn_request(),
             tty: params.tty,
             stdin_open: params.tty || params.pipe_stdin,
-            inherited_fds: &[],
+            inherited_fds: codex_utils_pty::ChildFds::Attached(&inherited_fds),
         })
         .await;
+        #[cfg(unix)]
+        drop(snapshot_file);
         let spawned = match spawned_result {
             Ok(spawned) => spawned,
             Err(err) => {
@@ -436,7 +457,17 @@ impl LocalProcess {
                 ) {
                     process_map.remove(&process_id);
                 }
-                return Err(internal_error(err.to_string()));
+                let io_error = err
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+                let kind = match io_error.map(std::io::Error::kind) {
+                    Some(std::io::ErrorKind::NotFound) => ProcessStartErrorData::SpawnNotFound,
+                    Some(std::io::ErrorKind::PermissionDenied) => {
+                        ProcessStartErrorData::SpawnPermissionDenied
+                    }
+                    _ => ProcessStartErrorData::SpawnFailed,
+                };
+                return Err(kind.attach_to(internal_error(err.to_string())));
             }
         };
         let metrics = self.inner.telemetry.process_started(&process_id);
@@ -568,16 +599,12 @@ impl LocalProcess {
                 let mut total_bytes = 0;
                 let mut next_seq = process.next_seq;
                 for retained in process.output.iter().filter(|chunk| chunk.seq > after_seq) {
-                    let chunk_len = retained.chunk.len();
+                    let chunk_len = retained.chunk.0.len();
                     if !chunks.is_empty() && total_bytes + chunk_len > max_bytes {
                         break;
                     }
                     total_bytes += chunk_len;
-                    chunks.push(ProcessOutputChunk {
-                        seq: retained.seq,
-                        stream: retained.stream,
-                        chunk: retained.chunk.clone().into(),
-                    });
+                    chunks.push(retained.clone());
                     next_seq = retained.seq + 1;
                     if total_bytes >= max_bytes {
                         break;
@@ -751,7 +778,30 @@ fn child_env(params: &ExecParams) -> HashMap<String, String> {
     };
     env.remove(crate::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR);
     env.retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
+    apply_exec_metadata(&mut env, params.metadata.as_ref());
     env
+}
+
+pub(crate) fn apply_exec_metadata(
+    env: &mut HashMap<String, String>,
+    metadata: Option<&crate::protocol::ExecMetadata>,
+) {
+    if let Some(metadata) = metadata {
+        #[cfg(windows)]
+        env.retain(|name, _| !name.eq_ignore_ascii_case(CODEX_THREAD_ID_ENV_VAR));
+        match metadata.thread_id {
+            Some(thread_id) => {
+                env.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
+            }
+            None => {
+                env.remove(CODEX_THREAD_ID_ENV_VAR);
+            }
+        }
+    }
+    shell_environment::set_tool_call_id_env_var(
+        env,
+        metadata.and_then(|metadata| metadata.tool_call_id.as_deref()),
+    );
 }
 
 pub(crate) fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvironmentPolicy {
@@ -814,6 +864,7 @@ impl ExecBackend for LocalProcess {
                 self.runtime_paths.as_ref(),
                 /*network_policy_decider*/ None,
                 /*network_policy_audit_observer*/ None,
+                &self.inner.credential_brokers,
                 &ProcessTelemetry::default(),
             )
             .await
@@ -825,8 +876,10 @@ impl ExecBackend for LocalProcess {
                     &mut prepared,
                     &self.inner.telemetry,
                     CapturePurpose::Prewarm,
+                    &self.inner.credential_brokers,
                 )
                 .await
+                .map(|_| ())
                 .map_err(map_handler_error)
         })
     }
@@ -973,6 +1026,7 @@ async fn stream_output(
 ) {
     while let Some(chunk) = receiver.recv().await {
         let _chunk_len = chunk.len();
+        let chunk = ByteChunk::from(chunk);
         let notification = {
             let mut processes = inner.processes.lock().await;
             let Some(entry) = processes.get_mut(&process_id) else {
@@ -983,26 +1037,19 @@ async fn stream_output(
             };
             let seq = process.next_seq;
             process.next_seq += 1;
-            process.retained_bytes += chunk.len();
-            process.output.push_back(RetainedOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.clone(),
-            });
+            process.retained_bytes += chunk.0.len();
+            let output = ProcessOutputChunk { seq, stream, chunk };
+            process.output.push_back(output.clone());
             while process.retained_bytes > RETAINED_OUTPUT_BYTES_PER_PROCESS
                 || process.output.len() > RETAINED_OUTPUT_CHUNKS_PER_PROCESS
             {
                 let Some(evicted) = process.output.pop_front() else {
                     break;
                 };
-                process.retained_bytes = process.retained_bytes.saturating_sub(evicted.chunk.len());
+                process.retained_bytes =
+                    process.retained_bytes.saturating_sub(evicted.chunk.0.len());
             }
             let _ = process.wake_tx.send(seq);
-            let output = ProcessOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.into(),
-            };
             process
                 .events
                 .publish(ExecProcessEvent::Output(output.clone()));
@@ -1076,11 +1123,11 @@ fn watch_exit(
                     for chunk in &process.output {
                         match chunk.stream {
                             ExecOutputStream::Stdout | ExecOutputStream::Pty => {
-                                stdout.extend_from_slice(&chunk.chunk);
+                                stdout.extend_from_slice(&chunk.chunk.0);
                             }
-                            ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk),
+                            ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk.0),
                         }
-                        aggregated.extend_from_slice(&chunk.chunk);
+                        aggregated.extend_from_slice(&chunk.chunk.0);
                     }
                     let exec_output = ExecToolCallOutput {
                         exit_code,
@@ -1187,17 +1234,31 @@ async fn maybe_emit_closed(process_id: ProcessId, inner: Arc<Inner>) {
 
     output_notify.notify_waiters();
     let cleanup_process_id = process_id.clone();
-    let cleanup_inner = Arc::clone(&inner);
+    let cleanup_inner = Arc::downgrade(&inner);
+    let retention = inner
+        .rpc_output_retention
+        .unwrap_or(EXITED_PROCESS_RETENTION);
     tokio::spawn(async move {
-        tokio::time::sleep(EXITED_PROCESS_RETENTION).await;
-        let mut processes = cleanup_inner.processes.lock().await;
-        match processes.entry(cleanup_process_id) {
-            Entry::Occupied(entry) => {
-                if matches!(entry.get(), ProcessEntry::Running(process) if process.closed) {
-                    entry.remove();
-                }
+        tokio::time::sleep(retention).await;
+        let Some(cleanup_inner) = cleanup_inner.upgrade() else {
+            return;
+        };
+        {
+            let mut processes = cleanup_inner.processes.lock().await;
+            let Entry::Occupied(entry) = processes.entry(cleanup_process_id) else {
+                return;
+            };
+            if !matches!(entry.get(), ProcessEntry::Running(process)
+                if process.closed && Arc::ptr_eq(&process.output_notify, &output_notify))
+            {
+                return;
             }
-            Entry::Vacant(_) => {}
+            entry.remove();
+        }
+        if cleanup_inner.rpc_output_retention.is_some()
+            && notification_sender(&cleanup_inner).is_none()
+        {
+            record_recovery_retention_expired("closed_output_timer", retention);
         }
     });
 
@@ -1251,6 +1312,20 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     use crate::protocol::NetworkPolicyRequestResponse;
 
+    #[cfg(target_os = "linux")]
+    #[ctor::ctor]
+    fn initialize_spawn_helper() {
+        use std::os::unix::ffi::OsStringExt;
+        let command_line = std::fs::read("/proc/self/cmdline").expect("test command line");
+        codex_utils_pty::init_spawn_helper(
+            command_line
+                .strip_suffix(&[0])
+                .unwrap_or(&command_line)
+                .split(|byte| *byte == 0)
+                .map(|arg| std::ffi::OsString::from_vec(arg.to_vec())),
+        );
+    }
+
     fn test_exec_params(env: HashMap<String, String>) -> ExecParams {
         ExecParams {
             metadata: None,
@@ -1279,6 +1354,7 @@ mod tests {
             RpcNotificationSender::new(outgoing_tx),
             ExecServerTelemetry::default(),
             /*runtime_paths*/ None,
+            /*rpc_output_retention*/ None,
         );
         let proxy_config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
             enabled: true,
@@ -1388,6 +1464,7 @@ mod tests {
                 RpcNotificationSender::new(outgoing_tx),
                 telemetry,
                 /*runtime_paths*/ None,
+                /*rpc_output_retention*/ None,
             ),
             metrics,
             exporter,
@@ -1523,9 +1600,14 @@ mod tests {
 
     #[test]
     fn child_env_applies_policy_then_overlay() {
+        let thread_id =
+            codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")
+                .expect("thread id");
         let mut params = test_exec_params(HashMap::from([
             ("OVERLAY".to_string(), "overlay".to_string()),
             ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+            ("CODEX_THREAD_ID".into(), "overlay-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "overlay-call".into()),
             (
                 "openai_identity_token_file".to_string(),
                 "/run/identity-token".to_string(),
@@ -1538,19 +1620,89 @@ mod tests {
             r#set: HashMap::from([
                 ("POLICY_SET".to_string(), "policy".to_string()),
                 ("OpenAI_Federation_Rule_Id".to_string(), "rule".to_string()),
+                ("CODEX_THREAD_ID".into(), "policy-thread".into()),
+                ("CODEX_TOOL_CALL_ID".into(), "policy-call".into()),
             ]),
             include_only: Vec::new(),
+        });
+        params.metadata = Some(crate::protocol::ExecMetadata {
+            thread_id: Some(thread_id),
+            tool_call_id: Some("current-call".into()),
         });
 
         let mut expected = HashMap::from([
             ("OVERLAY".to_string(), "overlay".to_string()),
             ("POLICY_SET".to_string(), "overlay-wins".to_string()),
+            ("CODEX_THREAD_ID".into(), thread_id.to_string()),
+            ("CODEX_TOOL_CALL_ID".into(), "current-call".into()),
         ]);
         if cfg!(target_os = "windows") {
             expected.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
         }
 
         assert_eq!(child_env(&params), expected);
+    }
+
+    #[test]
+    fn child_env_partial_metadata_removes_stale_counterpart() {
+        let thread_id =
+            codex_protocol::ThreadId::from_string("019d25f0-6728-7ce2-908f-c3c187323e5b")
+                .expect("thread id");
+        for (thread_id, call_id) in [
+            (Some(thread_id), None),
+            (None, Some("exec-call-only")),
+            (None, None),
+        ] {
+            let mut params = test_exec_params(HashMap::from([
+                ("CODEX_THREAD_ID".into(), "stale-thread".into()),
+                ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+                ("codex_thread_id".into(), "lowercase-thread".into()),
+                ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+                ("OTHER".into(), "unchanged".into()),
+            ]));
+            params.metadata = Some(crate::protocol::ExecMetadata {
+                thread_id,
+                tool_call_id: call_id.map(str::to_string),
+            });
+
+            let mut expected = HashMap::from([("OTHER".into(), "unchanged".into())]);
+            #[cfg(not(windows))]
+            expected.insert("Codex_Thread_Id".into(), "mixed-case-thread".into());
+            #[cfg(not(windows))]
+            expected.insert("codex_thread_id".into(), "lowercase-thread".into());
+            if let Some(thread_id) = thread_id {
+                expected.insert("CODEX_THREAD_ID".into(), thread_id.to_string());
+            }
+            if let Some(call_id) = call_id {
+                expected.insert("CODEX_TOOL_CALL_ID".into(), call_id.to_string());
+            }
+            assert_eq!(
+                child_env(&params),
+                expected,
+                "metadata: {:?}",
+                params.metadata
+            );
+        }
+    }
+
+    #[test]
+    fn child_env_without_metadata_preserves_thread_only_context() {
+        let params = test_exec_params(HashMap::from([
+            ("CODEX_THREAD_ID".into(), "prewarm-thread".into()),
+            ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+            ("CODEX_TOOL_CALL_ID".into(), "stale-call".into()),
+            ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+        ]));
+
+        assert_eq!(
+            child_env(&params),
+            HashMap::from([
+                ("CODEX_THREAD_ID".into(), "prewarm-thread".into()),
+                ("Codex_Thread_Id".into(), "mixed-case-thread".into()),
+                #[cfg(not(windows))]
+                ("Codex_Tool_Call_Id".into(), "mixed-case-call".into()),
+            ]),
+        );
     }
 
     #[tokio::test]
@@ -1709,10 +1861,10 @@ mod tests {
                 panic!("process should be running");
             };
             running.output = (1..=retained_chunk_count)
-                .map(|seq| RetainedOutputChunk {
+                .map(|seq| ProcessOutputChunk {
                     seq,
                     stream: ExecOutputStream::Stdout,
-                    chunk: vec![b'x'],
+                    chunk: vec![b'x'].into(),
                 })
                 .collect();
             running.retained_bytes = RETAINED_OUTPUT_CHUNKS_PER_PROCESS;
@@ -1820,6 +1972,8 @@ mod tests {
         let state = NetworkProxyState::from_remote_launch_config(
             RemoteNetworkProxyLaunchConfig::new(proxy_config),
             codex_utils_path_uri::Platform::native(),
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
+            &HashMap::new(),
         )
         .expect("build network proxy state");
         let proxy = NetworkProxy::builder()

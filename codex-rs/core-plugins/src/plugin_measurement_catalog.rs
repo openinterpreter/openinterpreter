@@ -17,6 +17,8 @@ pub(crate) async fn fetch_measurement_reference_bundle(
         auth,
         RemoteInstalledPluginScope::Single(RemotePluginScope::Global),
         /*include_download_urls*/ true,
+        // Only installation, authorization and bundle provenance are needed.
+        InstalledPluginDisplayAssets::Skip,
     )
     .await?;
     let mut matching = installed.into_iter().filter(|installed| {

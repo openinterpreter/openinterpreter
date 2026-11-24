@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::command_output_line;
 use super::live_output::LiveCommandOutput;
 use crate::history_cell::ActivityGroup;
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
@@ -27,6 +28,25 @@ pub(crate) struct CommandOutput {
 }
 
 impl CommandOutput {
+    pub(crate) fn from_execution(
+        status: codex_app_server_protocol::CommandExecutionStatus,
+        exit_code: Option<i32>,
+        source: ExecCommandSource,
+        output: Option<String>,
+    ) -> Self {
+        let exit_code = if status == codex_app_server_protocol::CommandExecutionStatus::Completed {
+            exit_code.unwrap_or_default()
+        } else {
+            exit_code.filter(|code| *code != 0).unwrap_or(1)
+        };
+        let output = if source == ExecCommandSource::UnifiedExecInteraction {
+            String::new()
+        } else {
+            output.unwrap_or_default()
+        };
+        Self::new(exit_code, output)
+    }
+
     pub(crate) fn new(exit_code: i32, aggregated_output: String) -> Self {
         Self {
             exit_code,
@@ -50,7 +70,7 @@ impl CommandOutput {
     pub(super) fn lines(&self) -> impl DoubleEndedIterator<Item = Cow<'_, str>> {
         match self.live_output.as_ref() {
             Some(output) => Either::Left(output.lines()),
-            None => Either::Right(self.aggregated_output.lines().map(Cow::Borrowed)),
+            None => Either::Right(self.aggregated_output.lines().map(command_output_line)),
         }
     }
 
@@ -58,7 +78,7 @@ impl CommandOutput {
     pub(super) fn transcript_lines(&self) -> impl Iterator<Item = Cow<'_, str>> {
         match self.live_output.as_ref() {
             Some(output) => Either::Left(output.transcript_lines()),
-            None => Either::Right(self.aggregated_output.lines().map(Cow::Borrowed)),
+            None => Either::Right(self.aggregated_output.lines().map(command_output_line)),
         }
     }
 }

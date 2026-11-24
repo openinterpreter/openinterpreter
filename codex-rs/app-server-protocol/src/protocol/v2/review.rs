@@ -1,15 +1,17 @@
 use super::Turn;
-use super::shared::v2_enum_from_core;
 use crate::JsonSchema;
 use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
 
-v2_enum_from_core!(
-    pub enum ReviewDelivery from codex_protocol::protocol::ReviewDelivery {
-        Inline, Detached
-    }
-);
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ReviewDelivery {
+    Inline,
+    /// Run review on a separate legacy child thread. Deprecated in favor of starting a thread.
+    Detached,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -18,10 +20,8 @@ pub struct ReviewStartParams {
     pub thread_id: String,
     pub target: ReviewTarget,
 
-    /// Where to run the review: inline (default) on the current thread or
-    /// detached on a new thread (returned in `reviewThreadId`).
-    /// Detached delivery is deprecated and emits `deprecationNotice`.
-    /// Use `thread/start` followed by an inline review for a separate review thread.
+    /// Reviews run inline by default. `detached` is retained for legacy clients;
+    /// new clients should start a separate thread and review it inline.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub delivery: Option<ReviewDelivery>,
@@ -32,10 +32,7 @@ pub struct ReviewStartParams {
 #[ts(export_to = "v2/")]
 pub struct ReviewStartResponse {
     pub turn: Turn,
-    /// Identifies the thread where the review runs.
-    ///
-    /// For inline reviews, this is the original thread id.
-    /// For detached reviews, this is the id of the new review thread.
+    /// The thread id supplied to `review/start`.
     pub review_thread_id: String,
 }
 

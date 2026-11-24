@@ -22,6 +22,8 @@ use codex_extension_api::TurnAbortInput;
 use codex_extension_api::TurnLifecycleContributor;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_guardian_reviewer::ReviewBlocking;
+use codex_guardian_reviewer::ReviewBlockingTurn;
 use codex_guardian_reviewer::ReviewDenials;
 use codex_guardian_reviewer::ReviewerPool;
 use codex_guardian_reviewer::ReviewerTasks;
@@ -32,6 +34,7 @@ use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
 
+mod conversation_history;
 mod reviewer_config;
 
 /// Owns reviewer agents through the same thread manager as the parent conversation.
@@ -55,12 +58,15 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
                     reviewer_config::build_reviewer_config,
                 ));
             let manager = self.thread_manager.clone();
+            let parent_thread_id = input.thread_store.level_id().to_owned();
             let runtime = input.thread_store.get_or_init(ReviewerTasks::default);
+            input.thread_store.get_or_init(ReviewBlocking::default);
             input.thread_store.get_or_init(|| {
                 ReviewerPool::<GuardianReviewSession>::new(
                     Arc::clone(&runtime),
                     move |context, key, kind, snapshot, cancel| {
                         let manager = manager.clone();
+                        let parent_thread_id = parent_thread_id.clone();
                         let runtime = Arc::clone(&runtime);
                         Box::pin(async move {
                             let history_reset = context.history_reset.clone();
@@ -76,7 +82,7 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
                             let manager = manager.upgrade().ok_or_else(|| {
                                 anyhow::anyhow!("thread manager is no longer available")
                             })?;
-                            let (mut options, state) = context.thread_options(snapshot).await;
+                            let (mut options, state) = context.thread_options(kind, snapshot).await;
                             if matches!(
                                 kind,
                                 codex_analytics::GuardianReviewSessionKind::EphemeralForked
@@ -102,9 +108,37 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
                             options
                                 .thread_extension_init
                                 .insert(SessionIsolation::Isolated);
-                            options
-                                .thread_extension_init
-                                .insert(codex_guardian_reviewer::reviewer_tool_policy());
+                            let mut tool_policy = codex_guardian_reviewer::reviewer_tool_policy();
+                            if options
+                                .config
+                                .features
+                                .enabled(codex_features::Feature::GuardianConversationHistoryTools)
+                            {
+                                let parent = manager
+                                    .get_thread(ThreadId::from_string(&parent_thread_id)?)
+                                    .await?;
+                                let mut extensions = ExtensionRegistryBuilder::<Config>::default();
+                                let history_tools =
+                                    Arc::new(conversation_history::ConversationHistoryTools {
+                                        parent: Arc::downgrade(&parent),
+                                    });
+                                extensions.tool_contributor(history_tools.clone());
+                                extensions.turn_lifecycle_contributor(history_tools);
+                                options.thread_extension_init.insert(
+                                    codex_extension_api::IsolatedSessionExtensions(Arc::new(
+                                        extensions.build(),
+                                    )),
+                                );
+                                tool_policy.allowed_tools.get_or_insert_default().extend(
+                                    ["search_messages", "read_messages"].map(|name| {
+                                        codex_extension_api::ToolName::namespaced(
+                                            "user_message",
+                                            name,
+                                        )
+                                    }),
+                                );
+                            }
+                            options.thread_extension_init.insert(tool_policy);
                             let session_cancel = cancel.clone();
                             let until = async move {
                                 let _cancel_on_exit = cancel.clone().drop_guard();
@@ -197,19 +231,39 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
 
 impl TurnLifecycleContributor for GuardianExtension {
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
-        Box::pin(ReviewDenials::clear_turn(input.thread_store, input.turn_id))
+        Box::pin(async move {
+            if input.thread_store.get::<ReviewerTasks>().is_some()
+                && let Some(telemetry) = input.turn_store.get()
+            {
+                let tracker = input.thread_store.get_or_init(ReviewBlocking::default);
+                input
+                    .turn_store
+                    .get_or_init(|| tracker.start_turn(input.turn_id, telemetry));
+            }
+            ReviewDenials::clear_turn(input.thread_store, input.turn_id).await;
+        })
     }
     fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
-        Box::pin(ReviewDenials::clear_turn(
-            input.thread_store,
-            input.turn_store.level_id(),
-        ))
+        Box::pin(async move {
+            if let (Some(tracker), Some(turn)) = (
+                input.thread_store.get::<ReviewBlocking>(),
+                input.turn_store.get::<ReviewBlockingTurn>(),
+            ) {
+                tracker.finish_turn(&turn, "completed");
+            }
+            ReviewDenials::clear_turn(input.thread_store, input.turn_store.level_id()).await;
+        })
     }
     fn on_turn_abort<'a>(&'a self, input: TurnAbortInput<'a>) -> ExtensionFuture<'a, ()> {
-        Box::pin(ReviewDenials::clear_turn(
-            input.thread_store,
-            input.turn_store.level_id(),
-        ))
+        Box::pin(async move {
+            if let (Some(tracker), Some(turn)) = (
+                input.thread_store.get::<ReviewBlocking>(),
+                input.turn_store.get::<ReviewBlockingTurn>(),
+            ) {
+                tracker.finish_turn(&turn, "aborted");
+            }
+            ReviewDenials::clear_turn(input.thread_store, input.turn_store.level_id()).await;
+        })
     }
 }
 
@@ -226,3 +280,7 @@ pub fn install(
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reviewer_config_tests.rs"]
+mod reviewer_config_tests;

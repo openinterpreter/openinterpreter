@@ -26,6 +26,20 @@ impl Renderable for DaemonMenuHeader {
 }
 
 impl App {
+    pub(super) async fn verify_managed_daemon(&mut self) {
+        // A discovered socket is not proof this process is our managed daemon.
+        if !self.reconnect.offline
+            && let Some(connection) = &mut self.chat_widget.remote_connection
+            && connection.is_local_daemon
+            && !connection.is_managed_daemon
+        {
+            connection.is_managed_daemon =
+                codex_app_server_daemon::run(codex_app_server_daemon::LifecycleCommand::Version)
+                    .await
+                    .is_ok_and(|output| output.backend.is_some());
+        }
+    }
+
     pub(super) fn open_daemon_menu(&mut self) {
         let status = self
             .chat_widget
@@ -82,6 +96,40 @@ impl App {
             header: Box::new(DaemonMenuHeader(header)),
             items,
             ..SelectionViewParams::picker()
+        });
+    }
+
+    pub(super) fn confirm_daemon_restart(&mut self) {
+        if !self
+            .chat_widget
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| connection.is_managed_daemon)
+            || self.daemon_restart.is_some()
+        {
+            return;
+        }
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            header: Box::new(DaemonMenuHeader(vec![
+                Line::from("Restart background server?".bold()),
+                Line::from("Active or queued work in other chats may be interrupted."),
+                Line::from("Codex will reconnect automatically."),
+            ])),
+            items: vec![
+                SelectionItem {
+                    name: "Cancel".to_string(),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Restart".to_string(),
+                    actions: vec![Box::new(|tx| tx.send(AppEvent::RunDaemonRestart))],
+                    require_explicit_confirmation: true,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
+            ..SelectionViewParams::confirmation()
         });
     }
 

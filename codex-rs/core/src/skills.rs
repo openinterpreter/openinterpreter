@@ -1,17 +1,25 @@
 use crate::config::Config;
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnEnvironment;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::SkillInvocationLocation;
 use codex_analytics::TrackEventsContext;
 use codex_analytics::build_track_events_context;
+use codex_core_plugins::PluginsManager;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
+use codex_file_system::EnvironmentAccess;
+use codex_file_system::EnvironmentAccessKey;
+use codex_otel::SkillInvocationEvent;
+use codex_otel::SkillInvocationType;
 use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::protocol::SkillScope;
 use codex_skills::SkillMetadata;
 use codex_skills_extension::HostSkillsLoadInput;
+use codex_skills_extension::HostSkillsSnapshot;
 use codex_skills_extension::InjectedHostSkillPrompts;
 use codex_skills_extension::detect_implicit_skill_invocation;
 use codex_skills_extension::record_plugin_turn_usage;
@@ -19,11 +27,13 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Default)]
 struct ImplicitSkillInvocations(Mutex<HashSet<String>>);
 
+#[cfg(test)]
 pub(crate) fn skills_load_input_from_config(
     config: &Config,
     effective_skill_roots: Vec<PluginSkillRoot>,
@@ -33,6 +43,103 @@ pub(crate) fn skills_load_input_from_config(
         effective_skill_roots,
         config.config_layer_stack.clone(),
     )
+}
+
+/// Pair repository discovery inputs with their captured filesystem owner.
+/// Keep preparation synchronous so it adds no nested startup or resume future.
+pub(crate) fn skills_load_input_for_environments<'a>(
+    config: &Config,
+    plugins_manager: &PluginsManager,
+    effective_skill_roots: Vec<PluginSkillRoot>,
+    environments: &'a TurnEnvironmentSnapshot,
+) -> (HostSkillsLoadInput, Option<&'a TurnEnvironment>) {
+    // Preserve primary-repository discovery independently of the host config cwd.
+    let workspace = environments.primary().and_then(|environment| {
+        environment
+            .cwd()
+            .to_abs_path()
+            .ok()
+            .map(|cwd| (cwd, environment))
+    });
+    let (cwd, fs) = match workspace {
+        Some((cwd, fs)) => (cwd, Some(fs)),
+        None => (config.cwd.clone(), None),
+    };
+    let input = HostSkillsLoadInput::new(
+        cwd,
+        effective_skill_roots,
+        config.config_layer_stack.clone(),
+    )
+    .with_plugin_skill_snapshots(
+        plugins_manager.plugin_skill_snapshots_for_config(&config.plugins_config_input()),
+    );
+    let input = match fs {
+        Some(environment) => input.with_environment_id(&environment.selection.environment_id),
+        None => input,
+    };
+    (input, fs)
+}
+
+/// The snapshot and configuration resolved with one turn's filesystem access.
+pub(crate) struct HostSkillDiscovery {
+    pub(crate) input: Arc<HostSkillsLoadInput>,
+    pub(crate) repository: Option<(PathUri, EnvironmentAccessKey)>,
+    pub(crate) snapshot: Arc<HostSkillsSnapshot>,
+}
+
+impl Session {
+    pub(crate) async fn host_skills_for_step(
+        &self,
+        turn: &TurnContext,
+        environments: &TurnEnvironmentSnapshot,
+    ) -> Arc<HostSkillsSnapshot> {
+        let Some(cached) = turn.extension_data.get::<HostSkillDiscovery>() else {
+            return turn.skills_snapshot();
+        };
+        let workspace = environments.primary().and_then(|environment| {
+            let cwd = environment.cwd().to_abs_path().ok()?;
+            let grants = turn.granted_permissions(&environment.selection.environment_id);
+            Some((environment, cwd, environment.fs_accessor(grants)))
+        });
+        let repository = workspace
+            .as_ref()
+            .map(|(environment, _, access)| (environment.cwd().clone(), access.cache_key()));
+        if cached.repository == repository {
+            return Arc::clone(&cached.snapshot);
+        }
+
+        let cwd = workspace
+            .as_ref()
+            .map_or_else(|| turn.config.cwd.clone(), |(_, cwd, _)| cwd.clone());
+        let input = cached.input.for_cwd(cwd);
+        let input = Arc::new(match &workspace {
+            Some((environment, _, _)) => {
+                input.with_environment_id(&environment.selection.environment_id)
+            }
+            None => input,
+        });
+        let snapshot = Box::pin(
+            self.services
+                .skills_service
+                .snapshot_for_config_on_executor(
+                    &input,
+                    workspace.as_ref().map(|(environment, _, access)| {
+                        (
+                            environment.environment().filesystem_ref(),
+                            access as &dyn EnvironmentAccess,
+                        )
+                    }),
+                ),
+        )
+        .await;
+        let snapshot = Arc::new(snapshot);
+        turn.extension_data.insert(HostSkillDiscovery {
+            input,
+            repository,
+            snapshot: Arc::clone(&snapshot),
+        });
+        snapshot
+    }
 }
 
 pub(crate) async fn emit_explicit_skill_invocations(
@@ -79,13 +186,22 @@ pub(crate) async fn emit_explicit_skill_invocations(
         .extension_data
         .get::<InjectedHostSkillPrompts>();
     for skill in injected_skills {
-        let skill_resource = skill.path_to_skills_md.to_string_lossy();
+        let skill_resource = skill.path_to_skills_md.inferred_native_path_string();
         if injected_host_skill_prompts
             .as_ref()
             .is_some_and(|prompts| prompts.is_superseded_path(&skill_resource))
         {
             continue;
         }
+        turn_context
+            .session_telemetry
+            .skill_invocation(SkillInvocationEvent {
+                turn_id: &turn_context.sub_id,
+                skill_name: &skill.name,
+                scope: Some(skill.scope),
+                plugin_id: skill.plugin_id.as_deref(),
+                invocation_type: SkillInvocationType::Explicit,
+            });
         for contributor in sess.services.extensions.skill_invocation_contributors() {
             contributor
                 .on_skill_invocation(SkillInvocationInput {
@@ -105,7 +221,7 @@ pub(crate) async fn emit_explicit_skill_invocations(
         .map(|skill| SkillInvocation {
             skill_name: skill.name.clone(),
             location: SkillInvocationLocation::Host {
-                path: skill.path_to_skills_md.to_path_buf(),
+                path: skill.path_to_skills_md.clone(),
                 scope: skill.scope,
             },
             plugin_id: skill.plugin_id.clone(),
@@ -120,14 +236,16 @@ pub(crate) async fn emit_explicit_skill_invocations(
 
 pub(crate) async fn maybe_emit_implicit_skill_invocation(
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &crate::session::step_context::StepContext,
     command: &str,
     workdir: &PathUri,
     native_workdir: Option<&AbsolutePathBuf>,
     environment_id: &str,
 ) {
+    let turn_context = step_context.turn.as_ref();
     let Some(invocation) = detect_implicit_skill_invocation(
         turn_context.extension_data.as_ref(),
+        &step_context.extension_data,
         environment_id,
         command,
         workdir,
@@ -144,7 +262,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
                 SkillScope::System => "system",
                 SkillScope::Admin => "admin",
             };
-            let skill_path = path.to_string_lossy().into_owned();
+            let skill_path = path.inferred_native_path_string();
             let seen_key = format!("{skill_scope}:{skill_path}:{skill_name}");
             (skill_path, seen_key)
         }
@@ -160,6 +278,18 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
     if !inserted {
         return;
     }
+    turn_context
+        .session_telemetry
+        .skill_invocation(SkillInvocationEvent {
+            turn_id: &turn_context.sub_id,
+            skill_name: &skill_name,
+            scope: match &invocation.location {
+                SkillInvocationLocation::Host { scope, .. } => Some(*scope),
+                SkillInvocationLocation::Resource { scope, .. } => *scope,
+            },
+            plugin_id: invocation.plugin_id.as_deref(),
+            invocation_type: SkillInvocationType::Implicit,
+        });
     let skill_name_tag = sanitize_metric_tag_value(skill_name.as_str());
     let plugin_id_tag =
         sanitize_metric_tag_value(invocation.plugin_id.as_deref().unwrap_or("unattributed"));
@@ -203,6 +333,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
                 sess.thread_id.to_string(),
                 turn_context.sub_id.clone(),
                 turn_context.originator.clone(),
+                Some(turn_context.turn_metadata_state.clone()),
             ),
             vec![invocation],
         );

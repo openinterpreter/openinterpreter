@@ -39,6 +39,9 @@ pub(super) async fn send_thread_token_usage_update_to_connection(
     conversation: &CodexThread,
     token_usage_turn_id: String,
 ) {
+    if token_usage_turn_id.is_empty() {
+        return;
+    }
     let Some(info) = conversation.token_usage_info().await else {
         return;
     };
@@ -174,6 +177,7 @@ mod tests {
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 message: "first answer".to_string(),
                 phase: None,
                 memory_citation: None,

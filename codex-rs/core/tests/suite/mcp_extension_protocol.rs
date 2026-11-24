@@ -244,7 +244,13 @@ async fn hosted_apps_protocol_override_preserves_native_verification() -> anyhow
                 OPENAI_ELICITATION_EXTENSION_ID.to_string(),
                 json!({"userVerification": {}}),
             )]),
-            environments: Some(vec![fixture.executor_environment().selection().clone()]),
+            environments: Some(vec![
+                fixture
+                    .executor_environment()
+                    .selection()
+                    .clone()
+                    .into_request(),
+            ]),
             ..StartThreadOptions::new(fixture.config.clone())
         })
         .await?
@@ -254,6 +260,7 @@ async fn hosted_apps_protocol_override_preserves_native_verification() -> anyhow
         caller
             .call_mcp_tool(
                 CODEX_APPS_MCP_SERVER_NAME,
+                /*environment_id*/ None,
                 "verify_action",
                 /*arguments*/ None,
                 /*meta*/ None,

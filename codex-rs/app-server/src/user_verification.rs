@@ -203,6 +203,7 @@ async fn run(
                                 credential_id: proof.credential_id,
                                 signature: proof.signature,
                             },
+                            biometric_type: None,
                         }
                         .into()
                     }

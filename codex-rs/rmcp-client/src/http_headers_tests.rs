@@ -1,16 +1,24 @@
 use super::*;
+#[cfg(unix)]
+use http::HeaderValue;
 use pretty_assertions::assert_eq;
 
-#[test]
-fn helper_output_errors_do_not_echo_secrets() {
-    for output in [
-        br#"{"Host":"secret"}"#.as_slice(),
-        br#"{"secret":"secret","secret":"secret"}"#.as_slice(),
-        br#"{"secret":"secret","Secret":"secret"}"#.as_slice(),
-    ] {
-        let error = parse_helper_output(output.to_vec()).expect_err("invalid helper output");
-        assert!(!error.to_string().contains("secret"));
-    }
+#[tokio::test]
+async fn reserved_header_errors_do_not_echo_secrets() {
+    let dir = tempfile::tempdir().expect("helper directory");
+    std::fs::write(dir.path().join("headers.json"), r#"{"Host":"secret"}"#).expect("write headers");
+    let command = if cfg!(windows) {
+        "type headers.json"
+    } else {
+        "cat headers.json"
+    };
+    let error = run_helper(command, dir.path())
+        .await
+        .expect_err("reserved header");
+    assert_eq!(
+        error.to_string(),
+        "MCP HTTP headers helper returned a reserved header"
+    );
 }
 
 #[cfg(unix)]
@@ -43,8 +51,14 @@ async fn helper_attempt_is_shared_after_cancellation() {
             .await
             .is_err()
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(cancelled_finished.exists());
+    // Observe the helper finishing without polling the cancelled attempt again.
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        while !cancelled_finished.exists() {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .expect("cancelled helper finished independently");
     assert!(cancelled.headers().await.is_ok());
     assert_eq!(
         std::fs::read_to_string(&cancelled_invocations).expect("cancelled invocation count"),
@@ -60,8 +74,13 @@ async fn helper_attempt_is_shared_after_cancellation() {
         .await
         .is_err()
     );
-    tokio::time::sleep(Duration::from_millis(/*millis*/ 500)).await;
-    assert!(cancelled_finished.exists());
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        while !cancelled_finished.exists() {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .expect("cancelled refresh finished independently");
     assert_eq!(
         cancelled.refresh(headers.refresh_epoch).await.unwrap(),
         headers.values
@@ -76,21 +95,56 @@ async fn helper_attempt_is_shared_after_cancellation() {
     let dropped = HttpHeadersProvider::new(
         "https://example.com",
         &format!(
-            "printf x > '{}'; sleep 1; printf x > '{}'",
+            "sleep 0.6; printf '%s\\n' \"$$\" > '{}'; sleep 30; printf x > '{}'",
             dropped_started.display(),
             dropped_finished.display(),
         ),
         cwd,
     )
     .expect("dropped provider");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), dropped.headers())
-            .await
-            .is_err()
-    );
-    assert!(dropped_started.exists());
+    // A slow spawn must not race cancellation. Wait for the helper's PID before
+    // dropping the caller future, leaving the provider as the attempt's owner.
+    let dropped_pid = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = dropped.headers() => panic!("helper completed before cancellation"),
+            pid = async {
+                loop {
+                    match std::fs::read_to_string(&dropped_started) {
+                        Ok(pid) if pid.ends_with('\n') => {
+                            break pid.trim().parse::<libc::pid_t>().expect("helper PID");
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => panic!("failed to read helper PID: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } => pid,
+        }
+    })
+    .await
+    .expect("helper started before cancellation");
+    assert!(dropped_pid > 0);
     drop(dropped);
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    // Observe cleanup before HELPER_TIMEOUT or the helper's sleep could finish.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            // SAFETY: signal 0 only checks whether the known child PID exists.
+            let result = unsafe {
+                libc::kill(dropped_pid, /* sig */ 0)
+            };
+            if result == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropping the provider terminated the helper");
     assert!(!dropped_finished.exists());
 }
 
@@ -440,7 +494,7 @@ async fn helper_refresh_preserves_oauth_challenges_and_retries_at_most_once() {
                     .http_request(params)
                     .await
                     .expect("original OAuth response");
-                let bytes = response.body.0.clone();
+                let bytes = response.body.clone().into_inner();
                 (response, bytes)
             };
 

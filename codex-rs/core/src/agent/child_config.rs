@@ -12,6 +12,7 @@ use crate::session::turn_context::TurnContext;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
@@ -234,7 +235,7 @@ async fn apply_requested_spawn_agent_model_overrides(
             )?;
             config.model_reasoning_effort = Some(reasoning_effort);
         } else {
-            config.model_reasoning_effort = selected_model_info.default_reasoning_level;
+            config.model_reasoning_effort = selected_model_info.default_reasoning_level.clone();
         }
 
         return Ok(());
@@ -256,7 +257,7 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     session: &Session,
     config: &mut Config,
 ) -> Result<(), String> {
-    let Some(service_tier) = session.services.agent_control.root_service_tier() else {
+    let Some(service_tier) = session.services.agent_control.service_tier() else {
         config.service_tier = None;
         return Ok(());
     };
@@ -304,7 +305,7 @@ async fn apply_spawn_agent_role(
         .models_manager
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
-    if model_info.used_fallback_model_metadata {
+    if model_info.origin == ModelOrigin::Synthetic {
         return Ok(());
     }
 

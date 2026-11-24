@@ -51,6 +51,7 @@ use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
+use codex_protocol::ThreadId;
 use codex_protocol::user_input::TextElement;
 use unicode_width::UnicodeWidthStr;
 
@@ -62,10 +63,10 @@ const SELECT_OPTION_PLACEHOLDER: &str = "Select an option to add notes";
 pub(super) const TIP_SEPARATOR: &str = " | ";
 pub(super) const DESIRED_SPACERS_BETWEEN_SECTIONS: u16 = 2;
 const OTHER_OPTION_LABEL: &str = "None of the above";
-const OTHER_OPTION_DESCRIPTION: &str = "Optionally, add details in notes (tab).";
+const OTHER_OPTION_DESCRIPTION: &str = "Optionally, add details in notes (tab)";
 const UNANSWERED_CONFIRM_TITLE: &str = "Submit with unanswered questions?";
 const UNANSWERED_CONFIRM_GO_BACK: &str = "Go back";
-const UNANSWERED_CONFIRM_GO_BACK_DESC: &str = "Return to the first unanswered question.";
+const UNANSWERED_CONFIRM_GO_BACK_DESC: &str = "Return to the first unanswered question";
 const UNANSWERED_CONFIRM_SUBMIT: &str = "Proceed";
 const UNANSWERED_CONFIRM_SUBMIT_DESC_SINGULAR: &str = "question";
 const UNANSWERED_CONFIRM_SUBMIT_DESC_PLURAL: &str = "questions";
@@ -340,7 +341,13 @@ impl RequestUserInputOverlay {
 
     fn has_options(&self) -> bool {
         self.current_question()
-            .and_then(|question| question.options.as_ref())
+            .is_some_and(Self::has_numbered_options)
+    }
+
+    pub(super) fn has_numbered_options(question: &ToolRequestUserInputQuestion) -> bool {
+        question
+            .options
+            .as_ref()
             .is_some_and(|options| !options.is_empty())
     }
 
@@ -387,13 +394,30 @@ impl RequestUserInputOverlay {
             .is_some_and(|answer| answer.notes_visible || self.notes_has_content(idx))
     }
 
-    pub(super) fn wrapped_question_lines(&self, width: u16) -> Vec<String> {
+    pub(super) fn wrapped_question_lines(
+        &self,
+        width: u16,
+    ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         self.current_question()
             .map(|q| {
-                textwrap::wrap(&q.question, width.max(1) as usize)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
+                q.question
+                    .split('\n')
+                    .flat_map(|text| {
+                        let source = crate::terminal_hyperlinks::annotate_web_urls_in_line(
+                            text.to_owned().into(),
+                        );
+                        let wrapped =
+                            crate::wrapping::wrap_ranges_trim(text, usize::from(width.max(1)))
+                                .into_iter()
+                                .map(|range| crate::wrapping::WrappedLine {
+                                    line: (&text[range.clone()]).into(),
+                                    range,
+                                    prefix_bytes: 0,
+                                })
+                                .collect();
+                        crate::terminal_hyperlinks::remap_source_wrapped_line(&source, wrapped)
+                    })
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -500,12 +524,7 @@ impl RequestUserInputOverlay {
         ComposerDraft {
             text: self.composer.current_text(),
             text_elements: self.composer.text_elements(),
-            local_image_paths: self
-                .composer
-                .local_images()
-                .into_iter()
-                .map(|img| img.path)
-                .collect(),
+            local_image_paths: self.composer.local_image_paths(),
             pending_pastes: self.composer.pending_pastes(),
         }
     }
@@ -680,10 +699,7 @@ impl RequestUserInputOverlay {
             .questions
             .iter()
             .map(|question| {
-                let has_options = question
-                    .options
-                    .as_ref()
-                    .is_some_and(|options| !options.is_empty());
+                let has_options = Self::has_numbered_options(question);
                 let mut options_state = ScrollState::new();
                 if has_options {
                     options_state.selected_idx = Some(0);
@@ -719,11 +735,7 @@ impl RequestUserInputOverlay {
     }
 
     fn other_option_enabled_for_question(question: &ToolRequestUserInputQuestion) -> bool {
-        question.is_other
-            && question
-                .options
-                .as_ref()
-                .is_some_and(|options| !options.is_empty())
+        question.is_other && Self::has_numbered_options(question)
     }
 
     fn option_label_for_index(
@@ -873,7 +885,12 @@ impl RequestUserInputOverlay {
                 },
             );
         }
+        let Ok(thread_id) = ThreadId::from_string(&self.request.thread_id) else {
+            tracing::error!("user input request had an invalid thread ID");
+            return;
+        };
         self.app_event_tx.user_input_answer(
+            thread_id,
             self.request.turn_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
@@ -892,7 +909,12 @@ impl RequestUserInputOverlay {
     fn submit_empty_auto_resolution(&mut self, now: Instant) {
         self.confirm_unanswered = None;
         let answers: HashMap<String, ToolRequestUserInputAnswer> = HashMap::new();
+        let Ok(thread_id) = ThreadId::from_string(&self.request.thread_id) else {
+            tracing::error!("user input request had an invalid thread ID");
+            return;
+        };
         self.app_event_tx.user_input_answer(
+            thread_id,
             self.request.turn_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
@@ -945,7 +967,7 @@ impl RequestUserInputOverlay {
         } else {
             UNANSWERED_CONFIRM_SUBMIT_DESC_PLURAL
         };
-        format!("Submit with {count} unanswered {suffix}.")
+        format!("Submit with {count} unanswered {suffix}")
     }
 
     fn first_unanswered_index(&self) -> Option<usize> {
@@ -997,11 +1019,7 @@ impl RequestUserInputOverlay {
         let Some(answer) = self.answers.get(idx) else {
             return false;
         };
-        let has_options = question
-            .options
-            .as_ref()
-            .is_some_and(|options| !options.is_empty());
-        if has_options {
+        if Self::has_numbered_options(question) {
             answer.options_state.selected_idx.is_some() && answer.answer_committed
         } else {
             answer.answer_committed
@@ -1028,12 +1046,7 @@ impl RequestUserInputOverlay {
     }
 
     fn apply_submission_to_draft(&mut self, text: String, text_elements: Vec<TextElement>) {
-        let local_image_paths = self
-            .composer
-            .local_images()
-            .into_iter()
-            .map(|img| img.path)
-            .collect::<Vec<_>>();
+        let local_image_paths = self.composer.local_image_paths();
         if let Some(answer) = self.current_answer_mut() {
             answer.draft = ComposerDraft {
                 text: text.clone(),
@@ -1425,6 +1438,12 @@ impl BottomPaneView for RequestUserInputOverlay {
         true
     }
 
+    fn program_status_blocked_kind(
+        &self,
+    ) -> Option<crate::terminal_program_status::ProgramStatusKind> {
+        Some(crate::terminal_program_status::ProgramStatusKind::Question)
+    }
+
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         if self.confirm_unanswered_active() {
             self.close_unanswered_confirmation();
@@ -1681,13 +1700,26 @@ mod tests {
         questions: Vec<ToolRequestUserInputQuestion>,
     ) -> ToolRequestUserInputParams {
         ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "00000000-0000-0000-0000-000000000001".to_string(),
             item_id: "call-1".to_string(),
             turn_id: turn_id.to_string(),
             questions,
             is_blocking: true,
             auto_resolution_ms: None,
         }
+    }
+
+    fn expect_user_input_answer(
+        event: AppEvent,
+    ) -> (ThreadId, String, ToolRequestUserInputResponse) {
+        let AppEvent::SubmitThreadOp {
+            thread_id,
+            op: Op::UserInputAnswer { id, response },
+        } = event
+        else {
+            panic!("expected thread-scoped UserInputAnswer event");
+        };
+        (thread_id, id, response)
     }
 
     fn request_event_with_auto_resolution(
@@ -1802,36 +1834,57 @@ mod tests {
     }
 
     #[test]
-    fn auto_resolution_uses_is_blocking_without_auto_resolution_ms() {
+    fn nonblocking_question_auto_resolves_over_picker_after_typing_delay() {
         let (tx, mut rx) = test_sender();
         let mut request = request_event("turn-1", vec![question_with_options("q1", "First")]);
         request.is_blocking = false;
         assert_eq!(request.auto_resolution_ms, None);
-        let mut overlay = RequestUserInputOverlay::new(
-            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
-            /*disable_paste_burst*/ false,
-        );
-        let now = Instant::now();
-        overlay.request_started_at = now;
-
-        assert_eq!(
-            overlay.auto_resolution_timing_at(now),
-            AutoResolutionTiming::HiddenGrace {
-                remaining: AUTO_RESOLUTION_HIDDEN_GRACE
-            }
-        );
+        let expected_thread_id = request.thread_id.clone();
+        let mut pane = crate::bottom_pane::tests::test_pane(tx);
+        pane.show_selection_view(crate::bottom_pane::SelectionViewParams {
+            view_id: Some("picker"),
+            is_searchable: true,
+            ..crate::bottom_pane::SelectionViewParams::picker()
+        });
+        pane.handle_key_event(KeyCode::Char('a').into());
+        pane.push_user_input_request(request);
+        let first_key = Instant::now() - Duration::from_millis(/*millis*/ 500);
+        pane.record_composer_activity_at(first_key);
+        pane.handle_key_event(KeyCode::Char('b').into());
+        pane.pre_draw_tick_at(first_key + Duration::from_secs(1));
+        assert_eq!(pane.active_view_id(), Some("picker"));
+        let idle = Instant::now() + Duration::from_secs(1);
+        pane.pre_draw_tick_at(idle);
+        assert_ne!(pane.active_view_id(), Some("picker"));
+        assert!(rx.try_recv().is_err());
 
         let total_timeout = AUTO_RESOLUTION_HIDDEN_GRACE + AUTO_RESOLUTION_VISIBLE_COUNTDOWN;
-        let due = now + total_timeout;
-        assert!(overlay.pre_draw_tick(due));
-        assert!(overlay.done);
+        pane.pre_draw_tick_at(idle + total_timeout);
+        assert!(pane.has_active_view(), "the picker should remain open");
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
-            panic!("expected UserInputAnswer event");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), expected_thread_id);
         assert_eq!(id, "turn-1");
         assert_eq!(response.answers, HashMap::new());
+    }
+
+    #[test]
+    fn nonblocking_question_times_out_during_paste_capture() {
+        let (tx, mut rx) = test_sender();
+        let mut pane = crate::bottom_pane::tests::test_pane(tx);
+        pane.handle_paste("draft".into());
+        let mut request = request_event("turn-1", vec![question_with_options("q1", "First")]);
+        request.is_blocking = false;
+        pane.push_user_input_request(request);
+        pane.delayed_user_input.as_mut().unwrap().request_started_at =
+            Instant::now() - AUTO_RESOLUTION_HIDDEN_GRACE - AUTO_RESOLUTION_VISIBLE_COUNTDOWN;
+        // Paste capture can skip pre_draw_tick for the entire timeout.
+        pane.flush_paste_burst_if_due();
+        let (_, _, response) = expect_user_input_answer(rx.try_recv().unwrap());
+        assert_eq!(response.answers, HashMap::new());
+        assert!(!pane.has_active_view());
+        assert_eq!(pane.composer_text_with_pending(), "draft");
     }
 
     #[test]
@@ -1952,9 +2005,8 @@ mod tests {
         assert!(overlay.done);
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
-            panic!("expected UserInputAnswer event");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), overlay.request.thread_id);
         assert_eq!(id, "turn-1");
         assert_eq!(response.answers, HashMap::new());
 
@@ -2131,7 +2183,7 @@ mod tests {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             ToolRequestUserInputParams {
-                thread_id: "thread-1".to_string(),
+                thread_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 item_id: "call-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 questions: vec![question_with_options("q1", "First")],
@@ -2198,9 +2250,8 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), overlay.request.thread_id);
         assert_eq!(id, "turn-1");
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
@@ -2220,9 +2271,7 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, vec!["Option 1".to_string()]);
     }
@@ -2256,9 +2305,7 @@ mod tests {
 
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let mut expected = HashMap::new();
         expected.insert(
             "q1".to_string(),
@@ -2276,24 +2323,81 @@ mod tests {
     }
 
     #[test]
-    fn number_keys_select_and_submit_options() {
-        let (tx, mut rx) = test_sender();
-        let mut overlay = RequestUserInputOverlay::new(
-            request_event("turn-1", vec![question_with_options("q1", "Pick one")]),
-            tx,
-            /*has_input_focus*/ true,
-            /*enhanced_keys_supported*/ false,
-            /*disable_paste_burst*/ false,
+    fn number_keys_select_and_submit_options_only_after_typing_pauses() {
+        for (vim, edit) in [
+            (false, KeyCode::F(12)),
+            (true, KeyCode::F(12)),
+            (false, KeyCode::End),
+        ] {
+            let (tx, mut rx) = test_sender();
+            let mut pane = crate::bottom_pane::tests::test_pane(tx);
+            let mut keymap = RuntimeKeymap::defaults();
+            let f12 = vec![crate::key_hint::plain(KeyCode::F(12))];
+            if edit == KeyCode::End {
+                pane.handle_paste("Phase ".into());
+                pane.handle_key_event(KeyCode::Home.into());
+            } else if vim {
+                keymap.vim_normal.substitute_char = f12;
+                pane.handle_paste("Phase x".into());
+                pane.set_vim_enabled(/*enabled*/ true);
+                pane.handle_key_event(KeyCode::Char('$').into());
+            } else {
+                std::sync::Arc::make_mut(&mut keymap.editor).delete_backward_word = f12;
+                pane.handle_paste("Phase two".into());
+            }
+            pane.set_keymap_bindings(&keymap);
+            let first_key = Instant::now() - Duration::from_millis(/*millis*/ 500);
+            pane.record_composer_activity_at(first_key);
+            pane.push_user_input_request(request_event(
+                "turn-1",
+                vec![question_with_options("q1", "Pick one")],
+            ));
+
+            pane.handle_key_event(edit.into());
+            pane.pre_draw_tick_at(first_key + Duration::from_secs(1));
+            assert!(!pane.has_active_view());
+            pane.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
+            let last_key = pane.last_composer_activity_at.unwrap();
+            pane.flush_pending_composer_input();
+            assert_eq!(pane.composer_text_with_pending(), "Phase 2");
+            assert!(rx.try_recv().is_err());
+
+            pane.pre_draw_tick_at(last_key + Duration::from_secs(1));
+            pane.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
+            let event = rx.try_recv().expect("expected AppEvent");
+            let (_, _, response) = expect_user_input_answer(event);
+            let answer = response.answers.get("q1").expect("answer missing");
+            assert_eq!(answer.answers, vec!["Option 2".to_string()]);
+            assert_eq!(pane.composer_text_with_pending(), "Phase 2");
+        }
+    }
+
+    #[test]
+    fn numbered_question_waits_for_pending_chord_after_idle_deadline() {
+        let (tx, _rx) = test_sender();
+        let mut pane = crate::bottom_pane::tests::test_pane(tx);
+        pane.show_selection_view(crate::bottom_pane::SelectionViewParams {
+            view_id: Some("picker"),
+            ..crate::bottom_pane::SelectionViewParams::picker()
+        });
+        pane.key_chord_reset_requested = false;
+        pane.key_chord_pending = true;
+        let request = request_event("turn-1", vec![question_with_options("q1", "Pick one")]);
+        pane.push_user_input_request(request.clone());
+        assert!(
+            pane.dismiss_app_server_request(&ResolvedAppServerRequest::UserInput {
+                call_id: request.item_id.clone(),
+            })
         );
+        assert!(!pane.key_chord_reset_requested);
 
-        overlay.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
-
-        let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
-        let answer = response.answers.get("q1").expect("answer missing");
-        assert_eq!(answer.answers, vec!["Option 2".to_string()]);
+        pane.push_user_input_request(request);
+        let idle = Instant::now() + Duration::from_secs(2);
+        pane.pre_draw_tick_at(idle);
+        assert_eq!(pane.active_view_id(), Some("picker"));
+        pane.key_chord_pending = false;
+        pane.pre_draw_tick_at(idle);
+        assert_ne!(pane.active_view_id(), Some("picker"));
     }
 
     #[test]
@@ -2662,9 +2766,7 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
         let answer = response.answers.get("q2").expect("answer missing");
@@ -3053,9 +3155,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3078,9 +3178,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3121,9 +3219,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3157,9 +3253,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(
             answer.answers,
@@ -3271,9 +3365,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(
             answer.answers,
@@ -3347,7 +3439,10 @@ mod tests {
     fn request_user_input_options_snapshot() {
         let (tx, _rx) = test_sender();
         let overlay = RequestUserInputOverlay::new(
-            request_event("turn-1", vec![question_with_options("q1", "Area")]),
+            request_event(
+                "turn-1",
+                vec![question_with_options_and_other("q1", "Area")],
+            ),
             tx,
             /*has_input_focus*/ true,
             /*enhanced_keys_supported*/ false,
@@ -3703,6 +3798,47 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_question_preserves_the_complete_url_destination() {
+        let url = "https://github.com/openai/codex/pull/12345?diff=split";
+        let (tx, _rx) = test_sender();
+        let mut question = question_without_options("q1", "Release");
+        question.question = format!("Review the release\n\nReview {url} before choosing.");
+        let overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+        let area = Rect::new(0, 0, 40, 18);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        let linked = buf
+            .content
+            .iter()
+            .filter(|cell| cell.symbol().contains("\x1b]8;;"))
+            .map(|cell| {
+                assert!(cell.symbol().starts_with(&format!("\x1b]8;;{url}\x07")));
+                crate::terminal_hyperlinks::strip_osc8(cell.symbol())
+            })
+            .collect::<String>();
+        assert_eq!(linked, url);
+        let visible = buf
+            .content
+            .chunks(40)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| crate::terminal_hyperlinks::strip_osc8(cell.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("request_user_input_wrapped_url", visible);
+    }
+
+    #[test]
     fn request_user_input_freeform_snapshot() {
         let (tx, _rx) = test_sender();
         let overlay = RequestUserInputOverlay::new(
@@ -3744,12 +3880,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        insta::assert_snapshot!(snapshot, @r"
+        insta::assert_snapshot!(snapshot, @"
 
-          Question 1/1 (1 unanswered)
-          Share details.
+        Question 1/1 (1 unanswered)
+        Share details.
 
-          › Type your answer (optional)
+        › Type your answer (optional)
 
 
 

@@ -31,8 +31,10 @@ use super::ConcurrentRequestLimit;
 use super::RequestDispatchMode;
 use super::RequestDispatcher;
 use super::RequestTaskResult;
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
+use crate::ExecServerRuntimeOptions as ExecServerRuntimePaths;
 use crate::connection::JsonRpcConnectionEvent;
+use crate::discover_v2::capability_manager::CapabilityManager;
 use crate::rpc::RpcNotificationSender;
 use crate::rpc::RpcRouter;
 use crate::rpc::RpcServerOutboundMessage;
@@ -177,8 +179,9 @@ async fn request_queue_waits_for_dispatcher_admission_before_recording_telemetry
     let requests = notifications.request_sender();
     let handler = Arc::new(ExecServerHandler::new(
         SessionRegistry::new(telemetry.clone()),
+        CapabilityManager::new(crate::LocalFileSystem::default()),
         notifications,
-        ExecServerRuntimePaths::new(
+        ExecServerRuntimeOptions::new(
             std::env::current_exe().expect("current executable"),
             /*codex_linux_sandbox_exe*/ None,
         )
@@ -386,6 +389,7 @@ fn request_telemetry_fixture(router: RpcRouter<ExecServerHandler>) -> RequestTel
     let requests = notifications.request_sender();
     let handler = Arc::new(ExecServerHandler::new(
         SessionRegistry::new(telemetry.clone()),
+        CapabilityManager::new(crate::LocalFileSystem::default()),
         notifications,
         ExecServerRuntimePaths::new(
             std::env::current_exe().expect("current executable"),

@@ -3,6 +3,7 @@ use codex_api::OpenAiVerbosity;
 use codex_api::ResponsesApiRequest;
 use codex_api::TextControls;
 use codex_api::TextFormat;
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
@@ -123,16 +124,6 @@ pub(crate) fn convert_request(
         .unwrap_or_default();
     let (tools, tool_kinds, original_function_names) = convert_tools(&response_tools)?;
     let mut messages = Vec::new();
-    if !request.instructions.trim().is_empty() {
-        messages.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(json!(request.instructions)),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-        });
-    }
-
     let mut pending_reasoning_content: Option<String> = None;
     let mut pending_assistant_content: Option<Value> = None;
     let mut pending_tool_calls: Vec<ChatToolCall> = Vec::new();
@@ -505,7 +496,7 @@ fn chat_content_is_empty(content: &Option<Value>) -> bool {
 
 fn chat_message_role(role: &str) -> &str {
     match role {
-        "developer" => "user",
+        "developer" => "system",
         role => role,
     }
 }
@@ -517,19 +508,14 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
 
     if content.len() == 1 {
         match &content[0] {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 return Some(json!(text));
             }
             ContentItem::InputImage { image, .. } => {
                 return Some(json!([convert_image_content(image)]));
             }
-            ContentItem::InputAudio { audio_url } => {
-                return Some(json!([
-                    {
-                        "type": "input_audio",
-                        "audio_url": audio_url
-                    }
-                ]));
+            ContentItem::InputAudio { audio } => {
+                return Some(json!([convert_audio_content(audio)]));
             }
         }
     }
@@ -538,18 +524,28 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
         content
             .iter()
             .map(|item| match item {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => json!({
+                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => json!({
                     "type": "text",
                     "text": text,
                 }),
                 ContentItem::InputImage { image, .. } => convert_image_content(image),
-                ContentItem::InputAudio { audio_url } => json!({
-                    "type": "input_audio",
-                    "audio_url": audio_url,
-                }),
+                ContentItem::InputAudio { audio } => convert_audio_content(audio),
             })
             .collect(),
     ))
+}
+
+fn convert_audio_content(audio: &AudioReference) -> Value {
+    match audio {
+        AudioReference::Inline { audio_url } => json!({
+            "type": "input_audio",
+            "audio_url": audio_url,
+        }),
+        AudioReference::File { file_id } => json!({
+            "type": "file",
+            "file": { "file_id": file_id },
+        }),
+    }
 }
 
 fn convert_image_content(image: &ImageReference) -> Value {
@@ -957,16 +953,30 @@ mod tests {
     fn convert_request_maps_messages_and_tools() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
-            instructions: "be terse".to_string(),
-            input: vec![ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "hello".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            }],
+            input: vec![
+                ResponseItem::Message {
+                    id: None,
+                    status: None,
+                    encrypted_content: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "be terse".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    status: None,
+                    encrypted_content: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
             tools: Some(responses_api_tools(vec![json!({
                 "type": "function",
                 "name": "shell_command",
@@ -982,8 +992,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1038,12 +1050,34 @@ mod tests {
     }
 
     #[test]
-    fn convert_request_maps_developer_messages_to_user_for_chat() {
+    fn convert_message_content_preserves_audio_reference_kind() {
+        let inline = ContentItem::InputAudio {
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/wav;base64,abc".to_string(),
+            },
+        };
+        let file = ContentItem::InputAudio {
+            audio: AudioReference::File {
+                file_id: "audio_file_123".to_string(),
+            },
+        };
+        assert_eq!(
+            convert_message_content(&[inline, file]),
+            Some(json!([
+                {"type": "input_audio", "audio_url": "data:audio/wav;base64,abc"},
+                {"type": "file", "file": {"file_id": "audio_file_123"}},
+            ]))
+        );
+    }
+
+    #[test]
+    fn convert_request_preserves_developer_instructions_as_system_for_chat() {
         let request = ResponsesApiRequest {
             model: "deepseek-v4-flash".to_string(),
-            instructions: String::new(),
             input: vec![ResponseItem::Message {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "keep going".to_string(),
@@ -1061,15 +1095,17 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
         let (chat, _) = convert_request(&request).expect("request should convert");
 
         assert_eq!(chat.messages.len(), 1);
-        assert_eq!(chat.messages[0].role, "user");
+        assert_eq!(chat.messages[0].role, "system");
         assert_eq!(chat.messages[0].content, Some(json!("keep going")));
     }
 
@@ -1077,10 +1113,11 @@ mod tests {
     fn convert_request_replays_reasoning_content_on_next_assistant_tool_call() {
         let request = ResponsesApiRequest {
             model: "deepseek-v4-flash".to_string(),
-            instructions: String::new(),
             input: vec![
                 ResponseItem::Message {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "list files".to_string(),
@@ -1099,6 +1136,8 @@ mod tests {
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "shell".to_string(),
                     namespace: None,
                     arguments: json!({ "command": "ls" }).to_string(),
@@ -1130,8 +1169,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1153,9 +1194,10 @@ mod tests {
     fn convert_request_flattens_namespace_tools_and_preserves_output_mapping() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
-            instructions: String::new(),
             input: vec![ResponseItem::FunctionCall {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 name: "lookup_order".to_string(),
                 namespace: Some("mcp__demo__".to_string()),
                 arguments: json!({ "order_id": "ord_123" }).to_string(),
@@ -1192,8 +1234,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1290,7 +1334,6 @@ mod tests {
     fn convert_request_replays_reasoning_content_past_empty_assistant_message() {
         let request = ResponsesApiRequest {
             model: "deepseek-v4-flash".to_string(),
-            instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
                     id: Some(ResponseItemId::with_suffix("rs", "1")),
@@ -1303,15 +1346,21 @@ mod tests {
                 },
                 ResponseItem::Message {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: String::new(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Read".to_string(),
                     namespace: None,
                     arguments: json!({ "file_path": "/app/file.txt" }).to_string(),
@@ -1335,8 +1384,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1358,10 +1409,11 @@ mod tests {
     fn convert_request_groups_parallel_tool_calls_with_reasoning_content() {
         let request = ResponsesApiRequest {
             model: "deepseek-v4-flash".to_string(),
-            instructions: String::new(),
             input: vec![
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Read".to_string(),
                     namespace: None,
                     arguments: json!({ "file_path": "/app/legacy.py" }).to_string(),
@@ -1371,6 +1423,8 @@ mod tests {
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Read".to_string(),
                     namespace: None,
                     arguments: json!({ "file_path": "/app/data.csv" }).to_string(),
@@ -1380,9 +1434,13 @@ mod tests {
                 },
                 ResponseItem::Message {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: String::new(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
@@ -1398,6 +1456,8 @@ mod tests {
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Read".to_string(),
                     namespace: None,
                     arguments: json!({ "file_path": "/app/config.ini" }).to_string(),
@@ -1445,8 +1505,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1468,7 +1530,6 @@ mod tests {
     fn convert_request_groups_assistant_text_with_following_tool_call() {
         let request = ResponsesApiRequest {
             model: "deepseek-v4-flash".to_string(),
-            instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
                     id: Some(ResponseItemId::with_suffix("rs", "1")),
@@ -1481,15 +1542,21 @@ mod tests {
                 },
                 ResponseItem::Message {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "I will inspect the directory.".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Bash".to_string(),
                     namespace: None,
                     arguments: json!({ "command": "ls" }).to_string(),
@@ -1499,15 +1566,21 @@ mod tests {
                 },
                 ResponseItem::Message {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: " Then I will inspect hidden files.".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
+                    status: None,
+                    encrypted_content: None,
                     name: "Bash".to_string(),
                     namespace: None,
                     arguments: json!({ "command": "ls -a" }).to_string(),
@@ -1547,8 +1620,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1575,10 +1650,10 @@ mod tests {
     fn convert_request_serializes_tool_search_outputs_into_tool_messages() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
-            instructions: String::new(),
             input: vec![
                 ResponseItem::ToolSearchCall {
                     id: None,
+                    encrypted_content: None,
                     call_id: Some("search-1".to_string()),
                     status: Some("completed".to_string()),
                     execution: "client".to_string(),
@@ -1607,8 +1682,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: None,
         };
 
@@ -1641,9 +1718,10 @@ mod tests {
     fn convert_request_rebuilds_chat_completions_response_format() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
-            instructions: String::new(),
             input: vec![ResponseItem::Message {
                 id: None,
+                status: None,
+                encrypted_content: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "return structured output".to_string(),
@@ -1661,8 +1739,10 @@ mod tests {
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
+            prompt_cache_options: None,
             client_metadata: None,
             access_programs: None,
+            request_country: Default::default(),
             text: Some(TextControls {
                 verbosity: None,
                 format: Some(TextFormat {

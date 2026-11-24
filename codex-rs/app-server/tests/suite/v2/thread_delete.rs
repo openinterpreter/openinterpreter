@@ -99,6 +99,12 @@ async fn thread_delete_rejects_paginated_writer_owned_by_another_process() -> Re
 #[tokio::test]
 async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
     let codex_home = TempDir::new()?;
+    // Guardian is disabled by default, so even an invalid storage path must be untouched.
+    let guardian_database = codex_home.path().join("message_board_guardian_1.sqlite");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&guardian_database, &guardian_database)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir(&guardian_database)?;
 
     let parent_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 0, "parent")?;
     let child_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 1, "child")?;
@@ -176,6 +182,10 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
             .await?,
         Vec::<ThreadId>::new()
     );
+    #[cfg(unix)]
+    assert_eq!(std::fs::read_link(&guardian_database)?, guardian_database);
+    #[cfg(not(unix))]
+    assert!(guardian_database.is_dir());
     Ok(())
 }
 

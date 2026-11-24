@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/realtime_settings_tests.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Output device
+  Applies to your next voice conversation.
+
+
+› 1. System default (current)
+  2. Audio interface
+  3. Other device
+  4. Back
+
+  enter select · esc back

@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TurnAborted {
@@ -34,7 +36,7 @@ impl ContextualUserFragment for TurnAborted {
         ("<turn_aborted>", "</turn_aborted>")
     }
 
-    fn body(&self) -> String {
-        format!("\n{}\n", self.guidance)
+    fn body(&self) -> ContentItem {
+        input_text(format!("\n{}\n", self.guidance))
     }
 }

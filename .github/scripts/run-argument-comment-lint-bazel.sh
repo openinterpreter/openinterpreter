@@ -9,6 +9,21 @@ if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
   # lint aspect can run across the compatible crate graph instead of failing the
   # whole build after analysis.
   bazel_lint_args+=("--skip_incompatible_explicit_targets")
+  if [[ -n "${VOICE_WINDOWS_BAZEL_REPOSITORY:-}" ]]; then
+    : "${VOICE_WINDOWS_BAZEL_REPOSITORY:?Windows voice tools are required}"
+    : "${VOICE_WINDOWS_SYSTEM_ROOT:?Windows SystemRoot is required}"
+    : "${VOICE_WINDOWS_HOST_ARCH:?Windows host architecture is required}"
+    bazel_lint_args+=(
+      "--extra_toolchains=//third_party/voice:windows_pkg_config_toolchain,//third_party/voice:windows_cmake_toolchain"
+      "--repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1"
+      "--inject_repository=voice_windows_tools=${VOICE_WINDOWS_BAZEL_REPOSITORY}"
+      "--//third_party/voice:windows_installed_tools=@voice_windows_tools//:tools"
+      "--action_env=SystemRoot=${VOICE_WINDOWS_SYSTEM_ROOT}"
+      "--host_action_env=SystemRoot=${VOICE_WINDOWS_SYSTEM_ROOT}"
+      "--action_env=PROCESSOR_ARCHITECTURE=${VOICE_WINDOWS_HOST_ARCH}"
+      "--host_action_env=PROCESSOR_ARCHITECTURE=${VOICE_WINDOWS_HOST_ARCH}"
+    )
+  fi
 fi
 
 read_query_labels() {

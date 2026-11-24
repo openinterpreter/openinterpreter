@@ -1,5 +1,3 @@
-pub mod auth;
-
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingError;
 use crate::outgoing_message::OutgoingMessage;
@@ -45,8 +43,10 @@ pub use remote_control::take_remote_control_disabled_env;
 pub use stdio::start_stdio_connection;
 pub use unix_socket::AppServerStartupLock;
 pub use unix_socket::DaemonShutdownAccess;
+pub use unix_socket::DaemonSocketFileGuard;
 pub use unix_socket::acquire_app_server_startup_lock;
 pub use unix_socket::start_control_socket_acceptor;
+pub use unix_socket::verified_local_daemon_socket;
 pub use websocket::start_websocket_acceptor;
 
 const INTERNAL_ERROR_CODE: i64 = -32603;

@@ -9,6 +9,7 @@ use std::time::Duration;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
+use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -83,7 +84,7 @@ impl ThreadStore for GatedCheckpointStore {
 
     delegate_store_methods! {
         fn create_thread(params: CreateThreadParams) -> ();
-        fn resume_thread(params: ResumeThreadParams) -> ();
+        fn resume_thread(params: ResumeThreadParams) -> Arc<Vec<RolloutItem>>;
         fn append_items(params: AppendThreadItemsParams) -> ();
         fn discard_thread(thread_id: ThreadId) -> ();
         fn load_history(params: LoadThreadHistoryParams) -> StoredThreadHistory;
@@ -179,7 +180,11 @@ async fn steered_input_checkpoint_controls_next_request(
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = first else {
+    let TurnInputSubmission::Started {
+        turn_id,
+        root_turn_id,
+    } = first
+    else {
         panic!("first input should start a turn");
     };
     wait_for_event(&test.codex, |event| {
@@ -203,7 +208,10 @@ async fn steered_input_checkpoint_controls_next_request(
     };
     assert_eq!(
         test.codex.start_or_steer_turn(input).await?,
-        TurnInputSubmission::Steered { turn_id }
+        TurnInputSubmission::Steered {
+            turn_id,
+            root_turn_id
+        }
     );
     // Steering still waits for the existing inference stream to finish.
     assert!(checkpoint_requests.try_recv().is_err());

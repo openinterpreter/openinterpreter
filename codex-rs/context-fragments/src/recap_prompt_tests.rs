@@ -1,12 +1,13 @@
 use super::RecapPrompt;
 use crate::ContextualUserFragment;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_string::approx_token_count;
 use pretty_assertions::assert_eq;
 
 #[test]
 fn recap_prompt_bounds_the_entire_utf8_fragment() {
     for history in ["a".repeat(/*n*/ 40_000), "進捗🦀".repeat(/*n*/ 10_000)] {
-        let prompt = RecapPrompt::new(&history).render();
+        let prompt = RecapPrompt::new(&history).render().expect_text();
         assert!(prompt.len() <= RecapPrompt::MAX_BYTES);
         assert!(approx_token_count(&prompt) <= RecapPrompt::MAX_ESTIMATED_TOKENS);
         let retained = prompt.split_once("Conversation:\n").unwrap().1;
@@ -18,6 +19,6 @@ fn recap_prompt_bounds_the_entire_utf8_fragment() {
 #[test]
 fn recap_prompt_preserves_history_that_fits() {
     let history = "User: Fix the parser.\n\nAssistant: Done. What should happen on empty input?";
-    let prompt = RecapPrompt::new(history).render();
+    let prompt = RecapPrompt::new(history).render().expect_text();
     assert_eq!(prompt.split_once("Conversation:\n").unwrap().1, history);
 }

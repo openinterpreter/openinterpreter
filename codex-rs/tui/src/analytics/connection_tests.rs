@@ -58,6 +58,7 @@ async fn remote() -> (RemoteAppServerClient, tokio::task::JoinHandle<()>) {
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: 8,
+        required_human_approval: true,
     })
     .await
     .unwrap();

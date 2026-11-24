@@ -7,11 +7,13 @@ use crate::history_cell::HistoryCell;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use codex_app_server_protocol::FileUpdateChange;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::WebSearchAction;
 use codex_app_server_protocol::WebSearchItem;
 use codex_utils_path_uri::LegacyAppPathString;
@@ -67,7 +69,7 @@ fn completed_patch_restores_rich_diff_and_styles() {
     );
     changes[2].diff.push_str("\n\nMoved to: src/after.rs");
     let actual = cells(
-        ThreadItem::FileChange {
+        ThreadItemPayload::FileChange {
             id: "patch-1".to_string(),
             changes,
             status: PatchApplyStatus::Completed,
@@ -93,7 +95,7 @@ fn unfinished_and_rejected_patches_keep_their_outcome() {
     .into_iter()
     .flat_map(|status| {
         cells(
-            ThreadItem::FileChange {
+            ThreadItemPayload::FileChange {
                 id: "patch-1".to_string(),
                 changes: vec![FileUpdateChange {
                     path: "main.rs".to_string(),
@@ -124,19 +126,22 @@ fn tool_and_notice_projection_uses_normal_transcript_presentation() {
         id: "image-1".to_string(),
         status: "completed".to_string(),
         revised_prompt: Some("A diagram of the history pages".to_string()),
-        result: String::new(),
+        image: GeneratedImageRef::Inline {
+            result: String::new(),
+        },
         transparent_background: None,
         failure: None,
         saved_path: None,
+        input_images: Vec::new(),
         imagegen_request_id: None,
         generation_id: None,
     };
     let items = vec![
-        ThreadItem::EnteredReviewMode {
+        ThreadItemPayload::EnteredReviewMode {
             id: "review-start".to_string(),
             review: "current changes".to_string(),
         },
-        ThreadItem::WebSearch(WebSearchItem {
+        ThreadItemPayload::WebSearch(WebSearchItem {
             id: "search-1".to_string(),
             query: "fallback query".to_string(),
             action: Some(WebSearchAction::FindInPage {
@@ -145,26 +150,28 @@ fn tool_and_notice_projection_uses_normal_transcript_presentation() {
             }),
             results: None,
         }),
-        ThreadItem::ImageView {
+        ThreadItemPayload::ImageView {
             id: "view-1".to_string(),
             path: LegacyAppPathString::from_string("diagram.png".to_string()),
         },
-        ThreadItem::ImageGeneration(image.clone()),
-        ThreadItem::ImageGeneration(ImageGenerationItem {
+        ThreadItemPayload::ImageGeneration(image.clone()),
+        ThreadItemPayload::ImageGeneration(ImageGenerationItem {
             status: "in_progress".into(),
             ..image
         }),
-        ThreadItem::SubAgentActivity {
+        ThreadItemPayload::SubAgentActivity {
+            model: None,
+            reasoning_effort: None,
             id: "agent-1".to_string(),
             kind: SubAgentActivityKind::Completed,
             agent_thread_id: "01912345-1234-7123-8123-123456789abc".to_string(),
             agent_path: "/root/reviewer".to_string(),
         },
-        ThreadItem::ExitedReviewMode {
+        ThreadItemPayload::ExitedReviewMode {
             id: "review-end".to_string(),
             review: "No findings".to_string(),
         },
-        ThreadItem::ContextCompaction {
+        ThreadItemPayload::ContextCompaction {
             id: "compact-1".to_string(),
         },
     ];

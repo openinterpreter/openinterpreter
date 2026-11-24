@@ -11,12 +11,12 @@ from .layout import build_package_dir
 from .layout import prepare_package_dir
 from .layout import validate_package_dir
 from .ripgrep import resolve_rg_bin
+from .symbols import strip_binary
 from .targets import PACKAGE_VARIANTS
 from .targets import TARGET_SPECS
 from .targets import PackageInputs
 from .targets import default_target
 from .targets import resolve_input_path
-from .zsh import resolve_zsh_bin
 from .version import read_workspace_version
 
 
@@ -45,6 +45,10 @@ def parse_package_version(value: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    return create_parser().parse_args()
+
+
+def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a canonical Codex package directory and optional archive.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -106,6 +110,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--strip",
+        choices=("auto", "all", "none"),
+        default="auto",
+        help=(
+            "Strip Unix first-party package binaries: auto strips source-built "
+            "release-profile inputs, all also strips other profiles and prebuilt "
+            "inputs, none preserves symbols. "
+            "Original inputs and third-party resources are never modified."
+        ),
+    )
+    parser.add_argument(
+        "--strip-tool",
+        help="Target-compatible strip executable override, for example llvm-strip.",
+    )
+    parser.add_argument(
         "--entrypoint-bin",
         type=Path,
         help=(
@@ -130,26 +149,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exec-server-bin",
+        type=Path,
+        help="Optional prebuilt codex-exec-server executable. If omitted, build it with Cargo.",
+    )
+    parser.add_argument(
         "--bwrap-bin",
         type=Path,
         help=(
             "Optional prebuilt Linux bwrap executable. If omitted for Linux "
             "targets, bwrap is built with Cargo."
         ),
-    )
-    zsh_source = parser.add_mutually_exclusive_group()
-    zsh_source.add_argument(
-        "--zsh-manifest",
-        type=Path,
-        help=(
-            "Optional DotSlash manifest for the patched zsh fork instead of "
-            "scripts/codex_package/codex-zsh."
-        ),
-    )
-    zsh_source.add_argument(
-        "--zsh-bin",
-        type=Path,
-        help="Optional prebuilt zsh executable instead of fetching from a manifest.",
     )
     parser.add_argument(
         "--codex-command-runner-bin",
@@ -177,11 +187,18 @@ def parse_args() -> argparse.Namespace:
             "scripts/codex_package/rg."
         ),
     )
-    return parser.parse_args()
+    return parser
 
 
 def main() -> int:
     args = parse_args()
+    package_dir = assemble_package(args)
+    archive_package(package_dir, args)
+    return 0
+
+
+def assemble_package(args: argparse.Namespace) -> Path:
+    """Build the directory before optional downstream additions and archiving."""
     spec = TARGET_SPECS[getattr(args, "target", None) or default_target()]
     variant = PACKAGE_VARIANTS[args.variant]
     package_dir_arg = getattr(args, "package_dir", None)
@@ -211,6 +228,11 @@ def main() -> int:
             "prebuilt code-mode host executable",
             "--code-mode-host-bin",
         ),
+        exec_server_bin=resolve_optional_input_path(
+            args.exec_server_bin,
+            "prebuilt executor executable",
+            "--exec-server-bin",
+        ),
         bwrap_bin=resolve_optional_input_path(
             args.bwrap_bin,
             "prebuilt Linux bwrap executable",
@@ -238,25 +260,36 @@ def main() -> int:
         entrypoint_bin=source_outputs.entrypoint_bin,
         managed_codex_bin=source_outputs.managed_codex_bin,
         code_mode_host_bin=source_outputs.code_mode_host_bin,
+        exec_server_bin=source_outputs.exec_server_bin,
         rg_bin=resolve_rg_bin(spec, args.rg_bin),
-        zsh_bin=resolve_zsh_bin(spec, args.zsh_manifest, zsh_bin=args.zsh_bin),
         bwrap_bin=source_outputs.bwrap_bin,
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, args.package_version, variant, spec, inputs)
-    validate_package_dir(
-        package_dir, variant, spec, include_zsh=inputs.zsh_bin is not None
-    )
+    for filename, prebuilt in (
+        (variant.entrypoint_name(spec), args.entrypoint_bin),
+        (f"codex-code-mode-host{spec.exe_suffix}", args.code_mode_host_bin),
+        (f"codex-exec-server{spec.exe_suffix}", args.exec_server_bin),
+    ):
+        if args.strip == "all" or (
+            args.strip == "auto"
+            and args.cargo_profile == "release"
+            and prebuilt is None
+        ):
+            strip_binary(package_dir / "bin" / filename, spec, tool=args.strip_tool)
+    validate_package_dir(package_dir, variant, spec)
+    return package_dir
 
+
+def archive_package(package_dir: Path, args: argparse.Namespace) -> None:
     for archive_output in args.archive_output:
         archive_path = archive_output.resolve()
         write_archive(package_dir, archive_path, force=args.force)
         print(f"Built Codex package archive at {archive_path}")
 
     print(f"Built Codex package directory at {package_dir}")
-    return 0
 
 
 def resolve_optional_input_path(

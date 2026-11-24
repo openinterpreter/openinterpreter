@@ -101,6 +101,6 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
             RolloutItem::TurnContext(context) => Some(context.summary),
             _ => None,
         });
-    assert_eq!(checkpoint, Some(ReasoningSummary::Detailed));
+    assert_eq!(checkpoint, Some(Some(ReasoningSummary::Detailed)));
     Ok(())
 }

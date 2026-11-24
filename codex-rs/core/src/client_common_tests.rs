@@ -21,6 +21,8 @@ fn prompt_with_image_outputs(detail: Option<ImageDetail>) -> Prompt {
     Prompt {
         input: vec![
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![
@@ -111,8 +113,8 @@ fn request_copies_project_image_details_for_receiving_model(
 fn serializes_text_verbosity_when_set() {
     let input: Vec<ResponseItem> = vec![];
     let req = ResponsesApiRequest {
+        request_country: Default::default(),
         model: "gpt-5.4".to_string(),
-        instructions: "i".to_string(),
         input,
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
@@ -123,6 +125,7 @@ fn serializes_text_verbosity_when_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: Some(TextControls {
             verbosity: Some(OpenAiVerbosity::Low),
@@ -159,8 +162,8 @@ fn serializes_text_schema_with_strict_format() {
     .expect("text controls");
 
     let req = ResponsesApiRequest {
+        request_country: Default::default(),
         model: "gpt-5.4".to_string(),
-        instructions: "i".to_string(),
         input,
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
@@ -171,6 +174,7 @@ fn serializes_text_schema_with_strict_format() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: Some(text_controls),
         client_metadata: None,
@@ -221,8 +225,8 @@ fn serializes_text_schema_with_non_strict_format() {
 fn omits_text_when_not_set() {
     let input: Vec<ResponseItem> = vec![];
     let req = ResponsesApiRequest {
+        request_country: Default::default(),
         model: "gpt-5.4".to_string(),
-        instructions: "i".to_string(),
         input,
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
@@ -233,6 +237,7 @@ fn omits_text_when_not_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: None,
         client_metadata: None,
@@ -246,8 +251,8 @@ fn omits_text_when_not_set() {
 #[test]
 fn serializes_flex_service_tier_when_set() {
     let req = ResponsesApiRequest {
+        request_country: Default::default(),
         model: "gpt-5.4".to_string(),
-        instructions: "i".to_string(),
         input: vec![],
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
@@ -258,6 +263,7 @@ fn serializes_flex_service_tier_when_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: Some(ServiceTier::Flex.to_string()),
         text: None,
         client_metadata: None,

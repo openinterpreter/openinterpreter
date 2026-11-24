@@ -7,8 +7,6 @@ expression: buffer_text(&buffer)
 
 › first
 
-
-
 › second
 
 Ctrl+Space select

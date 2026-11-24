@@ -6,6 +6,15 @@ use codex_extension_api::SelectedPluginSnapshot;
 use codex_utils_plugins::PluginIdentity;
 use pretty_assertions::assert_eq;
 
+fn selected_local_plugin(plugin_id: &str) -> SelectedPluginIdentity {
+    SelectedPluginIdentity {
+        selected_root_id: Some("capability-root".to_string()),
+        plugin_id: codex_core_plugins::PluginIdentity::Local {
+            plugin_id: plugin_id.to_string(),
+        },
+    }
+}
+
 #[tokio::test]
 async fn active_plugin_ids_select_and_validate_by_source() {
     let (_session, mut turn_context) = make_session_and_context().await;
@@ -77,18 +86,16 @@ async fn active_plugin_ids_select_and_validate_by_source() {
             .collect();
         let selected_plugins = selected_ids
             .into_iter()
-            .map(|plugin_id| SelectedPluginIdentity {
-                selected_root_id: "capability-root".to_string(),
-                plugin_id: plugin_id.to_string(),
-            })
+            .map(selected_local_plugin)
             .collect::<Vec<_>>();
         turn_context.active_host_plugin_identities = Some(identities);
-        turn_context.extension_data.insert(SelectedPluginSnapshot {
+        let selected = SelectedPluginSnapshot {
             plugins: selected_plugins,
             ..Default::default()
-        });
+        };
+        turn_context.extension_data.insert(selected.clone());
         assert_eq!(
-            turn_context.active_plugin_ids_for_telemetry(),
+            turn_context.active_plugin_ids_for_telemetry(Some(&selected)),
             expected.map(|ids| ids.into_iter().map(str::to_string).collect::<Vec<_>>()),
             "{name}"
         );
@@ -120,23 +127,21 @@ async fn active_plugin_ids_enforce_bounds_after_selection_and_deduplication() {
                 .extension_data
                 .insert(SelectedPluginSnapshot::default());
             assert_eq!(
-                turn_context.active_plugin_ids_for_telemetry(),
+                turn_context.active_plugin_ids_for_telemetry(None),
                 (length == 128).then_some(vec![id]),
                 "length={length}, remote={remote}"
             );
         }
         let id = format!("{}@local", "p".repeat(length - 6));
-        let selected_plugin = SelectedPluginIdentity {
-            selected_root_id: "capability-root".to_string(),
-            plugin_id: id.clone(),
-        };
+        let selected_plugin = selected_local_plugin(&id);
         turn_context.active_host_plugin_identities = Some(Vec::new());
-        turn_context.extension_data.insert(SelectedPluginSnapshot {
+        let selected = SelectedPluginSnapshot {
             plugins: vec![selected_plugin],
             ..Default::default()
-        });
+        };
+        turn_context.extension_data.insert(selected.clone());
         assert_eq!(
-            turn_context.active_plugin_ids_for_telemetry(),
+            turn_context.active_plugin_ids_for_telemetry(Some(&selected)),
             (length == 128).then_some(vec![id]),
             "selected length={length}"
         );
@@ -155,18 +160,16 @@ async fn active_plugin_ids_enforce_bounds_after_selection_and_deduplication() {
             .collect();
         let selected_plugins = ids[count / 2 - 1..]
             .iter()
-            .map(|id| SelectedPluginIdentity {
-                selected_root_id: "capability-root".to_string(),
-                plugin_id: id.clone(),
-            })
+            .map(|id| selected_local_plugin(id))
             .collect::<Vec<_>>();
         turn_context.active_host_plugin_identities = Some(identities);
-        turn_context.extension_data.insert(SelectedPluginSnapshot {
+        let selected = SelectedPluginSnapshot {
             plugins: selected_plugins,
             ..Default::default()
-        });
+        };
+        turn_context.extension_data.insert(selected.clone());
         assert_eq!(
-            turn_context.active_plugin_ids_for_telemetry(),
+            turn_context.active_plugin_ids_for_telemetry(Some(&selected)),
             (count == 512).then_some(ids),
             "{count} distinct IDs across host and selected inputs, with one overlap"
         );

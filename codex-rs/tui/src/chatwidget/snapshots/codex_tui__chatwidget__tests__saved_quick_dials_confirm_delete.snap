@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Delete preset 1?
+  coding
+
+
+› 1. Delete preset 1
+
+  enter select · esc back

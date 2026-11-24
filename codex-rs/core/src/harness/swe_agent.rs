@@ -1,6 +1,6 @@
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
-use crate::client_common::ResponseStream;
+use crate::client_common::SamplingStream;
 use codex_chat_wire_compat::ToolKinds;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -46,13 +46,19 @@ pub(crate) fn build_request(
     ))
 }
 
-pub(crate) fn inject_action_calls(stream: ResponseStream, terminal_submit: bool) -> ResponseStream {
+pub(crate) fn inject_action_calls(stream: SamplingStream, terminal_submit: bool) -> SamplingStream {
     let (tx_event, rx_event) = mpsc::channel(1600);
+    let mut stream = stream;
+    let routing_affinity = stream.routing_affinity.take();
+    let interrupt = stream.interrupt.take();
+    let settlement_started = stream.settlement_started.clone();
 
     tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(event) = stream.next().await {
-            let harness_item = match &event {
+        while let Some(event) = tokio::select! {
+            _ = tx_event.closed() => return,
+            event = stream.next() => event,
+        } {
+            let harness_item = match &event.event {
                 Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
                     role, content, ..
                 })) if role == "assistant" => plain_text_content(content)
@@ -67,7 +73,7 @@ pub(crate) fn inject_action_calls(stream: ResponseStream, terminal_submit: bool)
 
             if let Some(item) = harness_item
                 && tx_event
-                    .send(Ok(ResponseEvent::OutputItemDone(item)))
+                    .send(Ok(ResponseEvent::OutputItemDone(item)).into())
                     .await
                     .is_err()
             {
@@ -76,9 +82,58 @@ pub(crate) fn inject_action_calls(stream: ResponseStream, terminal_submit: bool)
         }
     });
 
-    ResponseStream {
+    SamplingStream {
+        routing_affinity,
         rx_event,
+        interrupt,
         consumer_dropped: tokio_util::sync::CancellationToken::new(),
+        settlement_started,
+    }
+}
+
+#[cfg(test)]
+mod response_delivery_tests {
+    use super::*;
+    use crate::client_common::SamplingCharge;
+    use crate::client_common::SamplingEvent;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    #[tokio::test]
+    async fn harness_keeps_terminal_accounting_and_settlement_owner() {
+        let (tx, rx_event) = mpsc::channel(1);
+        let settlement_started = Arc::new(AtomicBool::new(true));
+        let input = SamplingStream {
+            routing_affinity: None,
+            rx_event,
+            interrupt: None,
+            consumer_dropped: tokio_util::sync::CancellationToken::new(),
+            settlement_started: Arc::clone(&settlement_started),
+        };
+        let mut output = inject_action_calls(input, false);
+        assert!(Arc::ptr_eq(&output.settlement_started, &settlement_started));
+        tx.send(SamplingEvent {
+            event: Ok(ResponseEvent::Completed {
+                response_id: "accounted".into(),
+                token_usage: None,
+                usage_metadata: None,
+                reasoning_removals: None,
+                end_turn: Some(true),
+            }),
+            hook_output: SamplingCharge {
+                posted: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("send terminal event");
+        drop(tx);
+        let terminal = output.next().await.expect("forward terminal event");
+        assert!(terminal.hook_output.posted);
+        assert!(matches!(
+            terminal.event,
+            Ok(ResponseEvent::Completed { .. })
+        ));
     }
 }
 
@@ -247,6 +302,8 @@ fn build_harness_follow_up_item(content: &str, terminal_submit: bool) -> Option<
     }
 
     Some(ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -260,6 +317,7 @@ fn build_harness_follow_up_item(content: &str, terminal_submit: bool) -> Option<
 fn build_swe_agent_command_call(command: String) -> ResponseItem {
     let id = SWE_AGENT_ACTION_CALL_ID.fetch_add(1, Ordering::Relaxed);
     ResponseItem::CustomToolCall {
+        encrypted_content: None,
         id: None,
         status: None,
         call_id: format!("swe-agent-command-{id}"),
@@ -273,6 +331,7 @@ fn build_swe_agent_command_call(command: String) -> ResponseItem {
 fn build_shell_call(command: String) -> ResponseItem {
     let id = SWE_AGENT_ACTION_CALL_ID.fetch_add(1, Ordering::Relaxed);
     ResponseItem::LocalShellCall {
+        encrypted_content: None,
         id: None,
         call_id: Some(format!("swe-agent-bash-{id}")),
         status: LocalShellStatus::InProgress,
@@ -538,7 +597,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => Some(text),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
@@ -593,6 +652,8 @@ mod tests {
     fn builds_observed_initial_request_shape() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: Some(codex_protocol::ResponseItemId::from_server(
                     "user".to_string(),
                 )),
@@ -725,6 +786,8 @@ mod tests {
         assert_eq!(
             item,
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -827,6 +890,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
@@ -839,16 +904,22 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "<function=bash>bad</function>".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
@@ -859,10 +930,14 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "DISCUSSION\n```bash\nls\n```".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: None,
 

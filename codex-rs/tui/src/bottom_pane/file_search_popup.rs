@@ -155,6 +155,7 @@ impl WidgetRef for &FileSearchPopup {
                         fuzzy_match(&name, &self.display_query).map(|(indices, _)| indices)
                     };
                     GenericDisplayRow {
+                        wrapped_name: None,
                         category_tag: None,
                         selection_style: Some(super::picker_style::selection_style()),
                         name,

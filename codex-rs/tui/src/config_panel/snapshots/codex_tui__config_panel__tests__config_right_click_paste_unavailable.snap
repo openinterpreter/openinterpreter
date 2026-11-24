@@ -1,0 +1,18 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&panel, 140)"
+---
+
+  Configuration
+  Changes save automatically
+
+   Appearance   Notifications   Input   Sessions   Text selection
+
+  Copy on select        Auto · On ›          Copy transcript, footer, and composer selections on release; Auto follows terminal defaults
+  Deselect after copy   [ ] Off              Remove read-only transcript and footer highlights after automatic copy succeeds
+› Right-click paste     On · Unavailable ›   Unavailable in inline mode; use your terminal's paste command
+
+
+
+
+  left/right group · / search · enter open · esc clear search/close

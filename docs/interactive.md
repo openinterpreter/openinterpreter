@@ -20,17 +20,17 @@ interpreter "find the auth middleware and explain how it works"
 
 The composer is the prompt box at the bottom of the TUI.
 
-| Action | Keys or command |
-| ------ | --------------- |
-| Send message | `Enter` |
-| Add a newline | `Shift+Enter` |
-| Open slash commands | `/` |
-| Mention files | `@` or `/mention` |
-| Edit prompt in `$VISUAL` or `$EDITOR` | `Ctrl+G` |
-| Search prompt history | `Ctrl+R` |
-| Queue a follow-up while work is running | `Tab` |
-| Cancel or back out | `Esc` |
-| Quit | `/exit` or `Ctrl+C` twice |
+| Action                                  | Keys or command           |
+| --------------------------------------- | ------------------------- |
+| Send message                            | `Enter`                   |
+| Add a newline                           | `Shift+Enter`             |
+| Open slash commands                     | `/`                       |
+| Mention files                           | `@` or `/mention`         |
+| Edit prompt in `$VISUAL` or `$EDITOR`   | `Ctrl+G`                  |
+| Search prompt history                   | `Ctrl+R`                  |
+| Queue a follow-up while work is running | `Tab`                     |
+| Cancel or back out                      | `Esc`                     |
+| Quit                                    | `/exit` or `Ctrl+C` twice |
 
 ## Files and Images
 
@@ -88,22 +88,22 @@ risky behavior before summaries.
 Long-running commands can stay alive in background terminals while the agent
 continues.
 
-| Command | Purpose |
-| ------- | ------- |
-| `/ps` | List background terminals |
+| Command | Purpose                   |
+| ------- | ------------------------- |
+| `/ps`   | List background terminals |
 | `/stop` | Stop background terminals |
 
 ## Session Controls
 
-| Command | Purpose |
-| ------- | ------- |
-| `/new` | Start a fresh conversation |
-| `/resume` | Pick an older session |
-| `/fork` | Branch the current session |
-| `/compact` | Summarize older context |
-| `/clear` | Clear the screen |
-| `/copy` | Copy the latest assistant output |
-| `/theme` | Change syntax highlighting theme |
-| `/status` | Inspect model, sandbox, approvals, and token state |
+| Command    | Purpose                                            |
+| ---------- | -------------------------------------------------- |
+| `/new`     | Start a fresh conversation                         |
+| `/resume`  | Pick an older session                              |
+| `/fork`    | Branch the current session                         |
+| `/compact` | Summarize older context                            |
+| `/clear`   | Clear the screen                                   |
+| `/copy`    | Copy the latest assistant output                   |
+| `/theme`   | Change syntax highlighting theme                   |
+| `/status`  | Inspect model, sandbox, approvals, and token state |
 
 Open Interpreter keeps session state locally under `~/.openinterpreter/`.

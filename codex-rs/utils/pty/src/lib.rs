@@ -6,10 +6,13 @@ pub use child_command::Command;
 pub use child_command::DescriptorPolicy;
 pub use child_command::ProcessMode;
 pub use child_command::SpawnFallback;
+#[cfg(target_os = "linux")]
+mod linux_fds;
 pub mod pipe;
 mod process;
 pub mod process_group;
 pub mod pty;
+pub use pty::ChildFds;
 #[cfg(test)]
 mod tests;
 #[cfg(unix)]
@@ -55,3 +58,13 @@ pub use win::PsuedoCon;
 pub use win::conpty::RawConPty;
 #[cfg(windows)]
 pub use windows_input::WindowsTtyInputNormalizer;
+
+#[cfg(target_os = "linux")]
+mod spawn_helper;
+#[cfg(target_os = "linux")]
+mod spawn_helper_main;
+#[cfg(target_os = "linux")]
+pub use spawn_helper::init_spawn_helper;
+
+#[cfg(all(test, target_os = "linux"))]
+use tests::spawn_helper_tests;

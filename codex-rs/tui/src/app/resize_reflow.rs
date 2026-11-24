@@ -28,6 +28,7 @@ use ratatui::text::Line;
 
 use super::App;
 use super::InitialHistoryReplayBuffer;
+use crate::bottom_pane::RestrictedInputMode;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::insert_history::HistoryLineWrapPolicy;
@@ -289,23 +290,6 @@ impl App {
         );
     }
 
-    fn clear_terminal_for_resize_replay(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        if tui.is_owned_screen() {
-            return Ok(());
-        }
-        if tui.is_alt_screen_active() {
-            tui.terminal.clear_visible_screen()?;
-        } else {
-            tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
-        }
-        let mut area = tui.terminal.viewport_area;
-        if area.y > 0 {
-            area.y = 0;
-            tui.terminal.set_viewport_area(area);
-        }
-        Ok(())
-    }
-
     /// Finish stream consolidation by repairing any resize work that happened during streaming.
     ///
     /// This is called after agent-message stream cells have either been replaced by an
@@ -430,6 +414,18 @@ impl App {
         tui: &mut tui::Tui,
         size: ratatui::layout::Size,
     ) -> Result<()> {
+        let input_mode = if self.reconnect.offline {
+            Some(RestrictedInputMode::Disconnected)
+        } else if self
+            .current_displayed_thread_id()
+            .is_some_and(|id| self.thread_unavailable(id))
+        {
+            Some(RestrictedInputMode::UnavailableThread)
+        } else {
+            None
+        };
+        self.chat_widget
+            .set_composer_restricted_input_mode(input_mode);
         self.flush_native_history(tui);
         if tui.is_owned_screen() {
             let width = self.transcript_reflow.note_width(size.width);
@@ -447,7 +443,13 @@ impl App {
             tui.terminal.last_known_screen_size,
             &tui.frame_requester(),
         );
-        if should_rebuild_transcript {
+        if should_rebuild_transcript && tui.has_deferred_replay_clear() {
+            // The live tail may already be gone. Replace its queued replay at the
+            // new width in this frame, without waiting for the resize debounce.
+            if !self.transcript_cells.is_empty() {
+                self.transcript_reflow.schedule_immediate();
+            }
+        } else if should_rebuild_transcript {
             // Resize-sensitive history inserts queued before this frame may be wrapped for the old
             // viewport or targeted at rows no longer visible. Drop them and let resize reflow
             // rebuild from transcript cells.
@@ -533,17 +535,8 @@ impl App {
         let reflowed_lines = reflow_result.lines;
         let reflowed_rows = reflowed_lines.len();
 
-        // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
-        tui.clear_pending_history_lines();
-        self.clear_terminal_for_resize_replay(tui)?;
-
         self.deferred_history_lines.clear();
-        if !reflowed_lines.is_empty() {
-            tui.insert_history_hyperlink_lines_with_wrap_policy(
-                reflowed_lines,
-                self.history_line_wrap_policy(),
-            );
-        }
+        tui.queue_history_replay(reflowed_lines, self.history_line_wrap_policy());
         self.last_rendered_history_tail = self
             .native_history
             .replayable_cells(&self.transcript_cells)
@@ -580,6 +573,10 @@ impl App {
             && self
                 .resize_reflow_max_rows()
                 .is_some_and(|max_rows| rendered_rows < max_rows)
+            && !self
+                .transcript_cells
+                .iter()
+                .any(|cell| cell.as_any().is::<history_cell::ClearScreenHeader>())
     }
 
     fn request_scrollback_history_top_up(&self, rendered_rows: usize) {
@@ -621,16 +618,8 @@ impl App {
             self.render_transcript_lines_for_reflow(width).lines
         };
 
-        tui.clear_pending_history_lines();
-        self.clear_terminal_for_resize_replay(tui)?;
-
         self.deferred_history_lines.clear();
-        if !reflowed_lines.is_empty() {
-            tui.insert_history_hyperlink_lines_with_wrap_policy(
-                reflowed_lines,
-                self.history_line_wrap_policy(),
-            );
-        }
+        tui.queue_history_replay(reflowed_lines, self.history_line_wrap_policy());
 
         Ok(())
     }
@@ -671,6 +660,9 @@ impl App {
                 is_stream_continuation: cell.is_stream_continuation(),
             });
 
+            if cell.as_any().is::<history_cell::ClearScreenHeader>() {
+                break;
+            }
             if row_cap.is_some_and(|max_rows| rendered_rows > max_rows) {
                 history_was_truncated = true;
                 break;

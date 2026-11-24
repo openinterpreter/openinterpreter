@@ -11,11 +11,16 @@ use crate::tools::context::ToolPayload;
 #[cfg(test)]
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::registry::AnyToolResult;
-use crate::tools::registry::CoreToolRuntime;
+use crate::tools::registry::NativeReview;
+use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolArgumentDiffConsumer;
+use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 #[cfg(test)]
 use crate::tools::spec_plan::finalize_tool_router;
+use codex_otel::SessionTelemetry;
+use codex_otel::TOOL_REGISTRATIONS_METRIC;
+use codex_otel::TOOL_REGISTRATIONS_METRIC_BUCKETS;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SearchToolCallParams;
 #[cfg(test)]
@@ -33,12 +38,32 @@ use tracing::instrument;
 
 pub use crate::tools::context::ToolCallSource;
 
-#[derive(Clone, Debug, PartialEq)]
+const EXPOSURE_DIRECT: &str = "direct";
+const EXPOSURE_DIRECT_MODEL_ONLY: &str = "direct_model_only";
+const EXPOSURE_DEFERRED: &str = "deferred";
+const EXPOSURE_DEFERRED_MODEL_ONLY: &str = "deferred_model_only";
+const EXPOSURE_CODE_MODE_ONLY: &str = "code_mode_only";
+const EXPOSURE_HIDDEN: &str = "hidden";
+
+#[derive(Clone, PartialEq)]
 pub struct ToolCall {
     pub tool_name: ToolName,
     pub call_id: String,
     pub payload: ToolPayload,
     pub encrypted_function_args: Option<Vec<String>>,
+    /// Original function call, retained only for tools that opt into native review.
+    pub native_call: Option<Arc<ResponseItem>>,
+}
+
+// The original call can contain credentials, plaintext messages, or replay ciphertext.
+impl std::fmt::Debug for ToolCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolCall")
+            .field("tool_name", &self.tool_name)
+            .field("call_id", &self.call_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ToolCall {
@@ -76,6 +101,7 @@ pub struct ToolRouter {
     model_visible_specs: Arc<[ToolSpec]>,
     tool_mode: ToolMode,
     code_mode_tool_names: BTreeMap<String, ToolName>,
+    exec_definitions: Option<Arc<Vec<codex_code_mode::ExecDefinition>>>,
     tool_namespaces_info: Option<TurnToolNamespacesInfo>,
     can_manage_children: bool,
 }
@@ -116,6 +142,7 @@ impl ToolRouter {
         model_visible_specs: Vec<ToolSpec>,
         tool_mode: ToolMode,
         code_mode_tool_names: BTreeMap<String, ToolName>,
+        exec_definitions: Option<Arc<Vec<codex_code_mode::ExecDefinition>>>,
         tool_namespaces_info: Option<TurnToolNamespacesInfo>,
         child_management_tools: &[ToolName],
     ) -> Self {
@@ -124,6 +151,7 @@ impl ToolRouter {
             model_visible_specs: model_visible_specs.into(),
             tool_mode,
             code_mode_tool_names,
+            exec_definitions,
             tool_namespaces_info,
             can_manage_children: false,
         };
@@ -138,6 +166,10 @@ impl ToolRouter {
         Arc::clone(&self.model_visible_specs)
     }
 
+    pub(crate) fn exec_definitions(&self) -> Option<Arc<Vec<codex_code_mode::ExecDefinition>>> {
+        self.exec_definitions.clone()
+    }
+
     pub(crate) fn tool_mode(&self) -> ToolMode {
         self.tool_mode
     }
@@ -148,8 +180,6 @@ impl ToolRouter {
     }
 
     /// The normalized nested identities chosen after exclusions and collisions.
-    // Consumed by the follow-up cell-origin migration.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn code_mode_tool_names(&self) -> &BTreeMap<String, ToolName> {
         &self.code_mode_tool_names
     }
@@ -173,7 +203,7 @@ impl ToolRouter {
     }
 
     // Answers if the tool plan lets the model invoke the tool directly, through code mode, or deferred tool search.
-    fn exposes_tool(&self, name: &ToolName) -> bool {
+    pub(crate) fn exposes_tool(&self, name: &ToolName) -> bool {
         let name = name.clone().with_default_namespace();
         if self
             .code_mode_tool_names
@@ -213,6 +243,10 @@ impl ToolRouter {
         self.registry.deferred_tool_namespaces()
     }
 
+    pub(crate) fn mcp_namespaces(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.registry.mcp_namespaces()
+    }
+
     #[cfg(test)]
     pub(crate) fn registered_tool_names_for_test(&self) -> Vec<ToolName> {
         self.registry.tool_names_for_test()
@@ -239,27 +273,42 @@ impl ToolRouter {
             .unwrap_or(false)
     }
 
-    pub(crate) fn tool_runtime(&self, tool_name: &ToolName) -> Option<Arc<dyn CoreToolRuntime>> {
-        self.registry.tool(tool_name)
+    pub(crate) fn registered_tool(&self, tool_name: &ToolName) -> Option<&RegisteredTool> {
+        self.registry.registered_tool(tool_name)
     }
 
     #[instrument(level = "trace", skip_all, err)]
-    pub fn build_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
+    pub fn build_tool_call(
+        &self,
+        mut item: ResponseItem,
+    ) -> Result<Option<ToolCall>, FunctionCallError> {
         match item {
             ResponseItem::FunctionCall {
-                name,
-                namespace,
-                arguments,
-                encrypted_function_args,
-                call_id,
+                ref name,
+                ref namespace,
+                ref mut arguments,
+                ref call_id,
+                ref mut encrypted_function_args,
                 ..
             } => {
-                let tool_name = ToolName::new(namespace, name).with_default_namespace();
+                let tool_name =
+                    ToolName::new(namespace.clone(), name.clone()).with_default_namespace();
+                let retain_native_call = self
+                    .registry
+                    .registered_tool(&tool_name)
+                    .is_some_and(|tool| tool.native_review == NativeReview::Required);
+                let (arguments, encrypted_function_args) = if retain_native_call {
+                    (arguments.clone(), encrypted_function_args.clone())
+                } else {
+                    (std::mem::take(arguments), encrypted_function_args.take())
+                };
+                let call_id = call_id.clone();
                 Ok(Some(ToolCall {
                     tool_name,
                     call_id,
                     payload: ToolPayload::Function { arguments },
                     encrypted_function_args,
+                    native_call: retain_native_call.then(|| Arc::new(item)),
                 }))
             }
             ResponseItem::ToolSearchCall {
@@ -279,6 +328,7 @@ impl ToolRouter {
                     call_id,
                     payload: ToolPayload::ToolSearch { arguments },
                     encrypted_function_args: None,
+                    native_call: None,
                 }))
             }
             ResponseItem::ToolSearchCall { .. } => Ok(None),
@@ -293,6 +343,7 @@ impl ToolRouter {
                 call_id,
                 payload: ToolPayload::Custom { input },
                 encrypted_function_args: None,
+                native_call: None,
             })),
             _ => Ok(None),
         }
@@ -360,6 +411,7 @@ impl ToolRouter {
             tool_name,
             call_id,
             payload,
+            native_call,
             ..
         } = call;
 
@@ -375,11 +427,64 @@ impl ToolRouter {
             tool_name,
             source,
             payload,
+            native_call,
+            environments: Default::default(),
         };
 
         self.registry
             .dispatch_any_with_state(invocation, call_state)
             .await
+    }
+}
+
+/// Records the registered inventory once per sampling request, before transport retries.
+/// Registrations do not imply model visibility or reachability; hosted tools are excluded.
+pub(crate) fn record_registration_metrics(
+    router: &ToolRouter,
+    telemetry: &SessionTelemetry,
+    incremental_tools: bool,
+) {
+    let mut direct = 0usize;
+    let mut direct_model_only = 0usize;
+    let mut deferred = 0usize;
+    let mut deferred_model_only = 0usize;
+    let mut code_mode_only = 0usize;
+    let mut hidden = 0usize;
+    for tool in router.registry.entries() {
+        match tool.exposure {
+            ToolExposure::Direct => direct += 1,
+            ToolExposure::DirectModelOnly => direct_model_only += 1,
+            ToolExposure::Deferred => deferred += 1,
+            ToolExposure::DeferredModelOnly => deferred_model_only += 1,
+            ToolExposure::CodeModeOnly => code_mode_only += 1,
+            ToolExposure::Hidden => hidden += 1,
+        }
+    }
+
+    let tool_mode = match router.tool_mode {
+        ToolMode::Direct => "direct",
+        ToolMode::CodeMode => "code_mode",
+        ToolMode::CodeModeOnly => "code_mode_only",
+    };
+    let incremental_tools = if incremental_tools { "true" } else { "false" };
+    for (exposure, count) in [
+        (EXPOSURE_DIRECT, direct),
+        (EXPOSURE_DIRECT_MODEL_ONLY, direct_model_only),
+        (EXPOSURE_DEFERRED, deferred),
+        (EXPOSURE_DEFERRED_MODEL_ONLY, deferred_model_only),
+        (EXPOSURE_CODE_MODE_ONLY, code_mode_only),
+        (EXPOSURE_HIDDEN, hidden),
+    ] {
+        telemetry.histogram_with_boundaries(
+            TOOL_REGISTRATIONS_METRIC,
+            i64::try_from(count).unwrap_or(i64::MAX),
+            TOOL_REGISTRATIONS_METRIC_BUCKETS,
+            &[
+                ("exposure", exposure),
+                ("tool_mode", tool_mode),
+                ("incremental_tools", incremental_tools),
+            ],
+        );
     }
 }
 

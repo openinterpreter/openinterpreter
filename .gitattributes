@@ -3,3 +3,4 @@ codex-rs/hooks/schema/generated/** linguist-generated
 codex-rs/core/src/harness/kimi_code_system_prompt.md text eol=lf
 codex-rs/core/src/tools/handlers/kimi_code_skills/*.md text eol=lf
 third_party/voice/sources.json text eol=lf
+patches/v8_array_sort_elements_kind.patch text eol=lf

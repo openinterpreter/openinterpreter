@@ -1,13 +1,23 @@
+use super::account_processor::EnterpriseLoginCompletion;
+use super::account_processor::EnterpriseLoginTarget;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
-use codex_core::McpManager;
+use codex_config::types::McpServerAuth;
+use codex_core::McpRefreshReason;
+use codex_extension_api::McpServerContributionContext;
 use codex_mcp::McpServerSource;
+use codex_mcp::McpServerStatusSnapshot;
 use codex_mcp::ReadResourceRequestParams;
+use codex_mcp::ema_auth_scope;
 use codex_mcp::resolve_oauth_callback;
+use codex_otel::auth_storage::AuthStorageOriginator;
+use codex_rmcp_client::EnterpriseOAuthLoginRequest;
+use codex_rmcp_client::McpRequestTrace;
+use std::future::Future;
 
 use crate::thread_state::ThreadStateManager;
 
-const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
+const MCP_THREAD_ID_META_KEY: &str = "threadId";
 
 #[derive(Clone)]
 pub(crate) struct McpRequestProcessor {
@@ -15,6 +25,7 @@ pub(crate) struct McpRequestProcessor {
     thread_manager: Arc<ThreadManager>,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     config_manager: ConfigManager,
+    account_processor: Arc<AccountRequestProcessor>,
     pub(super) thread_state_manager: ThreadStateManager,
 }
 
@@ -25,12 +36,14 @@ impl McpRequestProcessor {
         thread_state_manager: ThreadStateManager,
         outgoing: Arc<OutgoingMessageSender>,
         config_manager: ConfigManager,
+        account_processor: Arc<AccountRequestProcessor>,
     ) -> Self {
         Self {
             auth_manager,
             thread_manager,
             outgoing,
             config_manager,
+            account_processor,
             thread_state_manager,
         }
     }
@@ -44,13 +57,17 @@ impl McpRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
-    pub(crate) async fn mcp_server_refresh(
+    pub(crate) fn mcp_server_refresh(
         &self,
         params: Option<()>,
-    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.mcp_server_refresh_response(params)
-            .await
-            .map(|response| Some(response.into()))
+    ) -> impl Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>> + Send + '_
+    {
+        // Keep refresh state behind a pointer before returning to the shared request handler.
+        Box::pin(async move {
+            self.mcp_server_refresh_response(params)
+                .await
+                .map(|response| Some(response.into()))
+        })
     }
 
     pub(crate) async fn mcp_server_status_list(
@@ -93,12 +110,9 @@ impl McpRequestProcessor {
         Ok(McpServerRefreshResponse {})
     }
 
-    async fn load_latest_config(
-        &self,
-        fallback_cwd: Option<PathBuf>,
-    ) -> Result<Config, JSONRPCErrorError> {
+    async fn load_global_config(&self) -> Result<Config, JSONRPCErrorError> {
         self.config_manager
-            .load_latest_config(fallback_cwd)
+            .load_non_project_config()
             .await
             .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
@@ -125,17 +139,12 @@ impl McpRequestProcessor {
     ) -> Result<McpServerOauthLoginResponse, JSONRPCErrorError> {
         let McpServerOauthLoginParams {
             name,
+            environment_id,
             thread_id,
             client_registration,
             scopes,
             timeout_secs,
         } = params;
-        let client_registration = match client_registration.unwrap_or_default() {
-            McpServerOauthClientRegistration::Auto => McpOAuthClientRegistration::Auto,
-            McpServerOauthClientRegistration::Cimd => McpOAuthClientRegistration::Cimd,
-            McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
-        };
-
         let auth = self.auth_manager.auth().await;
         let (mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
@@ -145,11 +154,11 @@ impl McpRequestProcessor {
                 ((*config).clone(), runtime_context)
             }
             None => {
-                let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+                let config = self.load_global_config().await?;
                 let mcp_config = self
                     .thread_manager
                     .mcp_manager()
-                    .runtime_config(&config)
+                    .runtime_config(McpServerContributionContext::global(&config))
                     .await;
                 let runtime_context = McpRuntimeContext::new(
                     self.thread_manager.environment_manager(),
@@ -159,9 +168,12 @@ impl McpRequestProcessor {
             }
         };
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
-        let Some(server) = effective_servers.get(&name) else {
+        let key = mcp_config
+            .mcp_server_catalog
+            .resolve_server_key(&name, environment_id.as_deref());
+        let Some(server) = effective_servers.get(&key) else {
             return Err(invalid_request(format!(
-                "No MCP server named '{name}' found."
+                "No MCP server named '{key}' found."
             )));
         };
         let redirect_mode = if server.is_agent_plugin() {
@@ -170,91 +182,193 @@ impl McpRequestProcessor {
             StreamableHttpRedirectMode::Legacy
         };
         let server = server.config();
-        if matches!(server.auth, codex_config::McpServerAuth::EmaAuth) {
-            return Err(invalid_request(
-                "EMA MCP connections are not enabled in this version",
-            ));
-        }
-
-        let (url, http_headers, env_http_headers) = match &server.transport {
-            McpServerTransportConfig::StreamableHttp {
-                url,
-                http_headers,
-                env_http_headers,
-                ..
-            } => (url.clone(), http_headers.clone(), env_http_headers.clone()),
-            _ => {
+        let enterprise = matches!(server.auth, McpServerAuth::EmaAuth);
+        let (authorization_url, login_id, completion): (
+            String,
+            String,
+            futures::future::BoxFuture<'static, anyhow::Result<()>>,
+        ) = if enterprise {
+            let thread_id = thread_id.clone().ok_or_else(|| {
+                invalid_request("enterprise MCP login requires a connected thread")
+            })?;
+            if !mcp_config.xaa_enabled {
                 return Err(invalid_request(
-                    "OAuth login is only supported for streamable HTTP servers.",
+                    "enterprise MCP authentication requires `[features].use_xaa = true`",
                 ));
             }
-        };
-
-        let http_client = runtime_context
-            .resolve_http_client(&name, server)
-            .map_err(|err| {
-                internal_error(format!("failed to resolve MCP server runtime: {err}"))
+            if !server.enabled {
+                return Err(invalid_request(format!("MCP server '{name}' is disabled.")));
+            }
+            server
+                .validate_ema_auth_transport()
+                .map_err(|reason| invalid_request(format!("MCP server '{name}' {reason}")))?;
+            if client_registration.is_some() {
+                return Err(invalid_request(
+                    "enterprise MCP login uses the configured enterprise client and does not support clientRegistration overrides",
+                ));
+            }
+            // Resource scopes and per-server callbacks do not alter the shared IdP registration.
+            let scope = ema_auth_scope(auth.as_ref()).ok_or_else(|| {
+                invalid_request(
+                    "enterprise MCP authentication requires a signed-in Codex user and workspace",
+                )
             })?;
+            let idp = server.oauth_idp().ok_or_else(|| {
+                invalid_request(format!(
+                    "MCP server '{name}' has no configured enterprise IdP"
+                ))
+            })?;
+            let registration = server.ema_registration().cloned().ok_or_else(|| {
+                invalid_request(format!(
+                    "MCP server '{name}' has no validated enterprise registration"
+                ))
+            })?;
+            let credential_name = idp.credential_name(&scope);
+            let http_client =
+                runtime_context
+                    .resolve_http_client(&name, server)
+                    .map_err(|err| {
+                        internal_error(format!("failed to resolve MCP server runtime: {err}"))
+                    })?;
+            let login = self
+                .account_processor
+                .enterprise_login
+                .start(
+                    EnterpriseOAuthLoginRequest {
+                        credential_name: &credential_name,
+                        issuer: &idp.issuer,
+                        client_id: &idp.client_id,
+                        client_secret: idp.client_secret.as_ref().map(|secret| secret.as_str()),
+                        token_endpoint_auth_method: idp.token_endpoint_auth_method,
+                        keyring_backend_kind: mcp_config.auth_keyring_backend_kind,
+                        callback_port: mcp_config.mcp_oauth_callback_port,
+                        callback_url: mcp_config.mcp_oauth_callback_url.as_deref(),
+                        timeout_secs,
+                        http_client,
+                        redirect_mode,
+                    },
+                    scope,
+                    EnterpriseLoginTarget {
+                        thread_id,
+                        server_key: key.clone(),
+                        registration,
+                    },
+                )
+                .await?;
+            let mut completion = login.completion;
+            (
+                login.authorization_url,
+                login.login_id,
+                Box::pin(async move {
+                    match completion.wait_for(|state| state.is_complete()).await {
+                        Ok(result) => match *result {
+                            EnterpriseLoginCompletion::Succeeded => Ok(()),
+                            EnterpriseLoginCompletion::Failed(detail) => Err(detail.into()),
+                            EnterpriseLoginCompletion::Pending => {
+                                Err(anyhow::anyhow!("Enterprise sign-in failed."))
+                            }
+                        },
+                        _ => Err(anyhow::anyhow!("Enterprise sign-in failed.")),
+                    }
+                }),
+            )
+        } else {
+            let (url, http_headers, env_http_headers) = match &server.transport {
+                McpServerTransportConfig::StreamableHttp {
+                    url,
+                    http_headers,
+                    env_http_headers,
+                    ..
+                } => (url.clone(), http_headers.clone(), env_http_headers.clone()),
+                _ => {
+                    return Err(invalid_request(
+                        "OAuth login is only supported for streamable HTTP servers.",
+                    ));
+                }
+            };
 
-        let discovered_scopes = if scopes.is_none() && server.scopes.is_none() {
-            discover_supported_scopes(
-                &server.transport,
-                Arc::clone(&http_client),
-                codex_rmcp_client::OAuthDiscoveryTimeout::Requested,
+            let http_client =
+                runtime_context
+                    .resolve_http_client(&name, server)
+                    .map_err(|err| {
+                        internal_error(format!("failed to resolve MCP server runtime: {err}"))
+                    })?;
+
+            let discovered_scopes = if scopes.is_none() && server.scopes.is_none() {
+                discover_supported_scopes(
+                    &server.transport,
+                    Arc::clone(&http_client),
+                    codex_rmcp_client::OAuthDiscoveryTimeout::Requested,
+                    redirect_mode,
+                )
+                .await
+            } else {
+                None
+            };
+            let resolved_scopes =
+                resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
+            let oauth_credential_name = server.oauth_credential_name(&name);
+            let client_registration = match client_registration.unwrap_or_default() {
+                McpServerOauthClientRegistration::Auto => McpOAuthClientRegistration::Auto,
+                McpServerOauthClientRegistration::Cimd => McpOAuthClientRegistration::Cimd,
+                McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
+            };
+            let callback_url =
+                resolve_oauth_callback(server, &url, mcp_config.mcp_oauth_callback_url.as_deref())
+                    .map_err(|err| {
+                        internal_error(format!("failed to resolve MCP OAuth callback: {err}"))
+                    })?;
+
+            let handle = perform_oauth_login_return_url(
+                oauth_credential_name.as_ref(),
+                &url,
+                mcp_config.mcp_oauth_credentials_store_mode,
+                mcp_config.auth_keyring_backend_kind,
+                http_headers,
+                env_http_headers,
+                &resolved_scopes.scopes,
+                server.oauth.as_ref(),
+                client_registration,
+                server.oauth_resource.as_deref(),
+                timeout_secs,
+                server.oauth_callback_port(mcp_config.mcp_oauth_callback_port),
+                callback_url.as_deref(),
+                mcp_config.mcp_oauth_callback_url.as_deref(),
+                http_client,
                 redirect_mode,
             )
             .await
-        } else {
-            None
+            .map_err(|err| {
+                internal_error(format!("failed to login to MCP server '{name}': {err}"))
+            })?;
+            (
+                handle.authorization_url().to_string(),
+                Uuid::now_v7().to_string(),
+                Box::pin(handle.wait()),
+            )
         };
-        let resolved_scopes =
-            resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
-        let oauth_credential_name = server.oauth_credential_name(&name);
-        let callback_url =
-            resolve_oauth_callback(server, &url, mcp_config.mcp_oauth_callback_url.as_deref())
-                .map_err(|err| {
-                    internal_error(format!("failed to resolve MCP OAuth callback: {err}"))
-                })?;
-
-        let handle = perform_oauth_login_return_url(
-            oauth_credential_name.as_ref(),
-            &url,
-            mcp_config.mcp_oauth_credentials_store_mode,
-            mcp_config.auth_keyring_backend_kind,
-            http_headers,
-            env_http_headers,
-            &resolved_scopes.scopes,
-            server.oauth_client_id(),
-            client_registration,
-            server.oauth_resource.as_deref(),
-            timeout_secs,
-            server.oauth_callback_port(mcp_config.mcp_oauth_callback_port),
-            callback_url.as_deref(),
-            mcp_config.mcp_oauth_callback_url.as_deref(),
-            http_client,
-            redirect_mode,
-        )
-        .await
-        .map_err(|err| internal_error(format!("failed to login to MCP server '{name}': {err}")))?;
-        let authorization_url = handle.authorization_url().to_string();
         let notification_name = name.clone();
         let notification_thread_id = thread_id;
+        let notification_login_id = login_id.clone();
         let outgoing = Arc::clone(&self.outgoing);
         let thread_manager = Arc::clone(&self.thread_manager);
 
         tokio::spawn(async move {
-            let (success, error) = match handle.wait().await {
+            let (success, error) = match completion.await {
                 Ok(()) => (true, None),
                 Err(err) => (false, Some(err.to_string())),
             };
-            if success {
-                thread_manager.invalidate_mcp_runtimes().await;
+            if success && !enterprise {
+                thread_manager
+                    .invalidate_mcp_runtimes_for(McpRefreshReason::McpOAuthLoginCompleted)
+                    .await;
             }
 
             let notification = ServerNotification::McpServerOauthLoginCompleted(
                 McpServerOauthLoginCompletedNotification {
                     name: notification_name,
                     thread_id: notification_thread_id,
+                    login_id: Some(notification_login_id),
                     success,
                     error,
                 },
@@ -262,7 +376,10 @@ impl McpRequestProcessor {
             outgoing.send_server_notification(notification).await;
         });
 
-        Ok(McpServerOauthLoginResponse { authorization_url })
+        Ok(McpServerOauthLoginResponse {
+            authorization_url,
+            login_id: Some(login_id),
+        })
     }
 
     async fn list_mcp_server_status(
@@ -287,45 +404,28 @@ impl McpRequestProcessor {
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
                 (config, Some(thread))
             }
-            None => (self.load_latest_config(/*fallback_cwd*/ None).await?, None),
+            None => (
+                self.config_manager
+                    .load_latest_config(/*fallback_cwd*/ None)
+                    .await
+                    .map_err(|err| internal_error(format!("failed to reload config: {err}")))?,
+                None,
+            ),
         };
-        let mcp_manager = self.thread_manager.mcp_manager();
-        let auth = self.auth_manager.auth().await;
-        let environment_manager = self.thread_manager.environment_manager();
-
-        tokio::spawn(async move {
-            let (mcp_config, runtime_context) = match thread.as_ref() {
-                Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
-                None => {
-                    let mcp_config = mcp_manager.runtime_config(&config).await;
-                    let runtime_context =
-                        McpRuntimeContext::new(environment_manager, config.cwd.to_path_buf());
-                    (mcp_config, runtime_context)
-                }
-            };
-
-            let result = Self::list_mcp_server_status_response(
-                request.request_id.to_string(),
-                params,
-                mcp_config,
-                auth,
-                runtime_context,
-                mcp_manager,
-                thread,
-            )
-            .await;
+        let processor = self.clone();
+        let task = async move {
+            let result = processor
+                .list_mcp_server_status_response(params, thread)
+                .await;
             outgoing.send_result(request, result).await;
-        });
+        };
+        self.spawn_mcp_request(request_id, task).await;
         Ok(())
     }
 
     async fn list_mcp_server_status_response(
-        request_id: String,
+        &self,
         params: ListMcpServerStatusParams,
-        mcp_config: codex_mcp::McpConfig,
-        auth: Option<CodexAuth>,
-        runtime_context: McpRuntimeContext,
-        mcp_manager: Arc<McpManager>,
         thread: Option<Arc<codex_core::CodexThread>>,
     ) -> Result<ListMcpServerStatusResponse, JSONRPCErrorError> {
         let detail = match params.detail.unwrap_or(McpServerStatusDetail::Full) {
@@ -333,16 +433,130 @@ impl McpRequestProcessor {
             McpServerStatusDetail::ToolsAndAuthOnly => McpSnapshotDetail::ToolsAndAuthOnly,
         };
 
-        let snapshot = collect_mcp_server_status_snapshot_with_detail(
-            &mcp_config,
-            auth.as_ref(),
-            request_id,
-            runtime_context,
-            mcp_manager.codex_apps_tools_cache(),
-            mcp_manager.tool_catalog_cache(),
-            detail,
-        )
-        .await;
+        let (mcp_config, snapshot) = if let (Some(thread), Some(server)) =
+            (thread.as_ref(), params.server_name.as_deref())
+        {
+            thread
+                .mcp_server_status_snapshot(
+                    server,
+                    params.environment_id.as_deref(),
+                    detail,
+                    /*expected_registration*/ None,
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to read MCP server status: {error:#}"))
+                })?
+        } else {
+            if params.environment_id.is_some() {
+                return Err(invalid_request(
+                    "environmentId requires serverName and threadId",
+                ));
+            }
+            let config = match thread.as_ref() {
+                Some(thread) => {
+                    let thread_config = thread.config().await;
+                    self.config_manager
+                        .load_latest_config_with_session_layers(
+                            &thread_config.config_layer_stack,
+                            &thread_config.cwd,
+                        )
+                        .await
+                        .map_err(|err| internal_error(format!("failed to reload config: {err}")))?
+                }
+                None => self.load_global_config().await?,
+            };
+            let mcp_manager = thread
+                .as_ref()
+                .map(|thread| thread.mcp_manager())
+                .unwrap_or_else(|| self.thread_manager.mcp_manager());
+            self.thread_manager
+                .runtime_auth_for_mcp_manager(&config, &mcp_manager)
+                .map_err(|error| internal_error(error.to_string()))?;
+            let auth = mcp_manager.auth_manager().auth().await;
+            let runtime_auth = mcp_manager.runtime_auth_for_config(&config);
+            let (mcp_config, runtime_context) = match thread.as_ref() {
+                Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
+                None => (
+                    mcp_manager
+                        .runtime_config(McpServerContributionContext::global(&config))
+                        .await,
+                    McpRuntimeContext::new(
+                        self.thread_manager.environment_manager(),
+                        config.cwd.to_path_buf(),
+                    ),
+                ),
+            };
+            let selected_server = params.server_name.as_deref().map(|name| {
+                mcp_config
+                    .mcp_server_catalog
+                    .resolve_server_key(name, /*environment_id*/ None)
+            });
+            let mut effective_servers =
+                codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
+            if let Some(selected_server) = selected_server.as_ref() {
+                effective_servers.retain(|key, _| key == selected_server);
+            }
+            let mut snapshot = collect_mcp_server_status_snapshot_with_detail(
+                &mcp_config,
+                auth.as_ref(),
+                Some(&self.auth_manager),
+                runtime_auth,
+                runtime_context,
+                mcp_manager.codex_apps_tools_cache(),
+                mcp_manager.tool_catalog_cache(),
+                detail,
+                effective_servers,
+            )
+            .await;
+            if mcp_config.xaa_enabled
+                && let Some(thread) = thread.as_ref()
+            {
+                // EMA can only use its admitted thread connection. Keep ordinary
+                // status discovery unchanged and replace the threadless EMA results.
+                for (key, server) in mcp_config.mcp_server_catalog.servers() {
+                    if !matches!(server.config().auth, McpServerAuth::EmaAuth) {
+                        continue;
+                    }
+                    let registration = Some(server);
+                    let (selected_config, selected) = thread
+                        .mcp_server_status_snapshot(
+                            key.name(),
+                            key.scoped_environment_id(),
+                            detail,
+                            registration,
+                        )
+                        .await
+                        .map_err(|error| {
+                            internal_error(format!("failed to read MCP server status: {error:#}"))
+                        })?;
+                    if selected_config.mcp_server_catalog.server(key) != registration {
+                        continue;
+                    }
+                    snapshot.server_infos.remove(key);
+                    snapshot.server_infos.extend(selected.server_infos);
+                    snapshot.server_capabilities.remove(key);
+                    snapshot
+                        .server_capabilities
+                        .extend(selected.server_capabilities);
+                    snapshot.tools_by_server.remove(key);
+                    snapshot.tools_by_server.extend(selected.tools_by_server);
+                    snapshot.tool_list_meta.remove(key);
+                    snapshot.tool_list_meta.extend(selected.tool_list_meta);
+                    snapshot.tools_errors.remove(key);
+                    snapshot.tools_errors.extend(selected.tools_errors);
+                    snapshot.resources.remove(key);
+                    snapshot.resources.extend(selected.resources);
+                    snapshot.resource_templates.remove(key);
+                    snapshot
+                        .resource_templates
+                        .extend(selected.resource_templates);
+                    snapshot.auth_statuses.remove(key);
+                    snapshot.auth_statuses.extend(selected.auth_statuses);
+                }
+            }
+            (Arc::new(mcp_config), snapshot)
+        };
 
         let runtime_statuses = match thread {
             Some(thread) => thread.mcp_connection_statuses(&mcp_config).await,
@@ -351,25 +565,33 @@ impl McpRequestProcessor {
         let McpServerStatusSnapshot {
             mut server_infos,
             mut server_capabilities,
+            tool_list_meta: _,
             mut tools_by_server,
             mut tools_errors,
             mut resources,
             mut resource_templates,
             mut auth_statuses,
-            mut server_names,
+            mut server_keys,
         } = snapshot;
-        server_names.extend(runtime_statuses.keys().cloned());
-        server_names.extend(
+        server_keys.extend(runtime_statuses.keys().cloned());
+        server_keys.extend(
             auth_statuses
                 .keys()
                 .cloned()
                 .chain(resources.keys().cloned())
                 .chain(resource_templates.keys().cloned()),
         );
-        server_names.sort();
-        server_names.dedup();
+        server_keys.sort();
+        server_keys.dedup();
+        server_keys.retain(|key| {
+            params.server_name.as_deref().is_none_or(|server| {
+                *key == mcp_config
+                    .mcp_server_catalog
+                    .resolve_server_key(server, params.environment_id.as_deref())
+            })
+        });
 
-        let total = server_names.len();
+        let total = server_keys.len();
         let limit = params.limit.unwrap_or(total as u32).max(1) as usize;
         let effective_limit = limit.min(total);
         let start = match params.cursor {
@@ -388,12 +610,13 @@ impl McpRequestProcessor {
 
         let end = start.saturating_add(effective_limit).min(total);
 
-        let data: Vec<McpServerStatus> = server_names[start..end]
+        let data: Vec<McpServerStatus> = server_keys[start..end]
             .iter()
-            .map(|name| McpServerStatus {
-                name: name.clone(),
-                runtime_status: runtime_statuses.get(name).copied().map(Into::into),
-                plugin_id: mcp_config.mcp_server_catalog.server(name).and_then(
+            .map(|key| McpServerStatus {
+                name: key.name().to_owned(),
+                environment_id: key.scoped_environment_id().map(str::to_owned),
+                runtime_status: runtime_statuses.get(key).copied().map(Into::into),
+                plugin_id: mcp_config.mcp_server_catalog.server(key).and_then(
                     |server| match server.source() {
                         McpServerSource::Plugin(plugin)
                         | McpServerSource::SelectedPlugin(plugin) => {
@@ -404,14 +627,26 @@ impl McpRequestProcessor {
                         | McpServerSource::Extension { .. } => None,
                     },
                 ),
-                server_info: server_infos.remove(name),
-                server_capabilities: server_capabilities.remove(name),
-                tools: tools_by_server.remove(name).unwrap_or_default(),
-                tools_error: tools_errors.remove(name),
-                resources: resources.remove(name).unwrap_or_default(),
-                resource_templates: resource_templates.remove(name).unwrap_or_default(),
+                http_origin: mcp_config
+                    .mcp_server_catalog
+                    .server(key)
+                    .and_then(|server| match &server.config().transport {
+                        McpServerTransportConfig::StreamableHttp { url, .. } => {
+                            url::Url::parse(url).ok().and_then(|url| {
+                                matches!(url.scheme(), "http" | "https")
+                                    .then(|| url.origin().ascii_serialization())
+                            })
+                        }
+                        McpServerTransportConfig::Stdio { .. } => None,
+                    }),
+                server_info: server_infos.remove(key),
+                server_capabilities: server_capabilities.remove(key),
+                tools: tools_by_server.remove(key).unwrap_or_default(),
+                tools_error: tools_errors.remove(key),
+                resources: resources.remove(key).unwrap_or_default(),
+                resource_templates: resource_templates.remove(key).unwrap_or_default(),
                 auth_status: auth_statuses
-                    .remove(name)
+                    .remove(key)
                     .unwrap_or(CoreMcpAuthStatus::Unsupported)
                     .into(),
             })
@@ -433,45 +668,99 @@ impl McpRequestProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         let outgoing = Arc::clone(&self.outgoing);
         let McpResourceReadParams {
+            meta,
             thread_id,
             origin_call_id,
             server,
+            environment_id,
             uri,
             connector_id,
+            target,
         } = params;
         let mut resource_params = ReadResourceRequestParams::new(uri);
+        let mut meta = meta.unwrap_or_default();
+        let is_codex_apps = server == codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+        if is_codex_apps && origin_call_id.is_some() && environment_id.is_some() {
+            return Err(invalid_request(
+                "originCallId requires the unscoped codex_apps registration",
+            ));
+        }
+        let reserved_key = meta.iter().find_map(|(key, value)| match key.as_str() {
+            "x-codex-turn-metadata"
+            | MCP_THREAD_ID_META_KEY
+            | codex_mcp::MCP_CONNECTION_LEASE_META_KEY => Some(key.as_str()),
+            "connector_id" | "link_id" if is_codex_apps => Some(key.as_str()),
+            // This legacy routing hint can override an explicit app and account target.
+            "_codex_apps" if is_codex_apps && value.get("resource_uri").is_some() => {
+                Some("_codex_apps.resource_uri")
+            }
+            _ => None,
+        });
+        if let Some(key) = reserved_key {
+            return Err(invalid_request(format!(
+                "reserved resource read metadata key: {key}"
+            )));
+        }
         if let Some(connector_id) = connector_id {
-            resource_params.meta = Some(
-                serde_json::Map::from_iter([(
-                    "x-codex-turn-metadata".to_string(),
-                    serde_json::json!({
-                        "mcp_request_meta": {
-                            "selected_connector_ids": [connector_id],
-                        },
-                    }),
-                )])
-                .into(),
+            meta.insert(
+                "x-codex-turn-metadata".to_string(),
+                serde_json::json!({
+                    "mcp_request_meta": {"selected_connector_ids": [connector_id]},
+                }),
             );
+        }
+        if origin_call_id.is_none()
+            && let Some(target) = target
+        {
+            if !is_codex_apps
+                || environment_id.is_some()
+                || target.connector_id.trim().is_empty()
+                || target
+                    .link_id
+                    .as_ref()
+                    .is_some_and(|id| id.trim().is_empty() || id.starts_with("synthetic_link::"))
+            {
+                return Err(invalid_request(
+                    "target requires unscoped codex_apps, a connectorId, and a real linkId or null",
+                ));
+            }
+            meta.insert(
+                "connector_id".to_string(),
+                serde_json::json!(target.connector_id),
+            );
+            meta.insert("link_id".to_string(), serde_json::json!(target.link_id));
+        }
+        if !meta.is_empty() {
+            resource_params.meta = Some(meta.into());
         }
 
         if let Some(thread_id) = thread_id {
             let (_, thread) = self.load_thread(&thread_id).await?;
-            let request_id = request_id.clone();
+            let response_request_id = request_id.clone();
 
-            tokio::spawn(async move {
-                let origin_call_id =
-                    origin_call_id.filter(|_| server == codex_mcp::CODEX_APPS_MCP_SERVER_NAME);
+            let task = async move {
+                let origin_call_id = origin_call_id.filter(|_| is_codex_apps);
                 let result = match origin_call_id.as_deref() {
                     Some(call_id) => {
                         thread
-                            .read_mcp_resource_for_call(call_id, &resource_params.uri)
+                            .read_mcp_resource_for_call(call_id, resource_params)
                             .await
                     }
-                    None => thread.read_mcp_resource(&server, resource_params).await,
+                    None => {
+                        thread
+                            .read_mcp_resource(&server, environment_id.as_deref(), resource_params)
+                            .await
+                    }
                 };
-                Self::send_mcp_resource_read_response(outgoing, request_id, result, origin_call_id)
-                    .await;
-            });
+                Self::send_mcp_resource_read_response(
+                    outgoing,
+                    response_request_id,
+                    result,
+                    origin_call_id,
+                )
+                .await;
+            };
+            self.spawn_mcp_request(request_id, task).await;
             return Ok(());
         }
 
@@ -479,37 +768,49 @@ impl McpRequestProcessor {
             return Err(invalid_request("originCallId requires threadId"));
         }
 
-        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let config = self.load_global_config().await?;
         let mcp_manager = self.thread_manager.mcp_manager();
-        let mcp_config = mcp_manager.runtime_config(&config).await;
+        let mcp_config = mcp_manager
+            .runtime_config(McpServerContributionContext::global(&config))
+            .await;
         let codex_apps_tools_cache = mcp_manager.codex_apps_tools_cache();
         let tool_catalog_cache = mcp_manager.tool_catalog_cache();
-        let auth = self.auth_manager.auth().await;
+        self.thread_manager
+            .runtime_auth_for_mcp_manager(&config, &mcp_manager)
+            .map_err(|error| internal_error(error.to_string()))?;
+        let runtime_auth = mcp_manager.runtime_auth_for_config(&config);
+        let auth = mcp_manager.auth_manager().auth().await;
         let environment_manager = self.thread_manager.environment_manager();
         // This threadless resource-read path has no turn cwd or turn-selected
         // environment. Use config cwd only as the local stdio fallback; named
         // environment stdio MCPs must declare their own absolute cwd.
         let runtime_context =
             McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
-        let request_id = request_id.clone();
+        let response_request_id = request_id.clone();
 
-        tokio::spawn(async move {
+        let task = async move {
             let result = read_mcp_resource_without_thread(
                 &mcp_config,
                 auth.as_ref(),
+                runtime_auth,
                 runtime_context,
                 codex_apps_tools_cache,
                 tool_catalog_cache,
                 &server,
+                environment_id.as_deref(),
                 resource_params,
             )
             .await
             .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from));
             Self::send_mcp_resource_read_response(
-                outgoing, request_id, result, /*origin_call_id*/ None,
+                outgoing,
+                response_request_id,
+                result,
+                /*origin_call_id*/ None,
             )
             .await;
-        });
+        };
+        self.spawn_mcp_request(request_id, task).await;
         Ok(())
     }
 
@@ -545,17 +846,38 @@ impl McpRequestProcessor {
         let (_, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
         let meta = with_mcp_tool_call_thread_id_meta(params.meta, &thread_id);
-        let request_id = request_id.clone();
+        let response_request_id = request_id.clone();
 
-        tokio::spawn(async move {
+        let task = async move {
             let result = thread
-                .call_mcp_tool(&params.server, &params.tool, params.arguments, meta)
+                .call_mcp_tool(
+                    &params.server,
+                    params.environment_id.as_deref(),
+                    &params.tool,
+                    params.arguments,
+                    meta,
+                )
                 .await
                 .map(McpServerToolCallResponse::from)
                 .map_err(mcp_operation_error);
-            outgoing.send_result(request_id, result).await;
-        });
+            outgoing.send_result(response_request_id, result).await;
+        };
+        self.spawn_mcp_request(request_id, task).await;
         Ok(())
+    }
+
+    fn spawn_mcp_request<'a>(
+        &'a self,
+        request_id: &'a ConnectionRequestId,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> impl Future<Output = ()> + 'a {
+        // Bound the dispatcher future before awaiting the request trace lookup.
+        let task = Box::pin(task);
+        async move {
+            let trace =
+                McpRequestTrace::from_w3c(self.outgoing.request_trace_context(request_id).await);
+            tokio::spawn(AuthStorageOriginator::current().scope(trace.scope(task)));
+        }
     }
 }
 
@@ -577,7 +899,7 @@ fn with_mcp_tool_call_thread_id_meta(
     match meta {
         Some(serde_json::Value::Object(mut map)) => {
             map.insert(
-                MCP_TOOL_THREAD_ID_META_KEY.to_string(),
+                MCP_THREAD_ID_META_KEY.to_string(),
                 serde_json::Value::String(thread_id.to_string()),
             );
             Some(serde_json::Value::Object(map))
@@ -585,7 +907,7 @@ fn with_mcp_tool_call_thread_id_meta(
         None => {
             let mut map = serde_json::Map::new();
             map.insert(
-                MCP_TOOL_THREAD_ID_META_KEY.to_string(),
+                MCP_THREAD_ID_META_KEY.to_string(),
                 serde_json::Value::String(thread_id.to_string()),
             );
             Some(serde_json::Value::Object(map))

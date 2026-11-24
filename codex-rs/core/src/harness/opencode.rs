@@ -378,7 +378,8 @@ fn message_content(content: &[ContentItem]) -> Option<String> {
     let mut text = String::new();
     for item in content {
         match item {
-            ContentItem::InputText { text: value } | ContentItem::OutputText { text: value } => {
+            ContentItem::InputText { text: value }
+            | ContentItem::OutputText { text: value, .. } => {
                 text.push_str(value);
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
@@ -815,6 +816,8 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "developer".to_string(),
                     )),
@@ -827,6 +830,8 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    encrypted_content: None,
+                    status: None,
                     id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),

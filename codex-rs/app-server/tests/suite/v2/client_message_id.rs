@@ -4,7 +4,7 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -54,14 +54,14 @@ async fn recorded_client_ids(
             include_turns: true,
         })
         .await?;
-    let ThreadReadResponse { thread } =
+    let ThreadReadResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
     Ok(thread
         .turns
         .into_iter()
         .flat_map(|turn| turn.items)
-        .filter_map(|item| match item {
-            ThreadItem::UserMessage { client_id, .. } => Some(client_id),
+        .filter_map(|item| match item.payload {
+            ThreadItemPayload::UserMessage { client_id, .. } => Some(client_id),
             _ => None,
         })
         .collect())
@@ -118,6 +118,7 @@ async fn repeated_client_message_id_returns_original_turn_across_resume() -> Res
                     client_user_message_id: Some(CLIENT_MESSAGE_ID.to_string()),
                     input: input(),
                     responsesapi_client_metadata: None,
+                    responsesapi_client_metadata_patch: None,
                     additional_context: None,
                     expected_turn_id: "stale-turn".to_string(),
                 },

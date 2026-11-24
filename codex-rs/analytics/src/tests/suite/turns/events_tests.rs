@@ -25,6 +25,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DynamicToolCallStatus;
+use codex_app_server_protocol::GeneratedImageRef;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -33,7 +34,7 @@ use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SubAgentActivityKind;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload as ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeStartedNotification;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 use codex_app_server_protocol::WebSearchItem;
@@ -100,6 +101,10 @@ fn turn_event_serializes_expected_shape() {
     let event = TrackEventRequest::TurnEvent(Box::new(CodexTurnEventRequest {
         event_type: "codex_turn_event",
         event_params: crate::events::CodexTurnEventParams {
+            critical_path: crate::TurnCriticalPath::Disabled.into(),
+            multi_agent_version: codex_protocol::protocol::MultiAgentVersion::Disabled,
+            usage_limit_window_minutes: None,
+            tools_change_count: 0,
             thread_id: "thread-2".to_string(),
             session_id: "session-thread-2".to_string(),
             turn_id: "turn-2".to_string(),
@@ -149,6 +154,7 @@ fn turn_event_serializes_expected_shape() {
             codex_error_kind: None,
             codex_error_http_status_code: None,
             steer_count: Some(0),
+            used_dictation: None,
             total_tool_call_count: None,
             shell_command_count: None,
             file_change_count: None,
@@ -182,6 +188,17 @@ fn turn_event_serializes_expected_shape() {
         r#"{
             "event_type": "codex_turn_event",
             "event_params": {
+                "critical_path_status": "disabled",
+                "critical_path_duration_ms": null,
+                "critical_path_inference_ms": null,
+                "critical_path_sampling_ms": null,
+                "critical_path_compaction_ms": null,
+                "critical_path_auto_review_ms": null,
+                "critical_path_auto_review_overhead_ms": null,
+                "critical_path_user_wait_ms": null,
+                "critical_path_tools_ms": null,
+                "critical_path_overhead_ms": null,
+                "critical_path_unknown_ms": null,
                 "thread_id": "thread-2",
                 "session_id": "session-thread-2",
                 "turn_id": "turn-2",
@@ -218,6 +235,7 @@ fn turn_event_serializes_expected_shape() {
                 "approval_policy": "on-request",
                 "approvals_reviewer": "auto_review",
                 "guardian_v2_enabled": true,
+                "multi_agent_version": "disabled",
                 "sandbox_network_access": true,
                 "collaboration_mode": "plan",
                 "personality": "pragmatic",
@@ -238,6 +256,7 @@ fn turn_event_serializes_expected_shape() {
                 "turn_error": null,
                 "codex_error_kind": null,
                 "codex_error_http_status_code": null,
+                "usage_limit_window_minutes": null,
                 "steer_count": 0,
                 "total_tool_call_count": null,
                 "shell_command_count": null,
@@ -261,6 +280,7 @@ fn turn_event_serializes_expected_shape() {
                 "after_last_sampling_ms": 94,
                 "sampling_request_count": 2,
                 "sampling_retry_count": 1,
+                "tools_change_count": 0,
                 "duration_ms": 1234,
                 "started_at": 455,
                 "completed_at": 456
@@ -469,6 +489,7 @@ async fn turn_event_counts_completed_tool_items() {
     let mcp_tool_call_item = |status, duration_ms| ThreadItem::McpToolCall {
         id: "mcp-1".to_string(),
         server: "server".to_string(),
+        environment_id: None,
         tool: "search".to_string(),
         status,
         arguments: json!({}),
@@ -519,12 +540,16 @@ async fn turn_event_counts_completed_tool_items() {
         },
         ThreadItem::SubAgentActivity {
             id: "sub-agent-activity-1".to_string(),
+            model: None,
+            reasoning_effort: None,
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
         },
         ThreadItem::SubAgentActivity {
             id: "sub-agent-activity-completed".to_string(),
+            model: None,
+            reasoning_effort: None,
             kind: SubAgentActivityKind::Completed,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
@@ -537,9 +562,12 @@ async fn turn_event_counts_completed_tool_items() {
         }),
         ThreadItem::ImageGeneration(ImageGenerationItem {
             id: "image-1".to_string(),
+            image: GeneratedImageRef::Inline {
+                result: "ok".into(),
+            },
+            input_images: Vec::new(),
             status: "completed".to_string(),
             revised_prompt: None,
-            result: "ok".to_string(),
             transparent_background: None,
             failure: None,
             saved_path: None,
@@ -556,7 +584,7 @@ async fn turn_event_counts_completed_tool_items() {
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         started_at_ms: 998,
-                        item: item.clone(),
+                        item: codex_app_server_protocol::ThreadItem::untimed(item.clone()),
                     },
                 ))),
                 &mut out,
@@ -569,10 +597,11 @@ async fn turn_event_counts_completed_tool_items() {
             .ingest(
                 AnalyticsFact::Notification(Box::new(ServerNotification::ItemCompleted(
                     ItemCompletedNotification {
+                        content_token_count: None,
                         thread_id: "thread-2".to_string(),
                         turn_id: "turn-2".to_string(),
                         completed_at_ms: 1_000,
-                        item,
+                        item: codex_app_server_protocol::ThreadItem::untimed(item),
                     },
                 ))),
                 &mut out,
@@ -759,6 +788,54 @@ async fn turn_does_not_emit_without_required_prerequisites() {
         )
         .await;
     assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn turn_lifecycle_emits_dictation_from_accepted_inputs() {
+    for (inputs, expected) in [
+        (&[Some(false)][..], Some(false)),
+        (&[Some(false), None][..], None),
+        (&[None, Some(true), Some(false)][..], Some(true)),
+    ] {
+        let mut reducer = AnalyticsReducer::default();
+        let mut out = Vec::new();
+        ingest_turn_prerequisites(
+            &mut reducer,
+            &mut out,
+            /*include_initialize*/ true,
+            /*include_resolved_config*/ true,
+            /*include_started*/ true,
+            /*include_token_usage*/ false,
+        )
+        .await;
+        for &used_dictation in inputs {
+            reducer
+                .ingest(
+                    AnalyticsFact::Custom(CustomAnalyticsFact::AcceptedUserInput {
+                        turn_id: "turn-2".to_string(),
+                        used_dictation,
+                    }),
+                    &mut out,
+                )
+                .await;
+        }
+        reducer
+            .ingest(
+                AnalyticsFact::Notification(Box::new(sample_turn_completed_notification(
+                    "thread-2",
+                    "turn-2",
+                    AppServerTurnStatus::Completed,
+                    /*codex_error_info*/ None,
+                ))),
+                &mut out,
+            )
+            .await;
+        let [event] = out.as_slice() else {
+            panic!("expected one turn event");
+        };
+        let payload = serde_json::to_value(event).expect("serialize turn event");
+        assert_eq!(payload["event_params"]["used_dictation"], json!(expected));
+    }
 }
 
 #[tokio::test]

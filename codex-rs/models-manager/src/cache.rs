@@ -1,3 +1,4 @@
+use crate::ModelCatalogOriginator;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::openai_models::ModelInfo;
@@ -9,6 +10,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tracing::info;
@@ -23,6 +25,12 @@ use tracing::info;
 /// Cache failures are non-fatal. The models manager logs them and falls back to the configured
 /// models endpoint.
 pub trait ModelsCache: fmt::Debug + Send + Sync {
+    /// Return a separate cache partition, or `None` to disable storage for this originator.
+    /// Implementations must isolate loads, writes, and TTL renewal from the default catalog.
+    fn for_originator(&self, _originator: ModelCatalogOriginator) -> Option<Arc<dyn ModelsCache>> {
+        None
+    }
+
     /// Loads a fresh entry for `client_version`.
     ///
     /// Returns `Ok(None)` for a normal miss, including an absent, stale, or version-mismatched
@@ -64,6 +72,9 @@ pub type ModelsCacheFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelsCacheEntry {
     /// Time when the catalog was fetched or last revalidated with the models endpoint.
+    ///
+    /// `DateTime::<Utc>::MIN_UTC` marks an invalidated catalog, both in memory and in storage.
+    /// The manager rejects it even if the backend uses native TTL.
     pub fetched_at: DateTime<Utc>,
     /// Endpoint ETag used to revalidate the catalog without downloading an unchanged payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +149,14 @@ impl FileModelsCache {
 }
 
 impl ModelsCache for FileModelsCache {
+    fn for_originator(&self, originator: ModelCatalogOriginator) -> Option<Arc<dyn ModelsCache>> {
+        Some(Arc::new(Self::new(
+            self.cache_path
+                .with_extension(format!("{}.json", originator.as_str())),
+            self.cache_ttl,
+        )))
+    }
+
     fn load<'a>(
         &'a self,
         client_version: &'a str,

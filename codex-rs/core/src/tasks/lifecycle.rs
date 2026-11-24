@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use codex_analytics::TurnAnalyticsMetadata;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ThreadIdleCause;
 use codex_extension_api::TurnStartPhase;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
@@ -37,15 +39,15 @@ impl Session {
         token_usage_at_turn_start: Option<&TokenUsage>,
         phase: TurnStartPhase,
     ) {
+        let metadata: Arc<dyn TurnAnalyticsMetadata> = turn_context.turn_metadata_state.clone();
+        turn_context.extension_data.insert(metadata);
+        turn_context
+            .extension_data
+            .insert(turn_context.session_telemetry.clone());
         let collaboration_mode = turn_context.collaboration_mode();
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             if contributor.turn_start_phase(&self.services.thread_extension_data) != phase {
                 continue;
-            }
-            if phase == TurnStartPhase::RegularTaskStart
-                && contributor.requires_mcp_runtime(&self.services.thread_extension_data)
-            {
-                self.refresh_mcp_if_dirty().await;
             }
             contributor
                 .on_turn_start(codex_extension_api::TurnStartInput {
@@ -130,12 +132,14 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         error: CodexErrorInfo,
+        error_details: &CodexErrorDetails,
     ) {
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_error(codex_extension_api::TurnErrorInput {
                     turn_id: turn_context.sub_id.as_str(),
                     error: error.clone(),
+                    error_details,
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),

@@ -10,11 +10,11 @@ sandbox settings take precedence.
 
 ## Built-In Profiles
 
-| Profile | Purpose |
-| ------- | ------- |
-| `:read-only` | Read-only local command execution. |
-| `:workspace` | Read/write access inside workspace roots. |
-| `:danger-full-access` | No local sandbox restriction. |
+| Profile               | Purpose                                   |
+| --------------------- | ----------------------------------------- |
+| `:read-only`          | Read-only local command execution.        |
+| `:workspace`          | Read/write access inside workspace roots. |
+| `:danger-full-access` | No local sandbox restriction.             |
 
 Select a profile:
 
@@ -54,22 +54,22 @@ network traffic to selected domains.
 
 ## Filesystem Rules
 
-| Access | Meaning |
-| ------ | ------- |
-| `read` | Commands can read and list files. |
-| `write` | Commands can read, create, update, rename, and delete files. |
-| `deny` | Commands cannot read or write matching paths. Deny wins over broader grants. |
+| Access  | Meaning                                                                      |
+| ------- | ---------------------------------------------------------------------------- |
+| `read`  | Commands can read and list files.                                            |
+| `write` | Commands can read, create, update, rename, and delete files.                 |
+| `deny`  | Commands cannot read or write matching paths. Deny wins over broader grants. |
 
 Supported roots include:
 
-| Root | Meaning |
-| ---- | ------- |
-| `:minimal` | Runtime paths needed by common tools. |
+| Root               | Meaning                                                 |
+| ------------------ | ------------------------------------------------------- |
+| `:minimal`         | Runtime paths needed by common tools.                   |
 | `:workspace_roots` | The current workspace roots plus profile-defined roots. |
-| `:tmpdir` | The active temporary directory. |
-| `:root` | The filesystem root. Use sparingly. |
-| `/absolute/path` | A concrete absolute path. |
-| `~/path` | A path under the user's home. |
+| `:tmpdir`          | The active temporary directory.                         |
+| `:root`            | The filesystem root. Use sparingly.                     |
+| `/absolute/path`   | A concrete absolute path.                               |
+| `~/path`           | A path under the user's home.                           |
 
 Use exact paths where possible. Deny globs such as `**/*.env` are useful for
 secret-bearing files; on some platforms a `glob_scan_max_depth` value may be
@@ -96,12 +96,12 @@ Then allow or deny domains:
 
 Patterns:
 
-| Pattern | Meaning |
-| ------- | ------- |
-| `example.com` | Exact host. |
-| `*.example.com` | Subdomains only. |
-| `**.example.com` | Apex and subdomains. |
-| `*` | Broad public allow. Use intentionally. |
+| Pattern          | Meaning                                |
+| ---------------- | -------------------------------------- |
+| `example.com`    | Exact host.                            |
+| `*.example.com`  | Subdomains only.                       |
+| `**.example.com` | Apex and subdomains.                   |
+| `*`              | Broad public allow. Use intentionally. |
 
 Local and private network destinations are guarded separately. Allow literal
 targets like `localhost` or `127.0.0.1` when you need them.

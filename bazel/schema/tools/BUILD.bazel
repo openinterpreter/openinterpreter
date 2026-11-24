@@ -1,0 +1,16 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+load("@schema_python//:requirements.bzl", "requirement")
+
+package(default_visibility = ["//visibility:public"])
+
+py_binary(
+    name = "python-codegen",
+    srcs = ["python_codegen.py"],
+    main = "python_codegen.py",
+    python_version = "3.12",
+    tags = ["manual"],
+    deps = [
+        requirement("datamodel-code-generator"),
+        requirement("packaging"),
+    ],
+)

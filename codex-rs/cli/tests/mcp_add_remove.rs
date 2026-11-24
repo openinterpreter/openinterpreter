@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::load_global_mcp_servers;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
@@ -348,6 +350,40 @@ async fn add_streamable_http_without_manual_token() -> Result<()> {
 }
 
 #[tokio::test]
+async fn add_rejects_blank_client_credentials_before_saving() -> Result<()> {
+    let mut errors = Vec::new();
+    for (client_id, client_secret) in [("registered-client", "   "), ("   ", "cli-secret-marker")] {
+        let codex_home = TempDir::new()?;
+        let output = codex_command(codex_home.path())?
+            .args([
+                "mcp",
+                "add",
+                "private",
+                "--url",
+                "http://127.0.0.1:9/mcp",
+                "--oauth-client-id",
+                client_id,
+                "--oauth-client-secret",
+                client_secret,
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(!stderr.contains("cli-secret-marker"));
+        assert!(!String::from_utf8(output.stdout)?.contains("cli-secret-marker"));
+        assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
+        errors.push(stderr.trim().to_string());
+    }
+    insta::assert_snapshot!(errors.join("\n"), @r"
+    Error: --oauth-client-secret must not be empty
+    Error: --oauth-client-secret requires a nonempty --oauth-client-id
+    ");
+    Ok(())
+}
+
+#[tokio::test]
 async fn add_streamable_http_with_custom_env_var() -> Result<()> {
     let codex_home = TempDir::new()?;
 
@@ -445,16 +481,20 @@ async fn add_persists_issuer_bound_callback_before_starting_oauth() -> Result<()
         "authorization_response_iss_parameter_supported": true,
     });
     let concurrent_codex_home = codex_home.path().to_path_buf();
+    let concurrent_servers = BTreeMap::from([(
+        "concurrent".to_string(),
+        toml::from_str("command = \"echo\"\nargs = [\"concurrent\"]")?,
+    )]);
     let concurrent_add = std::sync::Once::new();
     Mock::given(method("GET"))
         .and(path("/.well-known/oauth-authorization-server/mcp"))
         .respond_with(move |_: &wiremock::Request| {
             concurrent_add.call_once(|| {
-                codex_command(&concurrent_codex_home)
-                    .expect("create concurrent MCP add command")
-                    .args(["mcp", "add", "concurrent", "--", "echo", "concurrent"])
-                    .assert()
-                    .success();
+                // Edit during discovery without starting another CLI inside the HTTP timeout.
+                ConfigEditsBuilder::new(&concurrent_codex_home)
+                    .replace_mcp_servers(&concurrent_servers)
+                    .apply_blocking()
+                    .expect("persist concurrent MCP server during discovery");
             });
             ResponseTemplate::new(200).set_body_json(metadata.clone())
         })
@@ -473,10 +513,10 @@ async fn add_persists_issuer_bound_callback_before_starting_oauth() -> Result<()
     ]);
     let output = tokio::task::spawn_blocking(move || add_cmd.output()).await??;
 
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)?.contains("OAuth callback URL: http://127.0.0.1/callback")
-    );
+    assert_cmd::assert::Assert::new(output)
+        .failure()
+        .stdout(contains("OAuth callback URL: http://127.0.0.1/callback"))
+        .stderr(contains("OAuth authorization endpoint must be a valid URL"));
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     assert!(servers.contains_key("concurrent"));
     assert_eq!(

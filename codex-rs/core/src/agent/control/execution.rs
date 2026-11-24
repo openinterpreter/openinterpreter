@@ -4,6 +4,7 @@
 use super::LocalAgentControl;
 use crate::agent::types::AgentExecutionGuard;
 use crate::codex_thread::CodexThread;
+use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -53,13 +54,14 @@ impl LocalAgentControl {
         if !is_execution_limited(multi_agent_version, session_source) {
             return Ok(());
         }
-        let max_threads = self.agent_execution_limiter.max_threads();
-        if self.agent_execution_limiter.has_capacity() {
+        let max_threads = self.runtime.agent_execution_limiter.max_threads();
+        if self.runtime.agent_execution_limiter.has_capacity() {
             Ok(())
         } else {
-            Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
-                max_threads,
-            }))
+            Err(
+                CodexErr::new(CodexErrorDetails::AgentLimitReached { max_threads })
+                    .with_agent_context(AgentErrorContext::ExecutionCapacity),
+            )
         }
     }
 
@@ -69,7 +71,7 @@ impl LocalAgentControl {
         session_source: &SessionSource,
     ) -> Option<AgentExecutionGuard> {
         is_execution_limited(multi_agent_version, session_source)
-            .then(|| Arc::clone(&self.agent_execution_limiter).guard())
+            .then(|| Arc::clone(&self.runtime.agent_execution_limiter).guard())
     }
 }
 

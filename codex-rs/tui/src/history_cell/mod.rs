@@ -12,6 +12,8 @@
 
 mod activity_group;
 pub(crate) use activity_group::ActivityGroup;
+mod delegated_message;
+pub(crate) use delegated_message::DelegatedMessageCell;
 
 use crate::diff_model::FileChange;
 use crate::diff_render::create_diff_summary;
@@ -104,6 +106,8 @@ const RAW_DIFF_SUMMARY_WIDTH: usize = 10_000;
 mod activity_details;
 pub(crate) mod activity_preview;
 mod approvals;
+mod async_questions;
+mod async_replies;
 mod base;
 mod dynamic;
 mod exec;
@@ -123,6 +127,7 @@ mod startup_warnings;
 mod warnings;
 
 pub(crate) use activity_details::ActivityDetails;
+pub(crate) use activity_preview::ActivityDisclosure;
 pub(crate) use approvals::*;
 pub(crate) use base::*;
 pub(crate) use dynamic::DynamicToolCallCell;
@@ -150,9 +155,11 @@ pub(crate) use warnings::warning_entries;
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) enum HistoryRenderMode {
+    #[serde(rename = "standard")]
     Rich,
+    #[serde(rename = "raw")]
     Raw,
 }
 
@@ -212,11 +219,21 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         Vec::new()
     }
 
+    /// Original Markdown for semantic copy targets, independent of presentation.
+    fn copy_source(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns the logical lines for the main chat viewport.
     fn display_lines(&self, width: u16) -> Vec<Line<'static>>;
 
     /// Returns copy-friendly plain logical lines for raw scrollback mode.
     fn raw_lines(&self) -> Vec<Line<'static>>;
+
+    /// A local artifact the owned fullscreen viewport may preview. Text surfaces ignore it.
+    fn image_path(&self) -> Option<AbsolutePathBuf> {
+        None
+    }
 
     /// Raw live presentation may omit transcript-only diagnostics without losing their source.
     fn live_raw_lines(&self) -> Vec<Line<'static>> {
@@ -243,6 +260,11 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         }
     }
 
+    /// Output-free descriptions of individual tool invocations, in transcript order.
+    fn tool_call_labels(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Stable, namespaced member identities used to retain disclosure across grouping and replay.
     /// Empty identities indicate ordinary content without a local disclosure control.
     fn activity_ids(&self) -> Vec<String> {
@@ -258,6 +280,12 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// Prefer source metadata so collapsed rendering does not materialize hidden content.
     fn has_hidden_activity_details(&self, _width: u16) -> bool {
         true
+    }
+
+    /// Prefer source metadata so search and disclosure never materialize hidden output.
+    fn activity_disclosure(&self, width: u16) -> Option<ActivityDisclosure> {
+        self.has_hidden_activity_details(width)
+            .then_some(ActivityDisclosure::Generic)
     }
 
     fn display_lines_for_mode(&self, width: u16, mode: HistoryRenderMode) -> Vec<Line<'static>> {

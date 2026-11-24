@@ -10,8 +10,7 @@ use chrono::NaiveDateTime;
 use chrono::Timelike;
 use chrono::Utc;
 use codex_protocol::RolloutId;
-use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -41,28 +40,32 @@ pub(crate) fn builder_from_session_meta(
     rollout_path: &Path,
 ) -> Option<ThreadMetadataBuilder> {
     let created_at = parse_timestamp_to_utc(session_meta.meta.timestamp.as_str())?;
-    let mut builder = ThreadMetadataBuilder::new(
+    let builder = ThreadMetadataBuilder::new(
         session_meta.meta.id,
         rollout_path.to_path_buf(),
         created_at,
         session_meta.meta.source.clone(),
-    );
-    builder.history_mode = session_meta.meta.history_mode;
-    builder.originator =
-        (!session_meta.meta.originator.is_empty()).then(|| session_meta.meta.originator.clone());
-    builder.model_provider = session_meta.meta.model_provider.clone();
-    builder.agent_nickname = session_meta.meta.agent_nickname.clone();
-    builder.agent_role = session_meta.meta.agent_role.clone();
-    builder.agent_path = session_meta.meta.agent_path.clone();
-    builder.cwd = session_meta.meta.cwd.clone();
-    builder.cli_version = Some(session_meta.meta.cli_version.clone());
-    builder.sandbox_policy = SandboxPolicy::new_read_only_policy();
-    builder.approval_mode = AskForApproval::OnRequest;
-    if let Some(git) = session_meta.git.as_ref() {
-        builder.git_sha = git.commit_hash.as_ref().map(|sha| sha.0.clone());
-        builder.git_branch = git.branch.clone();
-        builder.git_origin_url = git.repository_url.clone();
-    }
+    )
+    .with_creator_user_id(session_meta.meta.creator_user_id.clone())
+    .with_creator_account_id(session_meta.meta.creator_account_id.clone())
+    .with_history_mode(session_meta.meta.history_mode)
+    .with_originator(
+        (!session_meta.meta.originator.is_empty()).then(|| session_meta.meta.originator.clone()),
+    )
+    .with_model_provider(session_meta.meta.model_provider.clone())
+    .with_agent_nickname(session_meta.meta.agent_nickname.clone())
+    .with_agent_role(session_meta.meta.agent_role.clone())
+    .with_agent_path(session_meta.meta.agent_path.clone())
+    .with_cwd(session_meta.meta.cwd.clone())
+    .with_cli_version(session_meta.meta.cli_version.clone());
+    let builder = if let Some(git) = session_meta.git.as_ref() {
+        builder
+            .with_git_sha(git.commit_hash.as_ref().map(|sha| sha.0.clone()))
+            .with_git_branch(git.branch.clone())
+            .with_git_origin_url(git.repository_url.clone())
+    } else {
+        builder
+    };
     Some(builder)
 }
 
@@ -81,6 +84,7 @@ pub fn builder_from_items(
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RetainedContext(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => None,
     }) && let Some(builder) = builder_from_session_meta(session_meta, rollout_path)
@@ -99,6 +103,11 @@ pub fn builder_from_items(
         created_at,
         SessionSource::default(),
     ))
+}
+
+/// Returns the stable thread ID from a canonical filename, including a reverted rollout's name.
+pub fn thread_id_from_rollout_path(path: &Path) -> Option<ThreadId> {
+    Some(RolloutFileName::parse(path.file_name()?.to_str()?)?.thread_id())
 }
 
 /// Returns the rollout ID encoded in a canonical rollout filename.
@@ -173,6 +182,7 @@ pub async fn extract_metadata_from_rollout(
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         }),

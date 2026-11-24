@@ -7,6 +7,9 @@ mod paragraph;
 mod source;
 
 pub(crate) use paragraph::HyperlinkParagraph;
+pub(crate) use paragraph::HyperlinkRows;
+pub(crate) use paragraph::HyperlinkText;
+pub(crate) use paragraph::mark_hyperlink_cells;
 pub(crate) use source::LineWrapPolicy;
 pub(crate) use source::LogicalLineSource;
 
@@ -174,6 +177,13 @@ pub(crate) fn lines_with_sources_eq(left: &[HyperlinkLine], right: &[HyperlinkLi
             .eq(right.iter().map(|line| &line.source))
 }
 
+pub(crate) fn source_span_width(span: &Span<'_>) -> usize {
+    span.content
+        .graphemes(/*is_extended*/ true)
+        .map(display_width)
+        .sum()
+}
+
 impl HyperlinkLine {
     pub(crate) fn new(line: Line<'static>) -> Self {
         Self {
@@ -187,17 +197,51 @@ impl HyperlinkLine {
         line_width(&self.line)
     }
 
+    /// The transcript expands tabs after wrapping. Keep their source columns until then.
+    pub(crate) fn source_width(&self) -> usize {
+        self.line.iter().map(source_span_width).sum()
+    }
+
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
+        if let Some(destination) = destination.and_then(web_destination) {
+            self.push_linked_span(span, self.source_width(), destination);
+        } else {
+            self.source = None;
+            self.line.push_span(span);
+        }
+    }
+
+    pub(crate) fn push_linked_span(
+        &mut self,
+        span: Span<'static>,
+        start: usize,
+        destination: String,
+    ) {
         self.source = None;
-        let start = self.width();
-        let end = start + display_width(span.content.as_ref());
+        let end = start + source_span_width(&span);
         self.line.push_span(span);
-        if end > start
-            && let Some(destination) = destination.and_then(web_destination)
-        {
+        if end > start {
             self.hyperlinks
                 .push(TerminalHyperlink::web(start..end, destination));
         }
+    }
+
+    pub(crate) fn clip_hyperlinks_to_width(&mut self, width: usize) {
+        self.hyperlinks.retain_mut(|link| {
+            link.columns.end = link.columns.end.min(width);
+            !link.columns.is_empty()
+        });
+    }
+
+    /// Native scrollback paints the row style last. Resolve text styles onto the spans so
+    /// inline Markdown and gutter overrides survive, keeping the background for empty columns.
+    pub(crate) fn resolve_span_styles(mut self) -> Self {
+        let style = std::mem::take(&mut self.line.style);
+        self.line.style.bg = style.bg;
+        for span in &mut self.line.spans {
+            span.style = style.patch(span.style);
+        }
+        self
     }
 
     pub(crate) fn style(mut self, style: ratatui::style::Style) -> Self {
@@ -207,6 +251,24 @@ impl HyperlinkLine {
         }
         self
     }
+}
+
+/// Remap hyperlink columns from a clipped source segment into a rendered row.
+pub(crate) fn project_hyperlink_columns(
+    hyperlinks: &[TerminalHyperlink],
+    source: Range<usize>,
+    prefix: usize,
+) -> Vec<TerminalHyperlink> {
+    hyperlinks
+        .iter()
+        .filter_map(|hyperlink| {
+            let start = hyperlink.columns.start.max(source.start);
+            let end = hyperlink.columns.end.min(source.end);
+            (start < end).then(|| {
+                hyperlink.with_columns(prefix + start - source.start..prefix + end - source.start)
+            })
+        })
+        .collect()
 }
 
 impl From<Line<'static>> for HyperlinkLine {
@@ -426,10 +488,16 @@ pub(crate) fn remap_wrapped_line(
     wrapped: Vec<Line<'static>>,
 ) -> Vec<HyperlinkLine> {
     let mut out = plain_hyperlink_lines(wrapped);
-    if source.hyperlinks.is_empty() {
+    if source.hyperlinks.is_empty() && source.source.is_none() {
         return out;
     }
     let source_text = line_text(&source.line);
+    if source_text.trim().is_empty() {
+        for line in &mut out {
+            line.source = source.source.clone();
+        }
+        return out;
+    }
     let mut source_byte = 0usize;
     let mut source_column = 0usize;
     let mut link_index = 0usize;
@@ -447,6 +515,10 @@ pub(crate) fn remap_wrapped_line(
             continue;
         };
         let mapped = &rendered[rendered_start..];
+        line.source = source
+            .source
+            .as_ref()
+            .map(|source| source.wrapped(source_byte..source_byte + mapped.len(), rendered_start));
         let mut output_column = display_width(&rendered[..rendered_start]);
         for grapheme in mapped.graphemes(/*is_extended*/ true) {
             let width = display_width(grapheme);
@@ -576,6 +648,14 @@ fn trailing_url_end(candidate: &str) -> usize {
             unmatched
         } else {
             matches!(ch, ',' | '.' | ';' | '!' | '\'' | '"')
+                || ch == '?'
+                    && match remaining.chars().rev().nth(1) {
+                        Some(')') => balances[0] < 0,
+                        Some(']') => balances[1] < 0,
+                        Some('}') => balances[2] < 0,
+                        Some('>') => balances[3] < 0,
+                        _ => false,
+                    }
         };
         if !trim {
             break;
@@ -880,13 +960,18 @@ mod tests {
 
     #[test]
     fn discovers_punctuated_web_url_columns() {
-        assert_eq!(
-            web_links_in_text("See (https://example.com/a)."),
-            vec![TerminalHyperlink::web(
-                /*columns*/ 5..26,
-                "https://example.com/a".to_string(),
-            )]
-        );
+        for text in [
+            "See (https://example.com/a).",
+            "See (https://example.com/a)?",
+        ] {
+            assert_eq!(
+                web_links_in_text(text),
+                vec![TerminalHyperlink::web(
+                    /*columns*/ 5..26,
+                    "https://example.com/a".to_string(),
+                )]
+            );
+        }
     }
 
     #[test]
@@ -910,14 +995,18 @@ mod tests {
 
     #[test]
     fn preserves_balanced_parentheses_in_bare_web_urls() {
-        let destination = "https://en.wikipedia.org/wiki/Function_(mathematics)";
-        assert_eq!(
-            web_links_in_text(&format!("See ({destination}).")),
-            vec![TerminalHyperlink::web(
-                /*columns*/ 5..5 + usize::from(destination.cell_width()),
-                destination.to_string(),
-            )]
-        );
+        for destination in [
+            "https://en.wikipedia.org/wiki/Function_(mathematics)",
+            "https://en.wikipedia.org/wiki/Function_(mathematics)?q=(alpha)?",
+        ] {
+            assert_eq!(
+                web_links_in_text(&format!("See ({destination}).")),
+                vec![TerminalHyperlink::web(
+                    /*columns*/ 5..5 + usize::from(destination.cell_width()),
+                    destination.to_string(),
+                )]
+            );
+        }
     }
 
     #[test]

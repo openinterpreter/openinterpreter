@@ -11,8 +11,9 @@ fn delta_cursor_tracks_collected_entries_across_sliding_window_retention() {
         .into_iter()
         .map(|text| ConversationTranscriptEntry {
             kind: ConversationTranscriptEntryKind::Assistant,
-            text: text.to_owned(),
+            content: crate::TranscriptContent::Text(text.to_owned()),
             original_bytes: text.len(),
+            retained_source: None,
         })
         .collect::<Vec<_>>();
     let mut profile = ContextProfile::asynchronous();
@@ -23,14 +24,20 @@ fn delta_cursor_tracks_collected_entries_across_sliding_window_retention() {
     let TranscriptSelection::Full(initial) = selection else {
         panic!("first request must select a full transcript");
     };
-    let initial = profile.render_transcript(initial, /*entry_number_offset*/ 0);
+    let initial = profile.prepare_transcript(initial, /*entry_number_offset*/ 0);
     assert_eq!(
         initial
             .items
             .into_iter()
-            .map(|item| item.content)
+            .map(|item| match item.content {
+                crate::TranscriptContent::Record(record) =>
+                    crate::TranscriptContent::Text(record.to_string()),
+                content => content,
+            })
             .collect::<Vec<_>>(),
-        vec!["[3] assistant: third\n"],
+        vec![crate::TranscriptContent::Text(
+            "[3] assistant: third\n".to_owned()
+        )],
     );
 
     let (selection, next_cursor) =
@@ -42,18 +49,24 @@ fn delta_cursor_tracks_collected_entries_across_sliding_window_retention() {
     else {
         panic!("an append must select only the new entry");
     };
-    let delta = profile.render_transcript(delta, offset);
+    let delta = profile.prepare_transcript(delta, offset);
     assert_eq!(
         (
             delta
                 .items
                 .into_iter()
-                .map(|item| item.content)
+                .map(|item| match item.content {
+                    crate::TranscriptContent::Record(record) =>
+                        crate::TranscriptContent::Text(record.to_string()),
+                    content => content,
+                })
                 .collect::<Vec<_>>(),
             next_cursor,
         ),
         (
-            vec!["[4] assistant: fourth\n".to_owned()],
+            vec![crate::TranscriptContent::Text(
+                "[4] assistant: fourth\n".to_owned()
+            )],
             TranscriptCursor {
                 parent_history_version: 7,
                 transcript_entry_count: 4,

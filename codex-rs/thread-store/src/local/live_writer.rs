@@ -1,20 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
-use codex_rollout::is_persisted_rollout_item;
+use codex_rollout::into_persisted_rollout_items;
 use tracing::warn;
 
 use super::LocalThreadStore;
 use super::create_thread;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
-use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -27,65 +28,119 @@ pub(super) async fn create_thread(
     params: CreateThreadParams,
 ) -> ThreadStoreResult<()> {
     let thread_id = params.thread_id;
-    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    let inherited_cursor = if params.initial_window_id.allocation().is_some()
+        && let (Some(parent), Some(base)) = (params.forked_from_id, params.history_base)
+    {
+        let lineage = store.resolve_rollout_lineage_for_reference(parent).await?;
+        let prefix = super::model_context::load_for_fork(lineage, Some(base)).await?;
+        codex_rollout::next_model_id_ordinals(&prefix).0
+    } else {
+        0
+    };
+    let attachment = if params.attached_thread {
+        let parent = params
+            .forked_from_id
+            .filter(|parent| *parent != thread_id)
+            .ok_or_else(|| ThreadStoreError::InvalidRequest {
+                message: "attached threads require a distinct fork source".to_string(),
+            })?;
+        let state = store
+            .state_db
+            .as_ref()
+            .ok_or(ThreadStoreError::Unsupported {
+                operation: "attached_threads",
+            })?;
+        // Keep parent deletion out until the child's canonical metadata is durable.
+        let source_ownership = (
+            store.live_writer_locks.lock(parent).await,
+            store.acquire_writer_locks(&[parent]).await?,
+        );
+        super::thread_rollout_resolver::resolve_current_including_archived(store, parent)
+            .await?
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id: parent })?;
+        Some((state, source_ownership))
+    } else {
+        None
+    };
+    let mut cursor = store.live_writer_locks.lock(thread_id).await;
     let history_mode = params.history_mode;
     store.ensure_live_recorder_absent(thread_id).await?;
     let writer_lock = store.acquire_writer_lock(thread_id)?;
     let recorder = create_thread::create_thread(store, params, writer_lock.clone()).await?;
+    if let Some((state, _source_ownership)) = attachment {
+        recorder.persist().await.map_err(thread_store_io_error)?;
+        if let Err(error) = index_attached_thread(store, state, recorder.rollout_path()).await {
+            recorder.discard().await.map_err(thread_store_io_error)?;
+            super::delete_thread::delete_rollout_file(store, recorder.rollout_path())?;
+            super::delete_thread::delete_state_rows(store, &[thread_id]).await?;
+            return Err(error);
+        }
+    }
     store
         .insert_live_recorder(thread_id, recorder, thread_id, history_mode, writer_lock)
-        .await
+        .await?;
+    *cursor = inherited_cursor;
+    Ok(())
 }
 
 pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
-) -> ThreadStoreResult<()> {
-    let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
+) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
+    let mut cursor = store.live_writer_locks.lock(params.thread_id).await;
     store.ensure_live_recorder_absent(params.thread_id).await?;
     let writer_lock = store.acquire_writer_lock(params.thread_id)?;
-    let history_mode = if let Some(history) = params.history.as_deref() {
-        canonical_history_mode_from_rollout_items(history)
-    } else if let Some(rollout_path) = params.rollout_path.as_ref() {
-        super::read_thread::read_thread_by_rollout_path(
-            store,
-            rollout_path.clone(),
-            params.include_archived,
-            /*include_history*/ false,
-        )
-        .await?
-        .history_mode
-    } else {
-        super::read_thread::read_thread(
-            store,
-            ReadThreadParams {
-                thread_id: params.thread_id,
-                include_archived: params.include_archived,
-                include_history: false,
-            },
-        )
-        .await?
-        .history_mode
-    };
-    let rollout_path = match (params.rollout_path, params.history) {
-        (Some(rollout_path), _history) => rollout_path,
-        (None, history) => {
-            let thread = super::read_thread::read_thread(
-                store,
-                ReadThreadParams {
+    let rollout_path = match params.rollout_path {
+        Some(rollout_path) => rollout_path,
+        None => {
+            let resolved = if params.include_archived {
+                super::thread_rollout_resolver::resolve_current_including_archived(
+                    store,
+                    params.thread_id,
+                )
+                .await?
+            } else {
+                super::thread_rollout_resolver::resolve_current(store, params.thread_id).await?
+            };
+            resolved
+                .ok_or(ThreadStoreError::ThreadNotFound {
                     thread_id: params.thread_id,
-                    include_archived: params.include_archived,
-                    include_history: history.is_none(),
-                },
-            )
-            .await?;
-            thread
-                .rollout_path
-                .ok_or_else(|| ThreadStoreError::Internal {
-                    message: format!("thread {} does not have a rollout path", params.thread_id),
                 })?
+                .path
         }
     };
+    let rollout_path =
+        super::read_thread::resolve_requested_rollout_path(store, rollout_path).await?;
+    if !params.include_archived
+        && super::helpers::rollout_path_is_archived(&store.config.codex_home, &rollout_path)
+    {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!("thread {} is archived", params.thread_id),
+        });
+    }
+    let history = match params.history {
+        Some(history)
+            if !matches!(
+                history.first(),
+                Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == params.thread_id
+            ) =>
+        {
+            history
+        }
+        Some(history)
+            if params.history_revision.is_some()
+                && params.history_revision
+                    == super::history_revision::read(&rollout_path).await =>
+        {
+            history
+        }
+        _ => Arc::new(
+            super::model_context::load_from_rollout_path(store, params.thread_id, &rollout_path)
+                .await?
+                .items,
+        ),
+    };
+    let history_mode = canonical_history_mode_from_rollout_items(&history);
     let cwd = params
         .metadata
         .cwd
@@ -122,7 +177,9 @@ pub(super) async fn resume_thread(
             history_mode,
             writer_lock,
         )
-        .await
+        .await?;
+    *cursor = codex_rollout::next_model_id_ordinals(&history).0;
+    Ok(history)
 }
 
 #[tracing::instrument(
@@ -224,6 +281,41 @@ pub(super) async fn discard_thread(
         .map_err(thread_store_io_error)
 }
 
+async fn index_attached_thread(
+    store: &LocalThreadStore,
+    state: &codex_state::StateRuntime,
+    path: &std::path::Path,
+) -> ThreadStoreResult<()> {
+    let meta = codex_rollout::read_session_meta_line(path)
+        .await
+        .map_err(thread_store_io_error)?;
+    let memory_mode = meta.meta.memory_mode.clone();
+    let items = [RolloutItem::SessionMeta(Box::new(meta))];
+    let builder = codex_rollout::builder_from_items(&items, path).ok_or_else(|| {
+        ThreadStoreError::Internal {
+            message: format!("invalid attached thread metadata at {}", path.display()),
+        }
+    })?;
+    let mut metadata = Box::new(state.build_thread_metadata(&builder));
+    if super::helpers::rollout_path_is_archived(&store.config.codex_home, path) {
+        metadata.archived_at = Some(metadata.created_at);
+    }
+    state
+        .apply_rollout_items(
+            metadata,
+            &items,
+            memory_mode.as_deref(),
+            /*updated_at_override*/ None,
+        )
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!(
+                "failed to index attached thread at {}: {err}",
+                path.display()
+            ),
+        })
+}
+
 pub(super) async fn rollout_path(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -314,6 +406,24 @@ pub(super) async fn live_writer_parts(
     Ok((entry.recorder.clone(), entry.rollout_id, entry.history_mode))
 }
 
+/// Uses the writer's creation record only until its rollout has been materialized.
+pub(super) async fn unpersisted_session_meta(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> Option<(PathBuf, SessionMeta)> {
+    let (recorder, _, _) = live_writer_parts(store, thread_id).await.ok()?;
+    // Materialized reads should not queue behind unrelated transcript writes.
+    if codex_rollout::existing_rollout_path(recorder.rollout_path())
+        .await
+        .is_some()
+    {
+        return None;
+    }
+    // A writer may finish shutdown after lookup; durable reads remain the fallback.
+    let meta = recorder.unpersisted_session_meta().await.ok()??;
+    Some((recorder.rollout_path().to_path_buf(), meta))
+}
+
 async fn write_and_project(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -322,27 +432,30 @@ async fn write_and_project(
     // Every live write should have a recorder: create/resume installs one, while
     // shutdown/discard/delete removes it. Keep the lookup defensive so late writes fail after
     // teardown.
-    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    let mut cursor = store.live_writer_locks.lock(thread_id).await;
     let (recorder, rollout_id, history_mode) = live_writer_parts(store, thread_id).await?;
     let sync_rollout_path = matches!(&write_op, RolloutWriteOp::Persist | RolloutWriteOp::Flush);
-    let write_op = match write_op {
-        RolloutWriteOp::AppendItems(mut items) => {
-            items.retain(|item| is_persisted_rollout_item(item, history_mode));
+    match write_op {
+        RolloutWriteOp::AppendItems(items) => {
+            let mut items = into_persisted_rollout_items(items, history_mode);
             if items.is_empty() {
                 return Ok(());
             }
-            RolloutWriteOp::AppendItems(items)
+            let next = codex_rollout::stamp_item_ordinals(*cursor, &mut items);
+            recorder
+                .record_canonical_items(&items)
+                .await
+                .map_err(thread_store_io_error)?;
+            // Once queued, the recorder owns the batch even if flush is cancelled or retried.
+            *cursor = next;
+            recorder.flush().await.map_err(thread_store_io_error)?;
         }
-        RolloutWriteOp::Persist => RolloutWriteOp::Persist,
-        RolloutWriteOp::Flush => RolloutWriteOp::Flush,
-    };
-    if matches!(history_mode, ThreadHistoryMode::Legacy) {
-        durable_write(&recorder, write_op).await?;
-    } else {
+        RolloutWriteOp::Persist => recorder.persist().await.map_err(thread_store_io_error)?,
+        RolloutWriteOp::Flush => recorder.flush().await.map_err(thread_store_io_error)?,
+    }
+    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        // SQLite is a rebuildable view and must never get ahead of canonical history.
         let rollout_path = recorder.rollout_path();
-        // SQLite is a rebuildable view. The flush barrier must win before projection starts so it
-        // can lag JSONL after failure, but can never get ahead of canonical history.
-        durable_write(&recorder, write_op).await?;
         if let Err(err) = super::thread_history_materialization::materialize_to_sqlite(
             store,
             rollout_id,
@@ -357,18 +470,4 @@ async fn write_and_project(
         sync_materialized_rollout_path(store, thread_id, recorder.rollout_path()).await?;
     }
     Ok(())
-}
-
-async fn durable_write(recorder: &RolloutRecorder, write: RolloutWriteOp) -> ThreadStoreResult<()> {
-    match write {
-        RolloutWriteOp::AppendItems(items) => {
-            recorder
-                .record_canonical_items(items.as_slice())
-                .await
-                .map_err(thread_store_io_error)?;
-            recorder.flush().await.map_err(thread_store_io_error)
-        }
-        RolloutWriteOp::Persist => recorder.persist().await.map_err(thread_store_io_error),
-        RolloutWriteOp::Flush => recorder.flush().await.map_err(thread_store_io_error),
-    }
 }

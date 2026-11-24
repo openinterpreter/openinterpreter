@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use codex_protocol::mcp::McpServerConnectionStatus;
 
 use super::McpConnectionSet;
+use crate::McpServerKey;
 
 impl McpConnectionSet {
-    pub(crate) async fn connection_statuses(&self) -> HashMap<String, McpServerConnectionStatus> {
+    pub(crate) async fn connection_statuses(
+        &self,
+    ) -> HashMap<McpServerKey, McpServerConnectionStatus> {
         use McpServerConnectionStatus as Status;
 
         let mut statuses = self
@@ -23,7 +26,7 @@ impl McpConnectionSet {
             } else {
                 client.connection_status().await
             };
-            statuses.insert(name.clone(), status);
+            statuses.insert(name.to_owned(), status);
         }
         statuses
     }

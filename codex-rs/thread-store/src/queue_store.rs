@@ -100,6 +100,10 @@ pub trait QueueStore: Send + Sync {
     /// Persist a one-shot terminal completion proof bound to the exact native
     /// turn and mission identity. A conflict returns the retained admission
     /// row for reconciliation rather than creating another effect.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terminal CAS binds admission, turn, and exact mission revisions"
+    )]
     fn mark_admission_completed(
         &self,
         thread_id: ThreadId,
@@ -113,6 +117,10 @@ pub trait QueueStore: Send + Sync {
 
     /// Persist terminal lineage when a later native Goal continuation turn
     /// completes an admission dispatched by an earlier turn.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "continuation CAS binds admission, turn, and exact mission revisions"
+    )]
     fn mark_admission_completed_from_continuation(
         &self,
         thread_id: ThreadId,

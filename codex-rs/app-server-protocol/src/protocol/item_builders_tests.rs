@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::thread_history::build_turns_from_rollout_items;
+use crate::protocol::v2::ThreadItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::GuardianAssessmentStatus;
@@ -108,6 +109,7 @@ fn guardian_stdin_reviews_preserve_parent_command_history() {
     };
     let start_turn = |turn_id: &str| {
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
             turn_id: turn_id.into(),
             root_turn_id: None,
             trace_id: None,
@@ -125,7 +127,11 @@ fn guardian_stdin_reviews_preserve_parent_command_history() {
     assert_eq!(expected.len(), 2);
     assert_eq!(
         expected[0].items,
-        vec![build_command_execution_begin_item(&begin)],
+        [ThreadItem {
+            payload: build_command_execution_begin_item(&begin),
+            started_at_ms: Some(begin.started_at_ms),
+            completed_at_ms: None,
+        }],
     );
     assert!(expected[1].items.is_empty());
 

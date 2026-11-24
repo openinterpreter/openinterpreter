@@ -10,6 +10,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         ToolName::plain("list_agents")
     }
 
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         create_list_agents_tool()
     }
@@ -40,14 +44,15 @@ impl Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: ListAgentsArgs = parse_arguments(&arguments)?;
-        session
-            .services
-            .agent_control
-            .register_session_root(session.thread_id, turn.parent_thread_id);
         let agents = session
             .services
             .agent_control
-            .list_agents(&turn.session_source, args.path_prefix.as_deref())
+            .list(
+                session.thread_id,
+                turn.parent_thread_id,
+                &turn.session_source,
+                args.path_prefix.as_deref(),
+            )
             .await
             .map_err(collab_spawn_error)?;
 

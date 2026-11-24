@@ -20,11 +20,20 @@ enum CodexErrorInfoWire {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    ApiKeySpendLimitExceeded,
+    ProjectSpendLimitExceeded,
+    OrganizationSpendLimitExceeded,
     RateLimitExceeded,
+    FlexUnavailable,
     ServerOverloaded,
+    ModelNotFound,
+    /// Capacity is unavailable on a route restricted by server policy.
+    PolicyCapacityUnavailable,
+    InferenceHookDenied,
     CyberPolicy,
     BioPolicy,
     MisalignmentPolicyViolation,
+    TooManyDenials,
     HttpConnectionFailed {
         http_status_code: Option<u16>,
     },
@@ -34,6 +43,7 @@ enum CodexErrorInfoWire {
     InternalServerError,
     Unauthorized,
     BadRequest,
+    InvalidPrompt,
     SandboxError,
     ResponseStreamDisconnected {
         http_status_code: Option<u16>,

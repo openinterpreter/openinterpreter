@@ -375,7 +375,7 @@ async fn capability_discovery_retries_executor_disconnect_within_same_request() 
         .info()
         .await?;
 
-    let cache = Arc::new(ExecutorCapabilityDiscoveryCache::new(Arc::clone(&manager)));
+    let cache = Arc::new(ExecutorCapabilityDiscoveryCache::default());
     let skill_root = tempfile::tempdir()?;
     let selected_roots = vec![SelectedCapabilityRoot {
         id: "recovering-skill".to_string(),
@@ -385,9 +385,18 @@ async fn capability_discovery_retries_executor_disconnect_within_same_request() 
         },
     }];
 
+    let resolved_roots = manager
+        .resolve_selected_capability_roots(
+            &selected_roots,
+            &HashMap::from([(
+                REMOTE_ENVIRONMENT_ID.to_string(),
+                manager.get_environment(REMOTE_ENVIRONMENT_ID),
+            )]),
+        )
+        .await;
     let snapshot = timeout(
         Duration::from_secs(12),
-        cache.snapshot(&selected_roots, &HashMap::new()),
+        cache.snapshot(&resolved_roots, &HashMap::new()),
     )
     .await
     .context("capability discovery did not retry within the same request")?;
@@ -409,7 +418,7 @@ async fn capability_discovery_retries_executor_disconnect_within_same_request() 
 async fn capability_discovery_retries_after_executor_reconnects() -> anyhow::Result<()> {
     let server = exec_server().await?;
     let manager = Arc::new(EnvironmentManager::default_for_tests());
-    let cache = ExecutorCapabilityDiscoveryCache::new(Arc::clone(&manager));
+    let cache = ExecutorCapabilityDiscoveryCache::default();
     let skill_root = tempfile::tempdir()?;
     let refused_listener = TcpListener::bind("127.0.0.1:0").await?;
     let refused_address = refused_listener.local_addr()?;
@@ -427,7 +436,16 @@ async fn capability_discovery_retries_after_executor_reconnects() -> anyhow::Res
         },
     }];
 
-    let failed_snapshot = cache.snapshot(&selected_roots, &HashMap::new()).await;
+    let resolved_roots = manager
+        .resolve_selected_capability_roots(
+            &selected_roots,
+            &HashMap::from([(
+                "recovering".to_string(),
+                manager.get_environment("recovering"),
+            )]),
+        )
+        .await;
+    let failed_snapshot = cache.snapshot(&resolved_roots, &HashMap::new()).await;
     assert!(failed_snapshot.roots()[0].result.is_err());
     assert!(!cache.take_recovered_discovery());
 
@@ -442,7 +460,16 @@ async fn capability_discovery_retries_after_executor_reconnects() -> anyhow::Res
         .wait_until_ready()
         .await?;
 
-    let recovered_snapshot = cache.snapshot(&selected_roots, &HashMap::new()).await;
+    let resolved_roots = manager
+        .resolve_selected_capability_roots(
+            &selected_roots,
+            &HashMap::from([(
+                "recovering".to_string(),
+                manager.get_environment("recovering"),
+            )]),
+        )
+        .await;
+    let recovered_snapshot = cache.snapshot(&resolved_roots, &HashMap::new()).await;
     let discovery = recovered_snapshot.roots()[0]
         .result
         .as_ref()
@@ -451,5 +478,116 @@ async fn capability_discovery_retries_after_executor_reconnects() -> anyhow::Res
     assert_eq!(discovery.id, "recovering-skill");
     assert!(cache.take_recovered_discovery());
     assert!(!cache.take_recovered_discovery());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capability_discovery_retries_after_application_network_policy_recovers()
+-> anyhow::Result<()> {
+    let server = exec_server().await?;
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    let manager = Arc::new(EnvironmentManager::without_environments(
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+            .with_network_policy(policy.clone()),
+    ));
+    manager.upsert_environment(
+        "recovering".to_string(),
+        server.websocket_url().to_string(),
+        /*connect_timeout*/ None,
+    )?;
+    let cache = ExecutorCapabilityDiscoveryCache::default();
+    let skill_root = tempfile::tempdir()?;
+    let selected_roots = vec![SelectedCapabilityRoot {
+        id: "recovering-skill".to_string(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: "recovering".to_string(),
+            path: PathUri::from_host_native_path(skill_root.path())?,
+        },
+    }];
+
+    let resolved_roots = manager
+        .resolve_selected_capability_roots(
+            &selected_roots,
+            &HashMap::from([(
+                "recovering".to_string(),
+                manager.get_environment("recovering"),
+            )]),
+        )
+        .await;
+    let failed = cache.snapshot(&resolved_roots, &HashMap::new()).await;
+    let error = failed.roots()[0].result.as_ref().unwrap_err();
+    assert!(error.contains("application network policy"), "{error}");
+    assert!(!cache.take_recovered_discovery());
+
+    controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    );
+    let recovered = timeout(
+        Duration::from_secs(/*secs*/ 10),
+        cache.snapshot(&resolved_roots, &HashMap::new()),
+    )
+    .await?;
+    let discovery = recovered.roots()[0]
+        .result
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    assert_eq!(discovery.id, "recovering-skill");
+    assert!(cache.take_recovered_discovery());
+    assert!(!cache.take_recovered_discovery());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capability_discovery_does_not_replace_an_unavailable_captured_executor()
+-> anyhow::Result<()> {
+    let server = exec_server().await?;
+    let manager = Arc::new(EnvironmentManager::default_for_tests());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    manager.upsert_environment(
+        "captured".into(),
+        format!("ws://{address}"),
+        Some(Duration::from_millis(100)),
+    )?;
+    let original = manager.get_environment("captured").context("original")?;
+    let root_dir = tempfile::tempdir()?;
+    let roots = vec![SelectedCapabilityRoot {
+        id: "root".into(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: "captured".into(),
+            path: PathUri::from_host_native_path(root_dir.path())?,
+        },
+    }];
+    // Model a handle retained by a step whose connection is no longer available.
+    let resolved = manager
+        .resolve_selected_capability_roots(
+            &roots,
+            &HashMap::from([("captured".into(), Some(original))]),
+        )
+        .await;
+    manager.upsert_environment(
+        "captured".into(),
+        server.websocket_url().to_string(),
+        /*connect_timeout*/ None,
+    )?;
+    let replacement = manager.get_environment("captured").context("replacement")?;
+    replacement.wait_until_ready().await?;
+    let cache = ExecutorCapabilityDiscoveryCache::default();
+    let unavailable = cache.snapshot(&resolved, &HashMap::new()).await;
+    assert!(unavailable.roots()[0].result.is_err());
+    let newer = manager
+        .resolve_selected_capability_roots(
+            &roots,
+            &HashMap::from([("captured".into(), Some(replacement))]),
+        )
+        .await;
+    let available = cache.snapshot(&newer, &HashMap::new()).await;
+    assert!(available.roots()[0].result.is_ok());
+    assert!(cache.take_recovered_discovery());
+    let unavailable = cache.snapshot(&resolved, &HashMap::new()).await;
+    assert!(unavailable.roots()[0].result.is_err());
     Ok(())
 }

@@ -1,7 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use std::collections::BTreeSet;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::width::display_width;
 
@@ -14,7 +13,7 @@ pub(crate) struct FieldFormatter {
 }
 
 impl FieldFormatter {
-    pub(crate) const INDENT: &'static str = " ";
+    pub(crate) const INDENT: &'static str = "  ";
 
     pub(crate) fn from_labels<S>(labels: impl IntoIterator<Item = S>) -> Self
     where
@@ -26,7 +25,7 @@ impl FieldFormatter {
             .max()
             .unwrap_or(0);
         let indent_width = display_width(Self::INDENT);
-        let value_offset = indent_width + label_width + 1 + 3;
+        let value_offset = indent_width + label_width + 1 + 2;
 
         Self {
             indent: Self::INDENT,
@@ -74,7 +73,7 @@ impl FieldFormatter {
         buf.push(':');
 
         let label_width = display_width(label);
-        let padding = 3 + self.label_width.saturating_sub(label_width);
+        let padding = 2 + self.label_width.saturating_sub(label_width);
         for _ in 0..padding {
             buf.push(' ');
         }
@@ -91,52 +90,4 @@ pub(crate) fn push_label(labels: &mut Vec<String>, seen: &mut BTreeSet<String>, 
     let owned = label.to_string();
     seen.insert(owned.clone());
     labels.push(owned);
-}
-
-pub(crate) fn truncate_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static> {
-    if max_width == 0 {
-        return Line::from(Vec::<Span<'static>>::new());
-    }
-
-    let mut used = 0usize;
-    let mut spans_out: Vec<Span<'static>> = Vec::new();
-
-    for span in line.spans {
-        let text = span.content.into_owned();
-        let style = span.style;
-        let span_width = display_width(text.as_str());
-
-        if span_width == 0 {
-            spans_out.push(Span::styled(text, style));
-            continue;
-        }
-
-        if used >= max_width {
-            break;
-        }
-
-        if used + span_width <= max_width {
-            used += span_width;
-            spans_out.push(Span::styled(text, style));
-            continue;
-        }
-
-        let mut truncated = String::new();
-        for grapheme in text.graphemes(/*is_extended*/ true) {
-            let grapheme_width = display_width(grapheme);
-            if used + grapheme_width > max_width {
-                break;
-            }
-            truncated.push_str(grapheme);
-            used += grapheme_width;
-        }
-
-        if !truncated.is_empty() {
-            spans_out.push(Span::styled(truncated, style));
-        }
-
-        break;
-    }
-
-    Line::from(spans_out)
 }

@@ -2,6 +2,8 @@ use super::StateRuntime;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::ThreadSection;
 use crate::ThreadSectionAppearance;
+use crate::sqlite::SqlitePoolWriteExt;
+use crate::sqlite::SqliteWriteQueryExt;
 use uuid::Uuid;
 
 impl StateRuntime {
@@ -27,7 +29,7 @@ impl StateRuntime {
                     .map(serde_json::to_string)
                     .transpose()?,
             )
-            .execute(self.pool.as_ref())
+            .execute_with_busy_retry(self.pool.as_ref())
             .await?;
 
         Ok(section)
@@ -56,7 +58,7 @@ impl StateRuntime {
         .bind(replace_appearance)
         .bind(appearance)
         .bind(id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional_write(self.pool.as_ref())
         .await?;
 
         section.map(ThreadSection::from_row).transpose()
@@ -68,7 +70,7 @@ impl StateRuntime {
             anyhow::bail!("built-in pinned thread section cannot be deleted");
         }
 
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_immediate().await?;
         sqlx::query(
             "UPDATE threads SET section_position = NULL, section_entered_at_ms = NULL WHERE thread_section_id = ?",
         )

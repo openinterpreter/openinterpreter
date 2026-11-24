@@ -1,0 +1,131 @@
+# Copyright 2021 the V8 project authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# ICU must use the same C++ runtime as the V8 artifact and its host generators.
+_ICU_V8_COPTS = select({
+    "@@//third_party/v8:use_rusty_v8_custom_libcxx_native_windows": [
+        "/D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+        "/D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE",
+        "/D_LIBCPP_INSTRUMENTED_WITH_ASAN=0",
+    ],
+    "@@//third_party/v8:use_rusty_v8_custom_libcxx": [
+        "-nostdinc++",
+        "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+        "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE",
+        "-D_LIBCPP_INSTRUMENTED_WITH_ASAN=0",
+        "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+    ],
+    "//conditions:default": [],
+})
+
+_ICU_MSVC_COPTS = [
+    "/wd4005",
+    "/wd4068",
+    "/wd4267",
+    "/utf-8",
+]
+
+_ICU_LIBRARY_COPTS = select({
+    "@@//third_party/v8:platform_windows_msvc": _ICU_MSVC_COPTS,
+    "//conditions:default": ["-Wno-deprecated-declarations"],
+}) + _ICU_V8_COPTS
+
+_ICU_V8_RUNTIME_DEPS = select({
+    "@@//third_party/v8:use_rusty_v8_custom_libcxx": [
+        "@@//third_party/v8:rusty_v8_custom_libcxx_headers",
+        "@@//third_party/v8:rusty_v8_custom_libcxx_runtime",
+    ],
+    "//conditions:default": [],
+})
+
+filegroup(
+    name = "icudata",
+    srcs = ["common/icudtl.dat"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "icuuc",
+    srcs = glob([
+        "source/common/**/*.h",
+        "source/common/**/*.cpp",
+    ]),
+    copts = _ICU_LIBRARY_COPTS,
+    data = [":icudata"],
+    defines = [
+        "HAVE_DLOPEN=0",
+        "UCONFIG_ONLY_HTML_CONVERSION=1",
+        "U_CHARSET_IS_UTF8=1",
+        "U_USING_ICU_NAMESPACE=0",
+        "U_ENABLE_DYLOAD=0",
+        "USE_CHROMIUM_ICU=1",
+        "U_ENABLE_TRACING=1",
+        "U_ENABLE_RESOURCE_TRACING=0",
+        "UNISTR_FROM_STRING_EXPLICIT=",
+        "UNISTR_FROM_CHAR_EXPLICIT=",
+    ] + select({
+        "@platforms//os:windows": [
+            "U_STATIC_IMPLEMENTATION",
+            "UNICODE",
+            "_UNICODE",
+        ],
+        "//conditions:default": [],
+    }),
+    includes = [
+        "source/common",
+        "source/i18n",
+    ],
+    local_defines = [
+        "U_COMMON_IMPLEMENTATION",
+        "U_ICUDATAENTRY_IN_COMMON",
+    ],
+    tags = ["requires-rtti"],
+    deps = _ICU_V8_RUNTIME_DEPS,
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "icui18n",
+    srcs = glob([
+        "source/i18n/**/*.h",
+        "source/i18n/**/*.cpp",
+    ]),
+    copts = _ICU_LIBRARY_COPTS,
+    local_defines = [
+        "U_I18N_IMPLEMENTATION",
+    ],
+    deps = [":icuuc"] + _ICU_V8_RUNTIME_DEPS,
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "icu",
+    srcs = [
+        "source/stubdata/stubdata.cpp",
+        "source/stubdata/stubdata.h",
+    ],
+    hdrs = glob([
+        "source/common/unicode/*.h",
+        "source/i18n/unicode/*.h",
+    ]),
+    copts = select({
+        "@@//third_party/v8:platform_windows_msvc": _ICU_MSVC_COPTS,
+        "@platforms//os:windows": [
+            "-Wno-deprecated-declarations",
+        ],
+        "//conditions:default": [],
+    }) + _ICU_V8_COPTS,
+    include_prefix = "third_party/icu",
+    local_defines = [
+        "U_COMMON_IMPLEMENTATION",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":icui18n",
+        ":icuuc",
+    ] + _ICU_V8_RUNTIME_DEPS,
+    alwayslink = 1,
+)

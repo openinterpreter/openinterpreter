@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UnsupportedMedia {
@@ -8,14 +10,17 @@ pub(crate) struct UnsupportedMedia {
 }
 
 impl UnsupportedMedia {
+    pub(crate) const IMAGE_KIND: &str = "images.unsupported";
+    pub(crate) const AUDIO_KIND: &str = "audio.unsupported";
+
     pub(crate) const IMAGE: Self = Self {
         text: "image content omitted because you do not support image input",
-        content_kind: "images.unsupported",
+        content_kind: Self::IMAGE_KIND,
     };
 
     pub(crate) const AUDIO: Self = Self {
         text: "audio content omitted because you do not support audio input",
-        content_kind: "audio.unsupported",
+        content_kind: Self::AUDIO_KIND,
     };
 }
 
@@ -36,7 +41,7 @@ impl ContextualUserFragment for UnsupportedMedia {
         ("", "")
     }
 
-    fn body(&self) -> String {
-        self.text.to_string()
+    fn body(&self) -> ContentItem {
+        input_text(self.text.to_string())
     }
 }

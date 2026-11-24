@@ -22,16 +22,38 @@ pub struct DisconnectInfo {
 }
 
 impl App {
-    pub(super) fn exit_info(&self, exit_reason: ExitReason) -> AppExitInfo {
-        let thread_id = match exit_reason {
-            ExitReason::Archived(_) | ExitReason::ThreadRemoved => None,
-            ExitReason::UserRequested | ExitReason::TurnInterrupted | ExitReason::Fatal(_) => {
-                self.chat_widget.thread_id().or(self.primary_thread_id)
+    pub(super) async fn finish_pending_archives(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (thread_id, outcome) in self.agents_overview.pending_archives.drain() {
+            match tokio::time::timeout_at(deadline, outcome).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => {
+                    warnings.push(format!("Failed to archive thread {thread_id}: {error}"));
+                }
+                Ok(Err(_)) | Err(_) => {
+                    warnings.push(format!("Archive of thread {thread_id} was not confirmed."));
+                }
             }
+        }
+        warnings.sort();
+        warnings
+    }
+
+    pub(super) fn exit_info(&self, exit_reason: ExitReason) -> AppExitInfo {
+        let thread_id = if matches!(
+            exit_reason,
+            ExitReason::Archived(_) | ExitReason::ThreadRemoved
+        ) {
+            None
+        } else {
+            self.chat_widget.thread_id().or(self.primary_thread_id)
         };
         let disconnect_info = thread_id.and_then(|_| {
             let command = match &self.app_server_target {
-                AppServerTarget::Embedded => return None,
+                AppServerTarget::Embedded | AppServerTarget::Cloud => return None,
                 AppServerTarget::LocalDaemon { .. } => vec!["codex".to_string()],
                 AppServerTarget::Remote { endpoint } => {
                     let address = match endpoint {
@@ -71,6 +93,7 @@ impl App {
                 self.chat_widget.rollout_path().as_deref(),
             ),
             disconnect_info,
+            archive_warnings: Vec::new(),
             update_action: self.pending_update_action,
             exit_reason,
         }
@@ -87,7 +110,7 @@ impl AppExitInfo {
                 command
             }
         };
-        let mut lines = Vec::new();
+        let mut lines = self.archive_warnings;
         if let Some(disconnect) = self.disconnect_info
             && let Some(thread_id) = self.thread_id
         {
@@ -104,8 +127,9 @@ impl AppExitInfo {
             lines.push(message.to_string());
             let mut resume_command = disconnect.command.clone();
             resume_command.extend(["resume".to_string(), thread_id.to_string()]);
+            lines.push("To reconnect, run:".to_string());
             lines.push(format!(
-                "Reconnect: {}",
+                "  {}",
                 color_command(escape_command(&resume_command)),
             ));
             if !turn_interrupted {
@@ -131,9 +155,7 @@ impl AppExitInfo {
         if !self.token_usage.is_zero() {
             lines.push(self.token_usage.to_string());
         }
-        if let ExitReason::Archived(thread_id) = self.exit_reason {
-            lines.push(format!("Session archived: {thread_id}"));
-        } else if let Some(thread) = self.resume_hint {
+        if let Some(thread) = self.resume_hint {
             lines.push("To continue this session, run:".to_string());
             lines.push(format!(
                 "  {}",

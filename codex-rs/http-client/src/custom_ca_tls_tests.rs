@@ -1,4 +1,4 @@
-//! Handshake coverage for the custom trust path retained by Windows realtime connections.
+//! Handshake and fresh-file-read coverage for shared custom trust configuration.
 
 use super::CODEX_CA_CERT_ENV;
 use super::ConfiguredCaBundle;
@@ -26,11 +26,11 @@ fn custom_intermediate_trust_preserves_hostname_validation() {
     let temp = tempfile::TempDir::new().unwrap();
     let path = temp.path().join("intermediate.pem");
     std::fs::write(&path, intermediate.pem()).unwrap();
-    let config = build_rustls_client_config(Some(&ConfiguredCaBundle {
+    let bundle = ConfiguredCaBundle {
         source_env: CODEX_CA_CERT_ENV,
         path,
-    }))
-    .unwrap();
+    };
+    let config = build_rustls_client_config(Some(&bundle)).unwrap();
     let server = Arc::new(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -42,7 +42,7 @@ fn custom_intermediate_trust_preserves_hostname_validation() {
         handshake(config.clone(), server.clone(), "localhost"),
         Ok(())
     );
-    let error = handshake(config, server, "wrong.example").unwrap_err();
+    let error = handshake(config.clone(), server.clone(), "wrong.example").unwrap_err();
     assert!(
         matches!(
             error,
@@ -53,6 +53,27 @@ fn custom_intermediate_trust_preserves_hostname_validation() {
         ),
         "{error:?}"
     );
+
+    std::fs::write(&bundle.path, include_str!("../tests/fixtures/test-ca.pem")).unwrap();
+    let replaced = build_rustls_client_config(Some(&bundle)).unwrap();
+    assert!(matches!(
+        handshake(replaced, server.clone(), "localhost"),
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer
+        ))
+    ));
+    assert_eq!(handshake(config, server, "localhost"), Ok(()));
+
+    std::fs::write(&bundle.path, "").unwrap();
+    assert!(matches!(
+        build_rustls_client_config(Some(&bundle)),
+        Err(super::BuildCustomCaTransportError::InvalidCaFile { .. })
+    ));
+    std::fs::remove_file(&bundle.path).unwrap();
+    assert!(matches!(
+        build_rustls_client_config(Some(&bundle)),
+        Err(super::BuildCustomCaTransportError::ReadCaFile { .. })
+    ));
 }
 
 fn handshake(

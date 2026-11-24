@@ -46,10 +46,13 @@ async function readSource(source) {
       });
 
       if (response.ok) {
-        return response.text();
+        // Body failures must be caught by this attempt's retry handler.
+        return await response.text();
       }
 
-      lastError = new Error("failed to fetch " + source + ": " + response.status);
+      lastError = new Error(
+        "failed to fetch " + source + ": " + response.status,
+      );
       if (response.status < 500 && response.status !== 429) {
         break;
       }
@@ -101,7 +104,7 @@ function parseFlatInfo(block) {
 function extractLatestModelInfo(markdown) {
   const lines = markdown.split(/\r?\n/);
   const latestModelInfoIndex = lines.findIndex((line) =>
-    /^latestModelInfo:\s*$/.test(line)
+    /^latestModelInfo:\s*$/.test(line),
   );
 
   if (latestModelInfoIndex >= 0) {
@@ -109,17 +112,13 @@ function extractLatestModelInfo(markdown) {
   }
 
   const commentMatch = markdown.match(
-    /<!--\s*latestModelInfo\s*\n([\s\S]*?)\n\s*-->/m
+    /<!--\s*latestModelInfo\s*\n([\s\S]*?)\n\s*-->/m,
   );
   if (commentMatch) {
     return parseFlatInfo(commentMatch[1]);
   }
 
   return undefined;
-}
-
-function modelToSkillSlug(model) {
-  return model.trim().replace(/\./g, "p");
 }
 
 function absoluteUrl(baseUrl, value) {
@@ -133,13 +132,12 @@ function normalizeInfo(info, baseUrl) {
 
   if (!model || !migrationGuide || !promptingGuide) {
     throw new Error(
-      "latestModelInfo must include model, migrationGuide, and promptingGuide"
+      "latestModelInfo must include model, migrationGuide, and promptingGuide",
     );
   }
 
   return {
     model,
-    modelSlug: modelToSkillSlug(model),
     migrationGuideUrl: absoluteUrl(baseUrl, migrationGuide),
     promptingGuideUrl: absoluteUrl(baseUrl, promptingGuide),
   };
@@ -155,7 +153,7 @@ async function main() {
   }
 
   process.stdout.write(
-    `${JSON.stringify(normalizeInfo(info, baseUrl), null, 2)}\n`
+    `${JSON.stringify(normalizeInfo(info, baseUrl), null, 2)}\n`,
   );
 }
 

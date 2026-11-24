@@ -1,3 +1,4 @@
+use crate::command_safety::powershell_tree_sitter::try_parse_powershell_commands;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use shlex::split as shlex_split;
@@ -25,17 +26,82 @@ fn is_dangerous_powershell(command: &[String]) -> bool {
     if !is_powershell_executable(exe) {
         return false;
     }
-    // Parse the PowerShell invocation to get a flat token list we can scan for
-    // dangerous cmdlets/COM calls plus any URL-looking arguments. This is a
-    // best-effort shlex split of the script text, not a full PS parser.
     let Some(parsed) = parse_powershell_invocation(rest) else {
         return false;
     };
 
+    if let Some(script) = parsed.script
+        && let Some(commands) = try_parse_powershell_commands(script)
+        && powershell_commands_are_independent(script, &commands)
+    {
+        return commands
+            .iter()
+            .any(|words| is_dangerous_powershell_literal_words(words));
+    }
     is_dangerous_powershell_words(&parsed.tokens)
 }
 
+/// Whether strictly lowered commands can be classified independently of the rest of the script.
+pub fn powershell_commands_are_independent(script: &str, commands: &[Vec<String>]) -> bool {
+    // Deliberately keep even quoted pipes and `||` chains on the existing path. Do not
+    // model pipeline data, command rebinding, or strings that may execute using script state.
+    !script.contains('|')
+        && commands.iter().all(|words| {
+            !matches!(
+                words
+                    .first()
+                    .and_then(|word| executable_basename(word))
+                    .as_deref(),
+                Some(
+                    "set-alias"
+                        | "sal"
+                        | "new-alias"
+                        | "nal"
+                        | "set-item"
+                        | "si"
+                        | "new-item"
+                        | "ni"
+                )
+            ) && !words.iter().skip(1).any(|word| {
+                let word = word.to_ascii_lowercase();
+                [
+                    "start-process",
+                    "invoke-item",
+                    "shellexecute",
+                    "shell.application",
+                ]
+                .iter()
+                .any(|marker| word.contains(marker))
+            })
+        })
+}
+
+enum PowerShellCommandKind {
+    Opaque,
+    IndependentLiteral,
+}
+
 pub(crate) fn is_dangerous_powershell_words(words: &[String]) -> bool {
+    classify_powershell_words(words, PowerShellCommandKind::Opaque)
+}
+
+pub(crate) fn is_dangerous_powershell_literal_words(words: &[String]) -> bool {
+    // Shell and terminal wrappers can interpret later words as commands, including `start`.
+    let kind = if words.first().is_some_and(|word| {
+        is_powershell_executable(word)
+            || matches!(
+                executable_basename(word).as_deref(),
+                Some("cmd" | "cmd.exe" | "wt" | "wt.exe")
+            )
+    }) {
+        PowerShellCommandKind::Opaque
+    } else {
+        PowerShellCommandKind::IndependentLiteral
+    };
+    classify_powershell_words(words, kind)
+}
+
+fn classify_powershell_words(words: &[String], kind: PowerShellCommandKind) -> bool {
     let tokens_lc: Vec<String> = words
         .iter()
         .map(|t| t.trim_matches('\'').trim_matches('"').to_ascii_lowercase())
@@ -43,11 +109,13 @@ pub(crate) fn is_dangerous_powershell_words(words: &[String]) -> bool {
     let has_url = args_have_url(words);
 
     if has_url
-        && tokens_lc.iter().any(|t| {
-            matches!(
-                t.as_str(),
-                "start-process" | "start" | "saps" | "invoke-item" | "ii"
-            ) || t.contains("start-process")
+        && tokens_lc.iter().enumerate().any(|(index, t)| {
+            ((index == 0 || matches!(kind, PowerShellCommandKind::Opaque))
+                && matches!(
+                    t.as_str(),
+                    "start-process" | "start" | "saps" | "invoke-item" | "ii"
+                ))
+                || t.contains("start-process")
                 || t.contains("invoke-item")
         })
     {
@@ -365,11 +433,12 @@ fn is_browser_executable(name: &str) -> bool {
     )
 }
 
-struct ParsedPowershell {
+struct ParsedPowershell<'a> {
     tokens: Vec<String>,
+    script: Option<&'a str>,
 }
 
-fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
+fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell<'_>> {
     if args.is_empty() {
         return None;
     }
@@ -385,7 +454,10 @@ fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
                     return None;
                 }
                 let tokens = shlex_split(script)?;
-                return Some(ParsedPowershell { tokens });
+                return Some(ParsedPowershell {
+                    tokens,
+                    script: Some(script),
+                });
             }
             _ if lower.starts_with("-command:") || lower.starts_with("/command:") => {
                 if idx + 1 != args.len() {
@@ -393,7 +465,10 @@ fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
                 }
                 let (_, script) = arg.split_once(':')?;
                 let tokens = shlex_split(script)?;
-                return Some(ParsedPowershell { tokens });
+                return Some(ParsedPowershell {
+                    tokens,
+                    script: Some(script),
+                });
             }
             "-nologo" | "-noprofile" | "-noninteractive" | "-mta" | "-sta" => {
                 idx += 1;
@@ -403,7 +478,10 @@ fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
             }
             _ => {
                 let rest = args[idx..].to_vec();
-                return Some(ParsedPowershell { tokens: rest });
+                return Some(ParsedPowershell {
+                    tokens: rest,
+                    script: None,
+                });
             }
         }
     }

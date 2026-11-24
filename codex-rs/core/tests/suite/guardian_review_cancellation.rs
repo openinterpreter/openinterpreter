@@ -4,6 +4,7 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GuardianAssessmentStatus;
@@ -21,7 +22,7 @@ use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::skip_if_wine_exec;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use serde_json::Value;
@@ -36,11 +37,15 @@ enum Cancellation {
     CodeModeCell,
 }
 
-#[test_case(Cancellation::DirectTool; "direct tool")]
-#[test_case(Cancellation::CodeModeTurn; "code mode turn")]
-#[test_case(Cancellation::CodeModeCell; "code mode cell")]
+#[test_case(Cancellation::DirectTool, false; "direct tool")]
+#[test_case(Cancellation::CodeModeTurn, false; "code mode turn")]
+#[test_case(Cancellation::CodeModeCell, false; "code mode cell")]
+#[test_case(Cancellation::DirectTool, true; "during reconsideration")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelling_tool_aborts_its_guardian_review(cancellation: Cancellation) -> Result<()> {
+async fn cancelling_tool_aborts_its_guardian_review(
+    cancellation: Cancellation,
+    reconsideration: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     skip_if_wine_exec!(
@@ -54,9 +59,29 @@ async fn cancelling_tool_aborts_its_guardian_review(cancellation: Cancellation) 
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            if reconsideration {
+                config
+                    .features
+                    .enable(Feature::GuardianDenialReconsideration)
+                    .expect("enable Guardian denial reconsideration");
+            }
+            config.workspace_roots_explicit = false;
+            let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            );
             config
-                .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-                .expect("set sandbox policy");
+                .permissions
+                .can_set_permission_profile(&permission_profile)
+                .expect("set permission profile");
+            config
+                .permissions
+                .set_workspace_roots(vec![config.cwd.clone()]);
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            config.workspace_roots = config.permissions.workspace_roots().to_vec();
             if !matches!(cancellation, Cancellation::DirectTool) {
                 let _ = config.features.enable(Feature::CodeMode);
                 let _ = config.features.enable(Feature::CodeModeInterrupt);
@@ -89,15 +114,18 @@ async fn cancelling_tool_aborts_its_guardian_review(cancellation: Cancellation) 
             &format!("yield_control(); await tools.exec_command({tool_args});"),
         ),
     };
-    responses::mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("parent-start"),
-            tool_call,
-            ev_completed("parent-start"),
-        ]),
-    )
-    .await;
+    let mut initial_responses = vec![sse(vec![
+        ev_response_created("parent-start"),
+        tool_call,
+        ev_completed("parent-start"),
+    ])];
+    if reconsideration {
+        initial_responses.push(sse(vec![
+            ev_assistant_message("provisional-denial", r#"{"outcome":"deny"}"#),
+            ev_completed("initial-review"),
+        ]));
+    }
+    responses::mount_sse_sequence(&server, initial_responses).await;
     let yielded_parent = if matches!(cancellation, Cancellation::CodeModeCell) {
         Some(
             responses::mount_response_once_match(
@@ -159,7 +187,7 @@ async fn cancelling_tool_aborts_its_guardian_review(cancellation: Cancellation) 
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
-                environments: Some(local_selections(test.config.cwd.clone())),
+                environments: Some(local_requests(test.config.cwd.clone())),
                 ..Default::default()
             }),
         )

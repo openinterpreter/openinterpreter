@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::session::Submission;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_async_utils::OrCancelExt;
@@ -9,8 +10,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
 use std::time::Duration;
@@ -27,7 +28,10 @@ use crate::session::SessionIo;
 use crate::session::SessionSpawnArgs;
 use crate::session::emit_subagent_session_started;
 use crate::session::session::Session;
+use crate::session::startup::SessionStartup;
+use crate::session::startup::SessionStartupGuard;
 use crate::session::turn_context::TurnContext;
+use codex_history::HistoryInitialization;
 use codex_history::InitialHistory;
 use codex_login::AuthManager;
 use codex_models_manager::manager::SharedModelsManager;
@@ -65,6 +69,10 @@ pub(crate) async fn run_codex_thread_interactive(
             "Codex delegates require approval policy `never`".to_string(),
         ));
     }
+    // Do not let admission or a ready startup error win over prior cancellation.
+    if cancel_token.is_cancelled() {
+        return Err(CodexErr::TurnAborted);
+    }
     config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
     config.model_provider.supports_websockets &= parent_session
         .services
@@ -72,6 +80,7 @@ pub(crate) async fn run_codex_thread_interactive(
         .responses_websocket_enabled();
 
     let conversation_history = initial_history.unwrap_or(InitialHistory::New);
+    let history_initialization = HistoryInitialization::from_history(&conversation_history);
     let forked_from_thread_id = conversation_history.forked_from_id();
     let instructions = parent_session.inherited_instructions().await;
     let session_source = SessionSource::SubAgent(subagent_source.clone());
@@ -83,13 +92,24 @@ pub(crate) async fn run_codex_thread_interactive(
     };
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     thread_extension_init.insert(isolation);
-    let (session, io) = Session::spawn(SessionSpawnArgs {
-        startup: None,
+    let runtime = parent_session.services.local_agent_runtime.clone();
+    let startup = Arc::new(SessionStartup::default());
+    startup.hold_membership(runtime.admit_session(Some(parent_session.thread_id))?);
+    let startup_guard = SessionStartupGuard::new(Arc::clone(&startup));
+    let spawn_result = Session::spawn(SessionSpawnArgs {
+        attached_thread: false,
+        startup: Some(Arc::clone(&startup)),
         config,
+        request_country: parent_ctx.request_country().clone(),
+        prompt_cache_key: parent_session
+            .services
+            .model_client
+            .prompt_cache_key_policy(),
         allow_provider_model_fallback: false,
         instructions,
         installation_id: parent_session.installation_id.clone(),
         auth_manager,
+        runtime_auth: parent_session.services.runtime_auth.clone(),
         models_manager,
         git_root_discovery: Arc::clone(&parent_session.services.git_root_discovery),
         environment_manager: parent_session
@@ -102,6 +122,8 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
+        resume_preparation: None,
+        history_initialization,
         disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
@@ -114,7 +136,10 @@ pub(crate) async fn run_codex_thread_interactive(
             ThreadSource::Subagent
         }),
         originator: parent_ctx.originator.clone(),
-        agent_control: parent_session.services.agent_control.clone(),
+        agent_control: crate::agent::control::AgentControlInit::Provided {
+            control: Arc::clone(&parent_session.services.agent_control),
+            runtime,
+        },
         dynamic_tools: Vec::new(),
         metrics_service_name: None,
         user_shell_override: None,
@@ -122,8 +147,13 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         parent_trace: None,
-        environment_selections: parent_environments.to_selections(),
+        environment_requests: parent_environments
+            .to_selections()
+            .into_iter()
+            .map(TurnEnvironmentSelection::into_request)
+            .collect(),
         thread_extension_init,
+        turn_extension_init: Default::default(),
         client_mcp_extensions: parent_session.services.client_mcp_extensions.clone(),
         reserved_thread_id: None,
         analytics_events_client: Some(parent_session.services.analytics_events_client.clone()),
@@ -136,7 +166,20 @@ pub(crate) async fn run_codex_thread_interactive(
         windows_sandbox_proxy_settings_mode,
     })
     .or_cancel(&cancel_token)
-    .await??;
+    .await;
+    let (session, io) = match spawn_result {
+        Ok(Ok(spawned)) => spawned,
+        Ok(Err(error)) => {
+            startup_guard.cleanup().await;
+            return Err(error);
+        }
+        Err(error) => {
+            startup_guard.cleanup().await;
+            return Err(error.into());
+        }
+    };
+    startup.release_membership();
+    startup_guard.disarm();
     let thread_config = session.thread_config_snapshot().await;
     let client_metadata = parent_session.app_server_client_metadata().await;
     emit_subagent_session_started(
@@ -147,6 +190,7 @@ pub(crate) async fn run_codex_thread_interactive(
         Some(parent_session.thread_id),
         thread_config,
         subagent_source,
+        /*resumed_created_at*/ None,
     );
     Ok((session, forward_session_io(Arc::new(io), cancel_token)))
 }
@@ -254,13 +298,16 @@ pub(crate) async fn run_codex_thread_one_shot(
             let _ = tx_bridge.send(event).await;
             if should_shutdown {
                 let _ = ops_tx
-                    .send(Submission {
+                    .send(Box::new(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
+                        turn_extension_init: None,
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,
-                    })
+                        residency_guard: None,
+                        message_delivery: None,
+                    }))
                     .await;
                 child_cancel.cancel();
                 break;
@@ -361,7 +408,7 @@ async fn forward_event_or_shutdown(
 /// Forward ops from a caller to a sub-agent, respecting cancellation.
 async fn forward_ops(
     io: Arc<SessionIo>,
-    rx_ops: Receiver<Submission>,
+    rx_ops: Receiver<Box<Submission>>,
     cancel_token_ops: CancellationToken,
 ) {
     loop {

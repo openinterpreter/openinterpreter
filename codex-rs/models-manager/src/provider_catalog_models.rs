@@ -9,6 +9,7 @@ use codex_protocol::openai_models::ReasoningControl;
 use codex_protocol::openai_models::ReasoningEffort;
 
 use crate::ModelsManagerConfig;
+use crate::catalog::ModelOrigin;
 use crate::manager::construct_model_info_from_candidates;
 
 pub fn bundled_provider_model_infos(provider: &ModelProviderInfo) -> Vec<ModelInfo> {
@@ -47,18 +48,24 @@ pub fn provider_model_info(
     remote_candidates: &[ModelInfo],
 ) -> ModelInfo {
     if !remote_candidates.is_empty() {
-        let model_info = construct_model_info_from_candidates(model, remote_candidates, config);
-        if !model_info.used_fallback_model_metadata {
-            return model_info;
+        let model_info = construct_model_info_from_candidates(
+            model,
+            remote_candidates,
+            ModelOrigin::Provider,
+            config,
+        );
+        if model_info.origin != ModelOrigin::Synthetic {
+            return (*model_info.model).clone();
         }
     }
 
-    let catalog_candidates = if let Some(model_catalog) = config.model_catalog.as_ref() {
-        model_catalog.models.clone()
+    let (catalog_candidates, origin) = if let Some(model_catalog) = config.model_catalog.as_ref() {
+        (model_catalog.models.clone(), ModelOrigin::ExplicitConfig)
     } else {
-        bundled_provider_model_infos(provider)
+        (bundled_provider_model_infos(provider), ModelOrigin::Bundled)
     };
-    construct_model_info_from_candidates(model, &catalog_candidates, config)
+    (*construct_model_info_from_candidates(model, &catalog_candidates, origin, config).model)
+        .clone()
 }
 
 fn model_info_from_bundled_provider_model(model: &BundledProviderModelEntry) -> ModelInfo {
@@ -79,7 +86,6 @@ fn model_info_from_bundled_provider_model(model: &BundledProviderModelEntry) -> 
     if !model.input_modalities.is_empty() {
         fallback.input_modalities = model.input_modalities.clone();
     }
-    fallback.used_fallback_model_metadata = false;
     fallback
 }
 
@@ -387,10 +393,27 @@ mod tests {
         );
 
         assert_eq!(model_info.slug, "claude-sonnet-4-6");
-        assert!(!model_info.used_fallback_model_metadata);
         assert_eq!(
             model_info.default_reasoning_level,
             Some(ReasoningEffort::Medium)
         );
+    }
+
+    #[test]
+    fn provider_model_info_prefers_matching_remote_metadata() {
+        let mut remote = crate::model_info::model_info_from_slug("claude-sonnet-4-6");
+        remote.display_name = "Provider's model".to_string();
+        let model_info = provider_model_info(
+            &provider(
+                "Anthropic",
+                "https://api.anthropic.com",
+                "ANTHROPIC_API_KEY",
+                WireApi::Messages,
+            ),
+            "claude-sonnet-4-6",
+            &ModelsManagerConfig::default(),
+            &[remote],
+        );
+        assert_eq!(model_info.display_name, "Provider's model");
     }
 }

@@ -5,17 +5,26 @@ use std::collections::HashMap;
 
 pub const CODEX_SESSION_ID_ENV_VAR: &str = "CODEX_SESSION_ID";
 pub const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
+pub const CODEX_TOOL_CALL_ID_ENV_VAR: &str = "CODEX_TOOL_CALL_ID";
 pub const CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR: &str = "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN";
 pub const OPENAI_FEDERATION_RULE_ID_ENV_VAR: &str = "OPENAI_FEDERATION_RULE_ID";
 pub const OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR: &str = "OPENAI_IDENTITY_TOKEN_FILE";
+pub const OPENAI_IDENTITY_TOKEN_SOURCE_ENV_VAR: &str = "OPENAI_IDENTITY_TOKEN_SOURCE";
+pub const OPENAI_SPIFFE_AUDIENCE_ENV_VAR: &str = "OPENAI_SPIFFE_AUDIENCE";
+pub const OPENAI_SPIFFE_ID_ENV_VAR: &str = "OPENAI_SPIFFE_ID";
+pub const SPIFFE_ENDPOINT_SOCKET_ENV_VAR: &str = "SPIFFE_ENDPOINT_SOCKET";
 pub const OPENAI_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR: &str = "OPENAI_WORKLOAD_IDENTITY_CONTEXT";
 
 /// Environment variables that model-reachable child processes must not inherit.
 pub const NON_INHERITABLE_ENV_VARS: &[&str] = &[
     CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR,
     "NODE_REPL_AUTH_TOKEN",
+    "CODEX_GUARDIAN_DECISIONS_API_KEY",
     OPENAI_FEDERATION_RULE_ID_ENV_VAR,
     OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
+    OPENAI_IDENTITY_TOKEN_SOURCE_ENV_VAR,
+    OPENAI_SPIFFE_AUDIENCE_ENV_VAR,
+    OPENAI_SPIFFE_ID_ENV_VAR,
     OPENAI_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR,
 ];
 
@@ -23,6 +32,19 @@ pub fn is_non_inheritable_env_var(name: &str) -> bool {
     NON_INHERITABLE_ENV_VARS
         .iter()
         .any(|restricted| restricted.eq_ignore_ascii_case(name))
+}
+
+pub fn set_tool_call_id_env_var(env: &mut HashMap<String, String>, tool_call_id: Option<&str>) {
+    #[cfg(windows)]
+    env.retain(|name, _| !name.eq_ignore_ascii_case(CODEX_TOOL_CALL_ID_ENV_VAR));
+    #[cfg(not(windows))]
+    env.remove(CODEX_TOOL_CALL_ID_ENV_VAR);
+    if let Some(tool_call_id) = tool_call_id.filter(|tool_call_id| !tool_call_id.contains('\0')) {
+        env.insert(
+            CODEX_TOOL_CALL_ID_ENV_VAR.to_string(),
+            tool_call_id.to_string(),
+        );
+    }
 }
 
 /// Configures a child command to omit non-inheritable variables from the

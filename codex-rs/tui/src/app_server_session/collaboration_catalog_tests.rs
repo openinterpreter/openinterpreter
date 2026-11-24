@@ -66,13 +66,14 @@ async fn collaboration_catalog_is_optional_and_refetched_on_bootstrap() -> Resul
             Ok::<_, color_eyre::Report>(catalog_requests)
         });
         let mut session = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             crate::connect_remote_app_server(endpoint).await?,
             ThreadParamsMode::Remote,
         );
         let initial = session.bootstrap(&config).await?;
         assert_eq!(
             (initial.default_model, initial.collaboration_modes),
-            ("task-model".into(), vec![])
+            (Some("task-model".into()), vec![])
         );
         let refreshed = session.bootstrap(&config).await?;
         assert_eq!(

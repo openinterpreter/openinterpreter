@@ -1,0 +1,20 @@
+---
+source: tui/src/chatwidget/tests/quick_dials_tests.rs
+expression: "render_bottom_popup(&chat, 100)"
+---
+  Presets
+
+  1 · coding                                       5 · /skills simplify-code
+  2 · /permissions workspace-write                 7 · Plan the requested change
+  3 · Review the current changes and explain eve…  0 · /status
+
+  n · new   s · from settings   e · edit   d · delete   esc · close
+
+• Queued follow-up inputs
+  ↳ /model gpt-5.5 --reasoning=high --speed=fast
+    ⇧← edit last queued message
+
+› Review the current changes
+  for safety
+
+  GPT-5.5 default · /tmp/project

@@ -30,7 +30,6 @@ use codex_extension_api::TurnStopInput;
 use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
-use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoalStatus;
@@ -183,6 +182,16 @@ where
                 return;
             };
 
+            let accounting = runtime.accounting_state();
+            if let Some(turn_id) = accounting.interrupted_turn_id() {
+                if let Err(err) = runtime
+                    .stop_active_goal_for_turn(&turn_id, ActiveGoalStopReason::EmptyResponse)
+                    .await
+                {
+                    tracing::warn!("failed to stop goal after interrupted empty turns: {err}");
+                }
+                accounting.finish_turn(&turn_id);
+            }
             if let Err(err) = runtime.continue_if_idle().await {
                 tracing::warn!(
                     "failed to continue active goal for idle thread {}: {err}",
@@ -253,6 +262,13 @@ where
                 tracing::warn!("skipping goal turn accounting: token baseline unavailable");
                 return;
             };
+            let accounting = runtime.accounting_state();
+            // Serialize a new turn's accounting with deferred interrupted-turn evaluation.
+            // Do not await the Goal state permit while holding this permit.
+            let Ok(_turn_start_permit) = accounting.turn_start_permit().await else {
+                tracing::warn!("skipping goal turn accounting: turn-start permit unavailable");
+                return;
+            };
 
             if let Err(err) = self
                 .state_dbs
@@ -263,7 +279,6 @@ where
                 tracing::warn!("failed to clear deferred goal continuation: {err}");
             }
 
-            let accounting = runtime.accounting_state();
             accounting.start_turn(
                 input.turn_id,
                 input.collaboration_mode.mode,
@@ -400,13 +415,16 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            runtime.accounting_state().reset_empty_responses();
             if !runtime.is_enabled() {
+                runtime.accounting_state().reset_empty_responses();
                 return;
             }
 
             let turn_id = input.turn_store.level_id();
             input.thread_store.remove::<TurnStartOptions>();
+            if input.reason != codex_protocol::protocol::TurnAbortReason::Interrupted {
+                runtime.accounting_state().reset_empty_responses();
+            }
             if let Err(err) = runtime
                 .account_active_goal_progress(
                     turn_id,
@@ -421,7 +439,17 @@ where
                 );
                 return;
             }
-            runtime.accounting_state().finish_turn(turn_id);
+            let accounting = runtime.accounting_state();
+            match input.reason {
+                codex_protocol::protocol::TurnAbortReason::Interrupted => {
+                    accounting.interrupt_turn(turn_id);
+                }
+                codex_protocol::protocol::TurnAbortReason::Replaced
+                | codex_protocol::protocol::TurnAbortReason::ReviewEnded
+                | codex_protocol::protocol::TurnAbortReason::BudgetLimited => {
+                    accounting.finish_turn(turn_id);
+                }
+            }
         })
     }
 
@@ -431,13 +459,14 @@ where
                 return;
             };
 
-            let reason = match input.error {
-                CodexErrorInfo::UsageLimitExceeded => ActiveGoalStopReason::UsageLimit,
+            let reason = if input.error.is_usage_limit() {
+                ActiveGoalStopReason::UsageLimit
+            } else {
                 // The turn has ended because the error was non-retryable or its
                 // retries were exhausted. Block the goal to prevent automatic
                 // continuation from looping and consuming tokens, as can happen
                 // with compaction errors.
-                _ => ActiveGoalStopReason::TurnError,
+                ActiveGoalStopReason::TurnError
             };
             if let Err(err) = runtime
                 .stop_active_goal_for_turn(input.turn_id, reason)
@@ -590,6 +619,7 @@ where
             ),
             GoalToolExecutor::create(
                 runtime.thread_id(),
+                self.thread_manager.clone(),
                 Arc::clone(&self.state_dbs),
                 Arc::clone(&self.goal_service),
                 runtime.accounting_state(),

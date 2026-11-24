@@ -55,6 +55,22 @@ pub struct SandboxCreds {
     pub password: String,
 }
 
+/// Windows rejected the stored sandbox password; credential-file and policy errors are distinct.
+#[expect(
+    dead_code,
+    reason = "preserved typed credential mismatch for sandbox callers"
+)]
+#[derive(Debug)]
+pub struct SandboxAccountCredentialMismatch;
+
+impl std::fmt::Display for SandboxAccountCredentialMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Windows rejected the stored sandbox account password")
+    }
+}
+
+impl std::error::Error for SandboxAccountCredentialMismatch {}
+
 /// Returns true when the on-disk setup artifacts exist and match the current
 /// setup version.
 ///
@@ -194,7 +210,7 @@ pub fn logon_existing_sandbox_account(
         "sandbox account record does not match the managed account"
     );
     let password = crate::to_wide(decode_password(&record)?);
-    let mut token = 0;
+    let mut token = std::ptr::null_mut();
     if unsafe {
         LogonUserW(
             crate::to_wide(account.username()).as_ptr(),

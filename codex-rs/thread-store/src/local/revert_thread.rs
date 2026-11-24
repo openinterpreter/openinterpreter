@@ -37,14 +37,14 @@ pub(super) async fn revert(
     let writer_lock = store.acquire_writer_lock(thread_id)?;
 
     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
-    let expected_sqlite_path = state_db
+    let stored_metadata = state_db
         .get_thread(thread_id)
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to read thread metadata for {thread_id}: {err}"),
         })?
-        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
-        .rollout_path;
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    let expected_sqlite_path = stored_metadata.rollout_path;
     let current_rollout = thread_rollout_resolver::resolve_current(store, thread_id)
         .await?
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
@@ -69,14 +69,31 @@ pub(super) async fn revert(
         });
     }
 
+    // Older binaries can omit creator fields when replacing a rollout during revert.
+    source_meta.creator_user_id = source_meta
+        .creator_user_id
+        .or(stored_metadata.creator_user_id);
+    source_meta.creator_account_id = source_meta
+        .creator_account_id
+        .or(stored_metadata.creator_account_id);
+
     // Preserve old-reader compatibility when introducing the first reference to a standalone
     // source. Already-shared ancestors stay read-only; their offsets address decoded JSONL bytes.
-    let mut lineage = store.resolve_rollout_lineage(thread_id).await?;
-    for segment in &mut lineage.segments {
-        if segment.rollout_id() == current_rollout.rollout_id && source_meta.history_base.is_none()
-        {
-            segment.rollout_path =
-                codex_rollout::materialize_rollout_for_reference(segment.rollout_path.as_path())
+    let lineage = store
+        .resolve_rollout_lineage(thread_id, /*initial_path*/ None)
+        .await?;
+    let boundary = &ForkBoundary::BeforeTurn(before_turn_id);
+    let standalone_rollout_id = source_meta
+        .history_base
+        .is_none()
+        .then_some(current_rollout.rollout_id);
+    let history_base = lineage
+        .read_with_fallback(store, |mut lineage| async move {
+            for segment in &mut lineage.segments {
+                if Some(segment.rollout_id()) == standalone_rollout_id {
+                    segment.rollout_path = codex_rollout::materialize_rollout_for_reference(
+                        segment.rollout_path.as_path(),
+                    )
                     .await
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!(
@@ -84,21 +101,18 @@ pub(super) async fn revert(
                             segment.rollout_path.display()
                         ),
                     })?;
-        }
-        super::thread_history_materialization::materialize_to_sqlite(
-            store,
-            segment.rollout_id(),
-            segment.rollout_path.as_path(),
-        )
+                }
+                super::thread_history_materialization::materialize_to_sqlite_with_reads(
+                    store,
+                    segment.rollout_id(),
+                    segment.rollout_path.as_path(),
+                    &lineage.reads,
+                )
+                .await?;
+            }
+            paginated_fork::history_base_at_boundary(store, thread_id, boundary, &lineage).await
+        })
         .await?;
-    }
-    let history_base = paginated_fork::history_base_at_boundary(
-        store,
-        thread_id,
-        ForkBoundary::BeforeTurn(before_turn_id),
-        &lineage,
-    )
-    .await?;
 
     let forked_from_ordinal_exclusive =
         codex_rollout::forked_from_ordinal_exclusive(&source_meta, Some(source_path.as_path()))
@@ -169,7 +183,13 @@ async fn create_replacement_recorder(
         source_meta.base_instructions.unwrap_or_default(),
         source_meta.dynamic_tools.unwrap_or_default(),
     )
+    .with_creator(
+        source_meta.creator_user_id,
+        source_meta.creator_account_id,
+        source_meta.account_scoped,
+    )
     .with_session_id(source_meta.session_id)
+    .with_attached_thread(source_meta.attached_thread)
     .with_rollout_id(rollout_id)
     .with_selected_capability_roots(source_meta.selected_capability_roots)
     .with_runtime_workspace_roots(source_meta.runtime_workspace_roots)

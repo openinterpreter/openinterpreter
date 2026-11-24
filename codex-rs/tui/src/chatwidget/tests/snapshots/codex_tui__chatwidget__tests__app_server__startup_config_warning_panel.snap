@@ -1,0 +1,31 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: "warnings.join(\"\\n\\n\")"
+---
+local daemon: false
+  Warnings · 1 of 2 · Startup
+
+  Codex is ignoring 1 unrecognized configuration setting. Check for typos or
+  deprecated settings.
+
+
+
+
+
+
+
+  k keep & next · esc dismiss & close · ⌃o copy · ←/→ warning
+
+local daemon: true
+  Warnings · 1 of 2 · Startup
+
+  Codex is ignoring 1 unrecognized configuration setting. Check for typos or
+  deprecated settings.
+
+  These warnings may reflect settings from when the background server started.
+  If you’ve already fixed them, use /daemon to restart it.
+
+
+
+
+  k keep & next · esc dismiss & close · ⌃o copy · ←/→ warning

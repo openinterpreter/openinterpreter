@@ -1,26 +1,18 @@
 use super::*;
-use crate::agent::child_config::SpawnConfigOptions;
-use crate::agent::child_config::SpawnConfigVersion;
-use crate::agent::child_config::prepare_agent_spawn_config;
-use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
-use crate::agent::types::MessageDeliveryMode;
 use crate::agent::types::SpawnAgentForkMode;
-use crate::agent::types::SpawnAgentOptions;
-use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
-use crate::session::multi_agents::resolve_usage_hints;
+use crate::thread_spawn::ThreadSpawnError;
+use crate::thread_spawn::ThreadSpawnRequest;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use crate::turn_timing::now_unix_timestamp_ms;
-use codex_prompts::ResolvedModelMessages;
-use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
+use std::num::NonZeroUsize;
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -73,10 +65,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     Default::default(),
                 ),
             };
-            let agent_snapshot = result
-                .as_ref()
-                .ok()
-                .and_then(|(_, _, _, snapshot)| snapshot.as_ref());
+            let agent_snapshot = result.as_ref().ok().map(|(_, _, _, snapshot)| snapshot);
 
             analytics.track_collab_tool_call(
                 turn_id,
@@ -109,7 +98,7 @@ async fn handle_spawn_agent(
         SpawnAgentResult,
         ThreadId,
         AgentStatus,
-        Option<ThreadConfigSnapshot>,
+        ThreadConfigSnapshot,
     ),
     FunctionCallError,
 > {
@@ -132,108 +121,50 @@ async fn handle_spawn_agent(
         .map(str::trim)
         .filter(|role| !role.is_empty());
 
-    let session_source = turn.session_source.clone();
-    let child_depth = next_thread_spawn_depth(&session_source);
-    let prepared = prepare_agent_spawn_config(
+    let spawned = crate::thread_spawn::spawn(
         &session,
-        step_context.as_ref(),
-        SpawnConfigOptions {
-            version: SpawnConfigVersion::V2,
-            full_history_fork: matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)),
-            role_name,
-            model: args.model.as_deref(),
-            reasoning_effort: args.reasoning_effort.clone(),
+        &step_context,
+        &call_id,
+        ThreadSpawnRequest {
+            task_name: args.task_name,
+            message: agent_message_from_tool(message, &source),
+            fork_mode: fork_mode.clone(),
+            agent_type: args.agent_type.clone(),
+            model: args.model,
+            reasoning_effort: args.reasoning_effort,
         },
     )
     .await
-    .map_err(FunctionCallError::RespondToModel)?;
-    let config = prepared.config;
-    let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    let spawn_source = thread_spawn_source(
-        session.thread_id,
-        &turn.session_source,
-        child_depth,
-        prepared.role_name.as_deref(),
-        Some(args.task_name.clone()),
-    )?;
-    let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
-        FunctionCallError::RespondToModel(
-            "spawned agent is missing a canonical task name".to_string(),
-        )
+    .map_err(|err| match err {
+        ThreadSpawnError::Preparation(message) => FunctionCallError::RespondToModel(message),
+        ThreadSpawnError::Backend(err) => {
+            record_collab_spawn_failure(
+                &turn.session_telemetry,
+                turn.config.apps_mcp_product_sku.as_deref(),
+                &err,
+                &call_id,
+                &turn.sub_id,
+                fork_mode.as_ref(),
+                MultiAgentVersion::V2,
+            );
+            collab_spawn_error(err)
+        }
     })?;
-    let author = turn
-        .session_source
-        .get_agent_path()
-        .unwrap_or_else(AgentPath::root);
-    let communication = agent_message_from_tool(message, &source).into_communication(
-        author,
-        new_agent_path.clone(),
-        MessageDeliveryMode::TriggerTurn,
-    );
-    let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
-    let multi_agent_v2_usage_hints =
-        if is_full_history_fork && turn.multi_agent_version == MultiAgentVersion::V2 {
-            let child_model_info = match config.model.as_deref() {
-                Some(model) if model != turn.model_info().slug => Some(
-                    session
-                        .services
-                        .models_manager
-                        .get_model_info(model, &config.to_models_manager_config())
-                        .await,
-                ),
-                _ => None,
-            };
-            let child_multi_agent_messages = ResolvedModelMessages::from_model(
-                child_model_info.as_ref().unwrap_or(turn.model_info()),
-            )
-            .multi_agent();
-            Some(resolve_usage_hints(
-                &config.multi_agent_v2,
-                child_multi_agent_messages,
-                !config.update_plan_enabled && config.model_catalog.is_none(),
-            ))
-        } else {
-            None
-        };
-    let spawned_agent = Box::pin(
-        session
-            .services
-            .agent_control
-            .spawn_agent_with_communication(
-                config,
-                communication,
-                context,
-                Some(spawn_source),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                    fork_mode,
-                    parent_thread_id: Some(session.thread_id),
-                    parent_turn_id: Some(turn.sub_id.clone()),
-                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-                    environments: Some(step_context.environments.to_selections()),
-                    multi_agent_v2_usage_hints,
-                    cyber_access_program: turn.cyber_access_program,
-                },
-            ),
-    )
-    .await
-    .map_err(collab_spawn_error)?;
+    let spawned_agent = spawned.agent;
+    let agent_snapshot = spawned.config;
+    let new_agent_path = spawned.task_name;
     let new_thread_id = spawned_agent.thread_id;
     let agent_status = spawned_agent.status;
-    let agent_snapshot = session
-        .services
-        .agent_control
-        .get_agent_config_snapshot(new_thread_id)
-        .await;
     let nickname = agent_snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.session_source.get_nickname())
+        .session_source
+        .get_nickname()
         .or(spawned_agent.metadata.agent_nickname);
     emit_sub_agent_activity(
         &session,
         turn,
         SubAgentActivityItem {
+            model: Some(agent_snapshot.model.clone()),
+            reasoning_effort: agent_snapshot.reasoning_effort.clone(),
             id: call_id,
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
@@ -297,22 +228,14 @@ impl SpawnAgentArgs {
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);
         }
-        if fork_turns.eq_ignore_ascii_case("all") {
+        // Accept legacy turn counts without limiting the inherited history.
+        if fork_turns.eq_ignore_ascii_case("all") || fork_turns.parse::<NonZeroUsize>().is_ok() {
             return Ok(Some(SpawnAgentForkMode::FullHistory));
         }
 
-        let last_n_turns = fork_turns.parse::<usize>().map_err(|_| {
-            FunctionCallError::RespondToModel(
-                "fork_turns must be `none`, `all`, or a positive integer string".to_string(),
-            )
-        })?;
-        if last_n_turns == 0 {
-            return Err(FunctionCallError::RespondToModel(
-                "fork_turns must be `none`, `all`, or a positive integer string".to_string(),
-            ));
-        }
-
-        Ok(Some(SpawnAgentForkMode::LastNTurns(last_n_turns)))
+        Err(FunctionCallError::RespondToModel(
+            "fork_turns must be `none` or `all`".to_string(),
+        ))
     }
 }
 

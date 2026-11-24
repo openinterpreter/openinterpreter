@@ -15,6 +15,16 @@ use std::path::Path;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+/// Read metadata without following the final symlink, returning `None` for a missing path.
+/// Other I/O errors are returned to the caller.
+pub fn symlink_metadata_if_exists(path: &Path) -> io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let canonical = path.as_ref().canonicalize()?;
     Ok(normalize_for_wsl(canonical))
@@ -151,7 +161,13 @@ pub fn write_atomically(write_path: &Path, contents: &str) -> io::Result<()> {
     std::fs::create_dir_all(parent)?;
     let mut tmp = NamedTempFile::new_in(parent)?;
     tmp.write_all(contents.as_bytes())?;
-    tmp.persist(write_path)?;
+    // Match credential-file replacement: std::fs::rename supports overlapping
+    // readers on Windows, while tempfile::persist's MoveFileExW does not.
+    // Clear the temporary attribute and retain cleanup if publication fails.
+    let (_file, path) = tmp.keep().map_err(|error| error.error)?;
+    let mut path = tempfile::TempPath::try_from_path(path)?;
+    std::fs::rename(&path, write_path)?;
+    path.disable_cleanup(/*disable_cleanup*/ true);
     Ok(())
 }
 

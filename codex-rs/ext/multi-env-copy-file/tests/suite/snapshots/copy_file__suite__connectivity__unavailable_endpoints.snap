@@ -1,0 +1,8 @@
+---
+source: ext/multi-env-copy-file/tests/suite/connectivity.rs
+expression: "json!({\n    \"source\":\n    mock.function_call_output_text(\"source-offline\").context(\"source error\")?,\n    \"target\":\n    mock.function_call_output_text(\"target-offline\").context(\"target error\")?,\n})"
+---
+{
+  "source": "unknown or unavailable environment ID: unavailable",
+  "target": "unknown or unavailable environment ID: unavailable"
+}

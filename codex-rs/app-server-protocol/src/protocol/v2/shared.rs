@@ -19,7 +19,6 @@ use schemars::schema::Schema;
 use schemars::schema::SchemaObject;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(test)]
 use serde_json::Value as JsonValue;
 
 // Macro to declare a camelCased API v2 enum mirroring a core enum which
@@ -78,10 +77,20 @@ pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    ApiKeySpendLimitExceeded,
+    ProjectSpendLimitExceeded,
+    OrganizationSpendLimitExceeded,
     RateLimitExceeded,
+    FlexUnavailable,
     ServerOverloaded,
+    ModelNotFound,
+    // Capacity is unavailable on a route restricted by server policy.
+    PolicyCapacityUnavailable,
+    /// The workspace's inference hook explicitly denied this request.
+    InferenceHookDenied,
     CyberPolicy,
     MisalignmentPolicyViolation,
+    TooManyDenials,
     HttpConnectionFailed {
         #[serde(rename = "httpStatusCode")]
         #[ts(rename = "httpStatusCode")]
@@ -117,7 +126,32 @@ pub enum CodexErrorInfo {
         #[ts(rename = "turnKind")]
         turn_kind: NonSteerableTurnKind,
     },
+    #[serde(
+        untagged,
+        serialize_with = "serialize_other_codex_error_info",
+        deserialize_with = "deserialize_other_codex_error_info"
+    )]
+    #[ts(type = "\"other\" | string | { [key: string]: unknown }")]
     Other,
+}
+
+fn serialize_other_codex_error_info<S>(serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str("other")
+}
+
+fn deserialize_other_codex_error_info<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match JsonValue::deserialize(deserializer)? {
+        JsonValue::String(_) | JsonValue::Object(_) => Ok(()),
+        _ => Err(serde::de::Error::custom(
+            "expected an error string or object",
+        )),
+    }
 }
 
 impl From<CoreCodexErrorInfo> for CodexErrorInfo {
@@ -125,14 +159,29 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
         match value {
             CoreCodexErrorInfo::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
             CoreCodexErrorInfo::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+            CoreCodexErrorInfo::ApiKeySpendLimitExceeded => {
+                CodexErrorInfo::ApiKeySpendLimitExceeded
+            }
+            CoreCodexErrorInfo::ProjectSpendLimitExceeded => {
+                CodexErrorInfo::ProjectSpendLimitExceeded
+            }
+            CoreCodexErrorInfo::OrganizationSpendLimitExceeded => {
+                CodexErrorInfo::OrganizationSpendLimitExceeded
+            }
             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
             CoreCodexErrorInfo::RateLimitExceeded => CodexErrorInfo::RateLimitExceeded,
+            CoreCodexErrorInfo::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
             CoreCodexErrorInfo::ServerOverloaded => CodexErrorInfo::ServerOverloaded,
+            CoreCodexErrorInfo::ModelNotFound => CodexErrorInfo::ModelNotFound,
+            CoreCodexErrorInfo::PolicyCapacityUnavailable => {
+                CodexErrorInfo::PolicyCapacityUnavailable
+            }
             CoreCodexErrorInfo::CyberPolicy => CodexErrorInfo::CyberPolicy,
             CoreCodexErrorInfo::BioPolicy => CodexErrorInfo::Other,
             CoreCodexErrorInfo::MisalignmentPolicyViolation => {
                 CodexErrorInfo::MisalignmentPolicyViolation
             }
+            CoreCodexErrorInfo::TooManyDenials => CodexErrorInfo::TooManyDenials,
             CoreCodexErrorInfo::HttpConnectionFailed { http_status_code } => {
                 CodexErrorInfo::HttpConnectionFailed { http_status_code }
             }
@@ -142,6 +191,8 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
             CoreCodexErrorInfo::InternalServerError => CodexErrorInfo::InternalServerError,
             CoreCodexErrorInfo::Unauthorized => CodexErrorInfo::Unauthorized,
             CoreCodexErrorInfo::BadRequest => CodexErrorInfo::BadRequest,
+            CoreCodexErrorInfo::InvalidPrompt => CodexErrorInfo::Other,
+            CoreCodexErrorInfo::InferenceHookDenied => CodexErrorInfo::InferenceHookDenied,
             CoreCodexErrorInfo::ThreadRollbackFailed => CodexErrorInfo::ThreadRollbackFailed,
             CoreCodexErrorInfo::SandboxError => CodexErrorInfo::SandboxError,
             CoreCodexErrorInfo::ResponseStreamDisconnected { http_status_code } => {

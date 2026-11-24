@@ -9,6 +9,8 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 #[cfg(windows)]
 use codex_protocol::models::PermissionProfile;
 #[cfg(windows)]
+use codex_protocol::sandbox::SandboxOverride;
+#[cfg(windows)]
 use codex_sandboxing::SandboxExecRequest;
 #[cfg(windows)]
 use codex_sandboxing::SandboxType;
@@ -65,7 +67,7 @@ async fn noisy_failing_helper_preserves_exit_status_and_bounded_stderr() {
     let mut command = {
         let mut command = Command::new("sh");
         command.arg("-c").arg(
-            "printf 'expected helper diagnostic' >&2; i=0; while [ \"$i\" -lt 1024 ]; do printf '%0128d' 0 >&2; i=$((i + 1)); done; exit 7",
+            "printf 'expected helper diagnostic' >&2; i=0; while [ \"$i\" -lt 1024 ]; do printf '%0128d' 0 >&2; i=$((i + 1)); done; printf 'response before failure\\n'; exit 7",
         );
         command
     };
@@ -81,17 +83,19 @@ async fn noisy_failing_helper_preserves_exit_status_and_bounded_stderr() {
         command
             .arg("-NoProfile")
             .arg("-Command")
-            .arg("[Console]::Error.Write('expected helper diagnostic' + ('x' * 131072)); exit 7");
+            .arg("[Console]::Error.Write('expected helper diagnostic' + ('x' * 131072)); [Console]::Out.WriteLine('response before failure'); exit 7");
         command
     };
     command.envs(std::env::vars_os());
     let mut child = command.spawn().expect("noisy helper process");
+    let stdout = child.stdout.take().expect("helper stdout");
     let stderr = drain_helper_stderr(&mut child);
 
-    let error = tokio::time::timeout(
-        Duration::from_secs(/*secs*/ 8),
-        reap_helper_after_response(child, stderr),
-    )
+    let error = tokio::time::timeout(Duration::from_secs(/*secs*/ 8), async {
+        // Cleanup starts after the response, not during slow helper startup.
+        read_helper_response(stdout).await?;
+        reap_helper_after_response(child, stderr).await
+    })
     .await
     .expect("helper stderr must be drained during bounded cleanup")
     .expect_err("nonzero helper exit should fail after its stderr pipe fills");
@@ -208,6 +212,7 @@ $handle = $file.SafeFileHandle.DangerousGetHandle().ToInt64()
         crate::sandboxed_file_open::open(
             command,
             PathUri::from_host_native_path(&path).expect("image path URI"),
+            crate::protocol::FsOpenMode::Read,
         ),
     )
     .await
@@ -230,6 +235,7 @@ fn powershell_command(script: &str, path: &Path) -> anyhow::Result<SandboxExecRe
     let cwd = PathUri::from_host_native_path(std::env::current_dir()?)?;
 
     Ok(SandboxExecRequest {
+        sandbox_override: SandboxOverride::NoOverride,
         command: vec![
             powershell.to_string_lossy().into_owned(),
             "-NoProfile".to_string(),

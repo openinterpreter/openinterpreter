@@ -10,6 +10,7 @@ use app_test_support::ChatGptAuthFixture;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
+use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -18,8 +19,10 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ResponseUsageMetadata;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -28,15 +31,22 @@ use codex_app_server_protocol::TokenUsageBreakdown;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
+use serde_json::json;
+use std::collections::BTreeMap;
 use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::timeout;
+use wiremock::ResponseTemplate;
+
+use super::analytics::mount_analytics_capture;
+use super::analytics::wait_for_matching_analytics_event;
 
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
 // subprocesses or processing test RPCs under load.
@@ -117,10 +127,10 @@ async fn auto_compaction_emits_started_and_completed_items(route: CompactionRout
     let started = wait_for_context_compaction_started(&mut mcp).await?;
     let completed = wait_for_context_compaction_completed(&mut mcp).await?;
 
-    let ThreadItem::ContextCompaction { id: started_id } = started.item else {
+    let ThreadItemPayload::ContextCompaction { id: started_id } = started.item.payload else {
         unreachable!("started item should be context compaction");
     };
-    let ThreadItem::ContextCompaction { id: completed_id } = completed.item else {
+    let ThreadItemPayload::ContextCompaction { id: completed_id } = completed.item.payload else {
         unreachable!("completed item should be context compaction");
     };
 
@@ -238,10 +248,10 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let completed = wait_for_context_compaction_completed(&mut mcp).await?;
     wait_for_turn_completed(&mut mcp, &started.turn_id).await?;
 
-    let ThreadItem::ContextCompaction { id: started_id } = started.item else {
+    let ThreadItemPayload::ContextCompaction { id: started_id } = started.item.payload else {
         unreachable!("started item should be context compaction");
     };
-    let ThreadItem::ContextCompaction { id: completed_id } = completed.item else {
+    let ThreadItemPayload::ContextCompaction { id: completed_id } = completed.item.payload else {
         unreachable!("completed item should be context compaction");
     };
 
@@ -413,7 +423,7 @@ async fn wait_for_context_compaction_started(
     loop {
         let started: ItemStartedNotification =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
-        if let ThreadItem::ContextCompaction { .. } = started.item {
+        if let ThreadItemPayload::ContextCompaction { .. } = started.item.payload {
             return Ok(started);
         }
     }
@@ -428,7 +438,7 @@ async fn wait_for_context_compaction_completed(
             mcp.read_notification("item/completed"),
         )
         .await??;
-        if let ThreadItem::ContextCompaction { .. } = completed.item {
+        if let ThreadItemPayload::ContextCompaction { .. } = completed.item.payload {
             return Ok(completed);
         }
     }

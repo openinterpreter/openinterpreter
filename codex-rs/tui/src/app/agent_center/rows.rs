@@ -72,11 +72,16 @@ impl AgentsOverviewView {
             .unwrap_or_default();
         let padding = u16::from(area.height >= 3);
         let viewport = row(area, padding, area.height - padding * 2);
+        let sort = if state.searching {
+            state.search_sort
+        } else {
+            HistorySort::Updated
+        };
         if padding > 0 {
             let (title, status, updated) = columns(row(area, /*offset*/ 0, /*height*/ 1));
             line("Tasks".dim(), title, buf);
             line("Status".dim(), status, buf);
-            Line::from("Updated".dim())
+            Line::from(sort.label().dim())
                 .right_aligned()
                 .render(updated, buf);
         }
@@ -113,6 +118,10 @@ impl AgentsOverviewView {
                             /*max_width*/ None,
                         )
                     }
+                    AgentsOverviewGrouping::Directory => format_directory_display(
+                        &self.directory_group_keys[index],
+                        /*max_width*/ None,
+                    ),
                     AgentsOverviewGrouping::Status => task.group.label().to_owned(),
                     AgentsOverviewGrouping::Model => model_name(&task.thread).to_owned(),
                 };
@@ -194,7 +203,10 @@ impl AgentsOverviewView {
             if !updated.is_empty() {
                 let age = format_relative_time(
                     reference,
-                    chrono::DateTime::from_timestamp(task.thread.updated_at, /*nsecs*/ 0),
+                    chrono::DateTime::from_timestamp(
+                        sort.timestamp(&task.thread),
+                        /*nsecs*/ 0,
+                    ),
                 );
                 Line::from(age)
                     .style(if index == self.selected {

@@ -188,6 +188,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     use crate::config::PermissionProfileSnapshot;
     use crate::environment_selection::ThreadEnvironments;
     use crate::environment_selection::TurnEnvironmentSnapshot;
+    use crate::session::ThreadEnvironmentDefaults;
     use crate::tools::sandboxing::SandboxAttempt;
     use codex_exec_server::EnvironmentManager;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -297,6 +298,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
         /*prefer_executor_snapshots*/ false,
     );
     let mut config = EnvironmentConfig {
+        environment_hooks: Default::default(),
         allow_login_shell: false,
         workspace_roots: Vec::new(),
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
@@ -313,20 +315,18 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     let environments = ThreadEnvironments::new(
         Arc::clone(&manager),
         shell.clone(),
-        config.clone(),
+        ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
         snapshot_builder.clone(),
         TurnEnvironmentSnapshot::default(),
         /*non_blocking_snapshots*/ false,
     );
-    environments.update_selections(
-        &[TurnEnvironmentSelection {
-            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-            cwd: PathUri::from_abs_path(&dir.path().abs()),
-            workspace_roots: Vec::new(),
-            config: EnvironmentConfigState::FromThread,
-        }],
-        &config,
-    );
+    environments.update_selections(&[TurnEnvironmentSelection {
+        selected_capability_roots: Default::default(),
+        environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&dir.path().abs()),
+        workspace_roots: Vec::new(),
+        config: EnvironmentConfigState::FromThread,
+    }]);
     for (state, expect_snapshot) in [
         (SnapshotCredentialBrokerState::Starting, false),
         (SnapshotCredentialBrokerState::Inactive, true),
@@ -354,7 +354,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
                 .shell_environment_policy
                 .r#set
                 .insert("CORP_REGION".into(), "west".into());
-            environments.update_thread_config(&config);
+            environments.set_active_thread_defaults(config.clone());
             let updated = environments.snapshot().await;
             assert!(!Arc::ptr_eq(
                 &environment.shell_snapshot_cache,
@@ -366,7 +366,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
             let child = ThreadEnvironments::new(
                 Arc::clone(&manager),
                 shell.clone(),
-                config.clone(),
+                ThreadEnvironmentDefaults::new(config.clone(), SandboxType::None),
                 snapshot_builder.clone(),
                 updated.clone(),
                 /*non_blocking_snapshots*/ false,
@@ -393,7 +393,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     environments.set_snapshot_credential_broker(SnapshotCredentialBrokerState::Ready(
         started_proxy.proxy(),
     ));
-    environments.update_thread_config(&config);
+    environments.set_active_thread_defaults(config.clone());
     let turn = environments.snapshot().await;
     let environment = turn.primary().expect("brokered environment");
     let mut tool_config = crate::config::ConfigBuilder::without_managed_config_for_tests()
@@ -410,6 +410,7 @@ async fn inactive_profiles_keep_snapshots_but_active_brokers_require_sandbox() -
     let permissions = PermissionProfile::Disabled;
     let cancellation = CancellationToken::new();
     let mut attempt = SandboxAttempt {
+        sandbox_override: Default::default(),
         sandbox: SandboxType::None,
         sandbox_requested: false,
         permissions: &permissions,
@@ -653,6 +654,8 @@ async fn snapshot_discovers_and_redacts_shell_initialized_credentials() -> Resul
     std::fs::write(
         &startup,
         "unset GITHUB_ENTERPRISE_TOKEN UNSET_AUTH_HEADER\n\
+         export DENO_CERT=profile.pem\n\
+         export CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=\"$SSL_CERT_FILE\"\n\
          export GH_TOKEN='ghp_shell_only_secret'\n\
          export AUTH_HEADER=\"Bearer $GH_TOKEN\"\n\
          declare -rx GITHUB_TOKEN='ghp_readonly_secret'\n\
@@ -772,6 +775,8 @@ async fn snapshot_discovers_and_redacts_shell_initialized_credentials() -> Resul
     }
     assert!(!snapshot.contains("attacker.example"));
     assert!(!snapshot.contains("CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS"));
+    assert!(snapshot.contains(r#"DENO_CERT="profile.pem""#));
+    assert!(!snapshot.contains("CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE="));
     assert!(snapshot.contains("api.snapshot.example"));
     assert!(!snapshot.contains("attacker.vendor.example"));
     assert!(snapshot.contains("IDENTITY_SEEN=\"missing\""));
@@ -1588,6 +1593,7 @@ async fn try_create_creates_and_deletes_snapshot_file() -> Result<()> {
         &dir.path().abs(),
         ThreadId::new(),
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1619,6 +1625,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1630,6 +1637,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         session_id,
         &dir.path().abs(),
+        &ShellEnvironmentPolicy::default(),
         &shell,
         /*state_db*/ None,
         /*credential_broker*/ None,
@@ -1905,5 +1913,34 @@ fn set_file_mtime(path: &Path, age: Duration) -> Result<()> {
     if result != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_rejects_nul_script_before_execution() -> Result<()> {
+    let root = tempdir()?;
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+    };
+    let error = run_script_with_timeout(
+        &shell,
+        "printf ran > ran\0",
+        Duration::from_secs(5),
+        SnapshotShellMode::NonLogin,
+        &root.path().abs(),
+        /*credential_broker*/ None,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("invalid snapshot script must fail to spawn");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::InvalidInput)
+    );
+    assert!(!root.path().join("ran").exists());
     Ok(())
 }

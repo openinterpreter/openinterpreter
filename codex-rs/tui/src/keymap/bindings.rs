@@ -103,15 +103,63 @@ pub(crate) struct KeymapActionId {
 }
 
 impl KeymapActionId {
+    pub(crate) fn is_side_pane(self) -> bool {
+        self.context == KeymapContext::Global
+            && matches!(
+                self.action,
+                "focus_main_composer"
+                    | "focus_sidebar_content"
+                    | "focus_sidebar_tabs"
+                    | "hide_pane"
+                    | "close_sidebar_tab"
+                    | "sidebar_up"
+                    | "sidebar_down"
+                    | "focus_pane_left"
+                    | "focus_pane_right"
+                    | "minimize_pane_width"
+                    | "maximize_pane_width"
+                    | "equalize_pane_widths"
+                    | "resize_panes"
+                    | "move_divider_left"
+                    | "move_divider_right"
+                    | "toggle_pane_zoom"
+            )
+    }
+
     /// Activity focus and Find remain active while transcript groups use list navigation.
     pub(super) fn overlaps(self, other: Self) -> bool {
-        self.context.overlaps(other.context)
-            || (self.context == KeymapContext::Global
-                && matches!(self.action, "focus_activity" | "find_transcript")
-                && other.context == KeymapContext::List)
-            || (other.context == KeymapContext::Global
-                && matches!(other.action, "focus_activity" | "find_transcript")
-                && self.context == KeymapContext::List)
+        if (self.is_side_pane()
+            && matches!(other.context, KeymapContext::List | KeymapContext::Pager))
+            || (other.is_side_pane()
+                && matches!(self.context, KeymapContext::List | KeymapContext::Pager))
+        {
+            return true;
+        }
+        let edit = |id: Self| {
+            id.context == KeymapContext::Composer && matches!(id.action, "undo" | "redo")
+        };
+        if edit(self) && other.context.allows_plain_chord_prefix()
+            || edit(other) && self.context.allows_plain_chord_prefix()
+        {
+            return false;
+        }
+        match (self.context, other.context) {
+            // Presets cannot open while a list owns input.
+            (KeymapContext::Chat, KeymapContext::List) => self.action != "open_presets",
+            (KeymapContext::List, KeymapContext::Chat) => other.action != "open_presets",
+
+            // Activity focus, Find, and selection remain available during list navigation.
+            (KeymapContext::Global, KeymapContext::List) => matches!(
+                self.action,
+                "focus_activity" | "find_transcript" | "select_transcript"
+            ),
+            (KeymapContext::List, KeymapContext::Global) => matches!(
+                other.action,
+                "focus_activity" | "find_transcript" | "select_transcript"
+            ),
+
+            _ => self.context.overlaps(other.context),
+        }
     }
 
     pub(crate) fn config_path(self) -> String {
@@ -164,7 +212,7 @@ macro_rules! define_runtime_action_bindings {
         }
 
         /// Return the configured slot for one runtime action, including global fallbacks.
-        pub(super) fn configured_binding_for_action(
+        pub(crate) fn configured_binding_for_action(
             keymap: &TuiKeymap,
             action: KeymapActionId,
         ) -> Option<&Option<KeybindingsSpec>> {
@@ -211,6 +259,7 @@ macro_rules! define_runtime_action_bindings {
             action: &str,
         ) -> Option<&'a [KeyBinding]> {
             match (context, action) {
+                ("global", "leader") => Some(runtime_keymap.chords.leader.as_slice()),
                 $(
                     $(
                         ($context, stringify!($action)) => {
@@ -269,6 +318,7 @@ macro_rules! define_runtime_action_bindings {
 
 define_runtime_action_bindings! {
     "global" => Global, app, global [
+        change_host,
         open_agents,
         open_transcript,
         find_transcript,
@@ -300,6 +350,8 @@ define_runtime_action_bindings! {
         toggle_shortcuts,
         history_search_previous,
         history_search_next,
+        undo,
+        redo,
     ],
     "editor" => Editor, editor, editor [
         insert_newline,
@@ -404,6 +456,7 @@ define_runtime_action_bindings! {
         close,
         close_transcript,
         find,
+        mark_markdown,
     ],
     "list" => List, list, list [
         move_up,
@@ -422,11 +475,13 @@ define_runtime_action_bindings! {
         search,
         new_task,
         new_worktree,
+        fork,
         rename,
         stop,
         archive,
         delete,
         hide,
+        toggle_pin,
         toggle_grouping,
     ],
     "approval" => Approval, approval, approval [

@@ -57,7 +57,7 @@ use codex_app_server_protocol::ThreadDecrementElicitationParams;
 use codex_app_server_protocol::ThreadDecrementElicitationResponse;
 use codex_app_server_protocol::ThreadIncrementElicitationParams;
 use codex_app_server_protocol::ThreadIncrementElicitationResponse;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -218,18 +218,6 @@ enum CliCommand {
         first_message: String,
         /// Follow-up user message for the second turn.
         follow_up_message: String,
-    },
-    /// Trigger zsh-fork multi-subcommand approvals and assert expected approval behavior.
-    #[command(name = "trigger-zsh-fork-multi-cmd-approval")]
-    TriggerZshForkMultiCmdApproval {
-        /// Optional prompt; defaults to an explicit `/usr/bin/true && /usr/bin/true` command.
-        user_message: Option<String>,
-        /// Minimum number of command-approval callbacks expected in the turn.
-        #[arg(long, default_value_t = 2)]
-        min_approvals: usize,
-        /// One-based approval index to abort (e.g. --abort-on 2 aborts the second approval).
-        #[arg(long)]
-        abort_on: Option<usize>,
     },
     /// Trigger a ChatGPT or Amazon Bedrock login flow.
     TestLogin {
@@ -413,22 +401,6 @@ pub async fn run() -> Result<()> {
                 &config_overrides,
                 first_message,
                 follow_up_message,
-                &dynamic_tools,
-            )
-            .await
-        }
-        CliCommand::TriggerZshForkMultiCmdApproval {
-            user_message,
-            min_approvals,
-            abort_on,
-        } => {
-            let endpoint = resolve_endpoint(codex_bin, url)?;
-            trigger_zsh_fork_multi_cmd_approval(
-                &endpoint,
-                &config_overrides,
-                user_message,
-                min_approvals,
-                abort_on,
                 &dynamic_tools,
             )
             .await
@@ -821,112 +793,6 @@ async fn send_message_v2_endpoint(
     .await
 }
 
-async fn trigger_zsh_fork_multi_cmd_approval(
-    endpoint: &Endpoint,
-    config_overrides: &[String],
-    user_message: Option<String>,
-    min_approvals: usize,
-    abort_on: Option<usize>,
-    dynamic_tools: &Option<Vec<DynamicToolSpec>>,
-) -> Result<()> {
-    if let Some(abort_on) = abort_on
-        && abort_on == 0
-    {
-        bail!("--abort-on must be >= 1 when provided");
-    }
-
-    let default_prompt = "Run this exact command using shell command execution without rewriting or splitting it: /usr/bin/true && /usr/bin/true";
-    let message = user_message.unwrap_or_else(|| default_prompt.to_string());
-
-    with_client(
-        "trigger-zsh-fork-multi-cmd-approval",
-        endpoint,
-        config_overrides,
-        |client| {
-            let initialize = client.initialize()?;
-            println!("< initialize response: {initialize:?}");
-
-            let thread_response = client.thread_start(ThreadStartParams {
-                dynamic_tools: dynamic_tools.clone(),
-                ..Default::default()
-            })?;
-            println!("< thread/start response: {thread_response:?}");
-
-            client.command_approval_behavior = match abort_on {
-                Some(index) => CommandApprovalBehavior::AbortOn(index),
-                None => CommandApprovalBehavior::AlwaysAccept,
-            };
-            client.command_approval_count = 0;
-            client.command_approval_item_ids.clear();
-            client.command_execution_statuses.clear();
-            client.last_turn_status = None;
-
-            let mut turn_params = TurnStartParams {
-                thread_id: thread_response.thread.id.clone(),
-                client_user_message_id: None,
-                input: vec![V2UserInput::Text {
-                    text: message,
-                    text_elements: Vec::new(),
-                }],
-                ..Default::default()
-            };
-            turn_params.approval_policy = Some(AskForApproval::OnRequest);
-            turn_params.sandbox_policy = Some(SandboxPolicy::ReadOnly {
-                network_access: false,
-            });
-
-            let turn_response = client.turn_start(turn_params)?;
-            println!("< turn/start response: {turn_response:?}");
-            client.stream_turn(&thread_response.thread.id, &turn_response.turn.id)?;
-
-            if client.command_approval_count < min_approvals {
-                bail!(
-                    "expected at least {min_approvals} command approvals, got {}",
-                    client.command_approval_count
-                );
-            }
-            let mut approvals_per_item = std::collections::BTreeMap::new();
-            for item_id in &client.command_approval_item_ids {
-                *approvals_per_item.entry(item_id.clone()).or_insert(0usize) += 1;
-            }
-            let max_approvals_for_one_item =
-                approvals_per_item.values().copied().max().unwrap_or(0);
-            if max_approvals_for_one_item < min_approvals {
-                bail!(
-                    "expected at least {min_approvals} approvals for one command item, got max {max_approvals_for_one_item} with map {approvals_per_item:?}"
-                );
-            }
-
-            let last_command_status = client.command_execution_statuses.last();
-            if abort_on.is_none() {
-                if last_command_status != Some(&CommandExecutionStatus::Completed) {
-                    bail!("expected completed command execution, got {last_command_status:?}");
-                }
-                if client.last_turn_status != Some(TurnStatus::Completed) {
-                    bail!(
-                        "expected completed turn in all-accept flow, got {:?}",
-                        client.last_turn_status
-                    );
-                }
-            } else if last_command_status == Some(&CommandExecutionStatus::Completed) {
-                bail!(
-                    "expected non-completed command execution in mixed approval/decline flow, got {last_command_status:?}"
-                );
-            }
-
-            println!(
-                "[zsh-fork multi-approval summary] approvals={}, approvals_per_item={approvals_per_item:?}, command_statuses={:?}, turn_status={:?}",
-                client.command_approval_count,
-                client.command_execution_statuses,
-                client.last_turn_status
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
 async fn resume_message_v2(
     endpoint: &Endpoint,
     config_overrides: &[String],
@@ -1301,6 +1167,11 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
         println!("< initialize response: {initialize:?}");
 
         let response = client.thread_list(ThreadListParams {
+            include_attached_threads: false,
+            current_account_only: false,
+            included_thread_ids: None,
+            excluded_thread_ids: None,
+            attached_to_thread_id: None,
             originators: None,
             cursor: None,
             limit: Some(limit),
@@ -1403,11 +1274,10 @@ fn live_elicitation_timeout_pause(
         (None, None) => "ws://127.0.0.1:4222".to_string(),
     };
 
-    let script_path = script.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts")
-            .join("live_elicitation_hold.sh")
-    });
+    let script_path = match script {
+        Some(script) => script,
+        None => codex_utils_cargo_bin::find_resource!("scripts/live_elicitation_hold.sh")?,
+    };
     if !script_path.is_file() {
         bail!("helper script not found: {}", script_path.display());
     }
@@ -1581,28 +1451,20 @@ enum ClientTransport {
 struct CodexClient {
     transport: ClientTransport,
     pending_notifications: VecDeque<JSONRPCNotification>,
-    command_approval_behavior: CommandApprovalBehavior,
     command_approval_count: usize,
-    command_approval_item_ids: Vec<String>,
     command_execution_statuses: Vec<CommandExecutionStatus>,
     command_execution_outputs: Vec<String>,
     command_output_stream: String,
     command_item_started: bool,
     helper_done_seen: bool,
     turn_completed_before_helper_done: bool,
-    unexpected_items_before_helper_done: Vec<ThreadItem>,
+    unexpected_items_before_helper_done: Vec<ThreadItemPayload>,
     last_turn_status: Option<TurnStatus>,
     last_turn_error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum CommandApprovalBehavior {
-    AlwaysAccept,
-    AbortOn(usize),
-}
-
 fn item_started_before_helper_done_is_unexpected(
-    item: &ThreadItem,
+    item: &ThreadItemPayload,
     command_item_started: bool,
     helper_done_seen: bool,
 ) -> bool {
@@ -1610,7 +1472,7 @@ fn item_started_before_helper_done_is_unexpected(
         return false;
     }
 
-    !matches!(item, ThreadItem::UserMessage { .. })
+    !matches!(item, ThreadItemPayload::UserMessage { .. })
 }
 
 impl CodexClient {
@@ -1670,9 +1532,7 @@ impl CodexClient {
                 stdout: BufReader::new(stdout),
             },
             pending_notifications: VecDeque::new(),
-            command_approval_behavior: CommandApprovalBehavior::AlwaysAccept,
             command_approval_count: 0,
-            command_approval_item_ids: Vec::new(),
             command_execution_statuses: Vec::new(),
             command_execution_outputs: Vec::new(),
             command_output_stream: String::new(),
@@ -1709,9 +1569,7 @@ impl CodexClient {
                 socket: Box::new(socket),
             },
             pending_notifications: VecDeque::new(),
-            command_approval_behavior: CommandApprovalBehavior::AlwaysAccept,
             command_approval_count: 0,
-            command_approval_item_ids: Vec::new(),
             command_execution_statuses: Vec::new(),
             command_execution_outputs: Vec::new(),
             command_output_stream: String::new(),
@@ -1752,6 +1610,8 @@ impl CodexClient {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
                 capabilities: Some(InitializeCapabilities {
+                    required_human_approval: false,
+                    explicit_gateway_oauth: false,
                     experimental_api,
                     request_attestation: false,
                     opt_out_notification_methods: Some(
@@ -1959,28 +1819,31 @@ impl CodexClient {
                     std::io::stdout().flush().ok();
                 }
                 ServerNotification::ItemStarted(payload) => {
-                    if matches!(payload.item, ThreadItem::CommandExecution { .. }) {
+                    if matches!(
+                        payload.item.payload,
+                        ThreadItemPayload::CommandExecution { .. }
+                    ) {
                         if self.command_item_started && !self.helper_done_seen {
                             self.unexpected_items_before_helper_done
-                                .push(payload.item.clone());
+                                .push(payload.item.payload.clone());
                         }
                         self.command_item_started = true;
                     } else if item_started_before_helper_done_is_unexpected(
-                        &payload.item,
+                        &payload.item.payload,
                         self.command_item_started,
                         self.helper_done_seen,
                     ) {
                         self.unexpected_items_before_helper_done
-                            .push(payload.item.clone());
+                            .push(payload.item.payload.clone());
                     }
-                    println!("\n< item started: {:?}", payload.item);
+                    println!("\n< item started: {:?}", payload.item.payload);
                 }
                 ServerNotification::ItemCompleted(payload) => {
-                    if let ThreadItem::CommandExecution {
+                    if let ThreadItemPayload::CommandExecution {
                         status,
                         aggregated_output,
                         ..
-                    } = payload.item.clone()
+                    } = payload.item.payload.clone()
                     {
                         self.command_execution_statuses.push(status);
                         if let Some(aggregated_output) = aggregated_output {
@@ -1988,7 +1851,7 @@ impl CodexClient {
                             self.command_execution_outputs.push(aggregated_output);
                         }
                     }
-                    println!("< item completed: {:?}", payload.item);
+                    println!("< item completed: {:?}", payload.item.payload);
                 }
                 ServerNotification::TurnCompleted(payload) => {
                     if payload.turn.id == turn_id {
@@ -2192,7 +2055,6 @@ impl CodexClient {
             approval_id.as_deref().unwrap_or("<none>")
         );
         self.command_approval_count += 1;
-        self.command_approval_item_ids.push(item_id.clone());
         if let Some(environment_id) = environment_id.as_deref() {
             println!("< environment: {environment_id}");
         }
@@ -2226,13 +2088,7 @@ impl CodexClient {
             println!("< proposed network policy amendments: {network_policy_amendments:?}");
         }
 
-        let decision = match self.command_approval_behavior {
-            CommandApprovalBehavior::AlwaysAccept => CommandExecutionApprovalDecision::Accept,
-            CommandApprovalBehavior::AbortOn(index) if self.command_approval_count == index => {
-                CommandExecutionApprovalDecision::Cancel
-            }
-            CommandApprovalBehavior::AbortOn(_) => CommandExecutionApprovalDecision::Accept,
-        };
+        let decision = CommandExecutionApprovalDecision::Accept;
         let response = CommandExecutionRequestApprovalResponse {
             decision: decision.clone(),
         };

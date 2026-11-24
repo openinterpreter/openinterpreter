@@ -84,7 +84,7 @@ async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
             Some(target),
         );
         view.handle_key_event(KeyCode::Esc.into());
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "Target".chars() {
             view.handle_key_event(KeyCode::Char(character).into());
         }
@@ -163,7 +163,7 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             // Clear retained search without dismissing the command center.
             view.on_ctrl_c();
             if filtered {
-                view.handle_key_event(KeyCode::Char('f').into());
+                view.handle_key_event(KeyCode::Char('/').into());
                 view.handle_paste("Task".into());
                 // Search selects the first match; move back to Task 3.
                 view.handle_key_event(KeyCode::Down.into());
@@ -173,10 +173,20 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             let expected = match (grouping, filtered) {
                 (AgentsOverviewGrouping::Status, false) => vec![3, 2, 1, 4],
                 (AgentsOverviewGrouping::Status, true) => vec![3, 1, 4],
-                (AgentsOverviewGrouping::Project | AgentsOverviewGrouping::Model, false) => {
+                (
+                    AgentsOverviewGrouping::Project
+                    | AgentsOverviewGrouping::Directory
+                    | AgentsOverviewGrouping::Model,
+                    false,
+                ) => {
                     vec![3, 4, 2, 1]
                 }
-                (AgentsOverviewGrouping::Project | AgentsOverviewGrouping::Model, true) => {
+                (
+                    AgentsOverviewGrouping::Project
+                    | AgentsOverviewGrouping::Directory
+                    | AgentsOverviewGrouping::Model,
+                    true,
+                ) => {
                     vec![3, 4, 1]
                 }
             };
@@ -270,7 +280,7 @@ async fn hiding_rename_target_does_not_transfer_draft_to_neighbor() -> Result<()
     {
         let state = app.agents_overview.view_state.lock().unwrap();
         assert_eq!(
-            (state.rename_target.is_some(), state.input.as_str()),
+            (state.rename_target.is_some(), state.input.text()),
             (false, "")
         );
     }
@@ -326,15 +336,18 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
         },
     ));
     let request_id = Uuid::new_v4();
-    app.agents_overview.initialized = false;
-    app.agents_overview.request_id = Some(request_id);
+    app.agents_overview.initialized.clear();
+    app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
     app.apply_agents_overview_thread_refresh(
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
-            threads: HashMap::from([(id, Some(thread.clone()))]),
+            cleared_unread: Vec::new(),
+            threads: HashMap::from([(id, Some((thread.clone(), false, None)))]),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
+            discovery: None,
+            pinned_thread_ids: None,
         }),
     );
     assert_eq!(
@@ -343,10 +356,12 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
         Vec::<ThreadId>::new()
     );
     assert_eq!(app.primary_thread_id, Some(id));
+    let backend_id = app_server.backend_id();
     app.resume_target_session(
         &mut tui,
         &mut app_server,
         SessionTarget {
+            backend_id,
             thread_id: id,
             path: None,
             cwd: None,
@@ -602,7 +617,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         }
         // Cached details and approval state are invalidated as a group after success.
         let request_id = Uuid::new_v4();
-        app.agents_overview.request_id = Some(request_id);
+        app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
         let stale_threads = app.agents_overview.threads.clone();
         Box::pin(app.run_agents_overview_action(&mut tui, &mut app_server, background, action))
             .await?;
@@ -610,9 +625,15 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             &app_server,
             request_id,
             Ok(AgentsOverviewThreadRefresh {
-                threads: stale_threads,
+                cleared_unread: Vec::new(),
+                threads: stale_threads
+                    .into_iter()
+                    .map(|(id, thread)| (id, thread.map(|thread| (thread, false, None))))
+                    .collect(),
                 last_messages: HashMap::new(),
                 recent_seed_complete: true,
+                discovery: None,
+                pinned_thread_ids: None,
             }),
         );
         assert_eq!(

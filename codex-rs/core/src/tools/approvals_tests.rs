@@ -1,5 +1,7 @@
 use super::*;
 use crate::session::tests::make_session_and_context_with_rx;
+use crate::session::tests::test_environment_id;
+use codex_mcp::McpServerKey;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::approvals::NetworkPolicyAmendment;
 use pretty_assertions::assert_eq;
@@ -14,6 +16,7 @@ fn approval_resolution_rejects_denied_network_policy_amendment() {
             },
         },
         source: ApprovalResolutionSource::User,
+        cancellation_reason: None,
     };
 
     assert!(matches!(
@@ -27,6 +30,7 @@ fn approval_resolution_rejects_mcp_policy_amendment() {
     let resolution = ApprovalResolution {
         decision: ReviewDecision::ApprovedMcpPolicyAmendment,
         source: ApprovalResolutionSource::User,
+        cancellation_reason: None,
     };
 
     assert!(matches!(
@@ -40,6 +44,7 @@ fn approval_resolution_aborts_turn_when_approval_is_aborted() {
     let resolution = ApprovalResolution {
         decision: ReviewDecision::Abort,
         source: ApprovalResolutionSource::User,
+        cancellation_reason: None,
     };
 
     assert!(matches!(
@@ -67,6 +72,7 @@ fn approval_resolution_uses_acting_model_timeout_instructions() {
         let resolution = ApprovalResolution {
             decision: ReviewDecision::TimedOut,
             source: ApprovalResolutionSource::Guardian,
+            cancellation_reason: None,
         };
 
         assert!(matches!(
@@ -123,6 +129,7 @@ async fn non_utf8_cwd_preserves_approval_routing(
     review_context.approval_policy = AskForApproval::OnRequest;
     review_context.approvals_reviewer = reviewer;
     let context = ApprovalContext {
+        exec_requirement: None,
         review_context,
         cancellation_token: None,
         call_id: "non-utf8-cwd".to_string(),
@@ -148,7 +155,8 @@ async fn non_utf8_cwd_preserves_approval_routing(
         tty: false,
         proposed_execpolicy_amendment: None,
     };
-    let approval = session.request_reviewer_approval(action, &context);
+    let prompt = session.request_user_approval(&action, &context);
+    let approval = session.request_reviewer_approval(&action, &context, prompt);
     tokio::pin!(approval);
     let expected = if reviewer == ApprovalsReviewer::User {
         tokio::select! {
@@ -167,11 +175,13 @@ async fn non_utf8_cwd_preserves_approval_routing(
         ApprovalResolution {
             decision: ReviewDecision::Approved,
             source: ApprovalResolutionSource::User,
+            cancellation_reason: None,
         }
     } else {
         ApprovalResolution {
             decision: ReviewDecision::Approved,
             source: ApprovalResolutionSource::Guardian,
+            cancellation_reason: None,
         }
     };
     assert_eq!(approval.await, expected);
@@ -184,7 +194,9 @@ async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
     let (session, turn, events) = make_session_and_context_with_rx().await;
     let action = ApprovalAction::McpToolCall {
         id: "mcp-override".to_string(),
+        environment_id: test_environment_id(&turn).to_owned(),
         server: "example".to_string(),
+        server_key: McpServerKey::unscoped("example"),
         tool_name: "dangerous".to_string(),
         arguments: None,
         connector_id: None,
@@ -200,11 +212,13 @@ async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
         approval_mode: AppToolApproval::Prompt,
         allow_session_remember: false,
         allow_persistent_approval: false,
+        prompt_permissions: None,
     };
     let mut review_context = GuardianReviewContext::from(&turn);
     review_context.approval_policy = AskForApproval::OnRequest;
     review_context.approvals_reviewer = ApprovalsReviewer::AutoReview;
     let context = ApprovalContext {
+        exec_requirement: None,
         review_context,
         cancellation_token: None,
         call_id: "mcp-override".to_string(),
@@ -215,8 +229,9 @@ async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
         network_approval_context: None,
     };
 
+    let prompt = session.request_user_approval(&action, &context);
     tokio::select! {
-        resolution = session.request_reviewer_approval(action, &context) => {
+        resolution = session.request_reviewer_approval(&action, &context, prompt) => {
             panic!("expected a user approval request, got {resolution:?}");
         }
         event = events.recv() => {
@@ -233,5 +248,60 @@ async fn explicit_mcp_reviewer_override_takes_precedence_over_action_context() {
                 )
             );
         }
+    }
+}
+
+#[test]
+fn network_hook_cwd_overrides_only_local_commands() {
+    let local_cwd = AbsolutePathBuf::try_from(std::env::temp_dir()).unwrap();
+    for (environment_id, uri) in [
+        (codex_exec_server::LOCAL_ENVIRONMENT_ID, None),
+        (
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            Some("file:///local/repo"),
+        ),
+        ("remote", None),
+        ("remote", Some("file:///remote/repo")),
+        ("remote", Some("file:///C:/remote/repo")),
+    ] {
+        let expected_cwd = uri.map_or_else(
+            || PathUri::from_abs_path(&local_cwd),
+            |uri| PathUri::parse(uri).unwrap(),
+        );
+        let action = ApprovalAction::NetworkAccess {
+            id: "network-1".into(),
+            turn_id: "turn-1".into(),
+            environment_id: environment_id.into(),
+            target: "https://example.com:443".into(),
+            host: "example.com".into(),
+            protocol: NetworkApprovalProtocol::Https,
+            port: 443,
+            trigger: uri.map(|_| GuardianNetworkAccessTrigger {
+                call_id: "exec-1".into(),
+                tool_name: "exec_command".into(),
+                command: vec!["curl".into(), "https://example.com".into()],
+                cwd: expected_cwd.clone(),
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                additional_permissions: None,
+                justification: None,
+                tty: None,
+            }),
+            hook_command: "curl https://example.com".into(),
+            hook_run_id: "hook-1".into(),
+            command: vec!["network-access".into(), "https://example.com:443".into()],
+            cwd: local_cwd.clone(),
+        };
+        assert_eq!(
+            action.permission_request_payload(),
+            PermissionRequestPayload {
+                tool_name: HookToolName::bash(),
+                tool_input: serde_json::json!({
+                    "command": "curl https://example.com",
+                    "description": "network-access https://example.com:443",
+                }),
+                tool_cwd: (environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID)
+                    .then_some(expected_cwd),
+            }
+        );
     }
 }

@@ -1,7 +1,8 @@
 //! Resolve saved-session state needed before resuming or forking a thread.
 //!
 //! The app-server API owns thread metadata. This module coordinates the TUI-specific
-//! cwd prompt using the cwd reported by the selected thread.
+//! cwd prompt using the cwd reported by the selected thread and checks Guardian
+//! eligibility for interactive CLI resume.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -40,6 +41,28 @@ pub(crate) fn effective_resume_cwd_mode(
     } else {
         configured_mode
     }
+}
+
+pub(crate) async fn validate_resume_target(
+    app_server: &mut AppServerSession,
+    thread_id: ThreadId,
+) -> color_eyre::Result<()> {
+    let Ok(thread) = app_server
+        .thread_read(thread_id, /*include_turns*/ false)
+        .await
+    else {
+        // Preserve existing resume behavior when this metadata check is unavailable.
+        return Ok(());
+    };
+    if codex_state::is_guardian_review_source(&thread.source.into()) {
+        let parent_hint = thread
+            .parent_thread_id
+            .map_or_else(String::new, |parent_id| {
+                format!("\nResume its parent session instead: codex resume {parent_id}")
+            });
+        color_eyre::eyre::bail!("Cannot resume a Guardian review thread.{parent_hint}");
+    }
+    Ok(())
 }
 
 pub(crate) async fn read_session_cwd(

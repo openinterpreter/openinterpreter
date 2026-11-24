@@ -1,14 +1,44 @@
 //! Classify and integrate composer pastes and capture raw paste tabs before completion or submission.
+//! Multiline paste on a `> ` line continues that Markdown quote, then leaves the cursor in
+//! the next block. Search queries and shell input remain literal.
 
 use super::*;
 use crate::bottom_pane::paste_burst::FlushResult;
 
 impl ChatComposer {
+    /// Preserve a separator after a recently inserted paste prefix during draft handoff.
+    pub(super) fn append_recent_paste_separator(&mut self, separator: char, now: Instant) -> bool {
+        if self.draft.disable_paste_burst || !self.draft.textarea.allows_paste_burst() {
+            return false;
+        }
+        self.handle_paste_burst_flush(now);
+        if self
+            .draft
+            .paste_burst
+            .append_control_char_if_active(separator, now)
+        {
+            return true;
+        }
+        if self
+            .draft
+            .paste_burst
+            .direct_insert_newline_should_insert(now)
+        {
+            self.draft
+                .paste_burst
+                .begin_with_retro_grabbed(String::new(), now);
+            return self
+                .draft
+                .paste_burst
+                .append_control_char_if_active(separator, now);
+        }
+        false
+    }
     pub(crate) fn insert_str(&mut self, text: &str) {
         if !text.is_empty() && self.sparkle.draft.get() == sparkle::SparkleDraft::Untouched {
             self.dismiss_sparkle();
         }
-        let started_vim_edit = self.begin_direct_vim_edit();
+        let started_edit = self.begin_direct_edit();
         let elements_before = self
             .draft
             .textarea
@@ -20,8 +50,8 @@ impl ChatComposer {
         }
         self.sync_bash_mode_from_text();
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
     }
 
@@ -40,8 +70,43 @@ impl ChatComposer {
 
     /// Classify an explicit paste before integrating text shared with the buffered key path.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
+        self.flush_pending_paste_burst();
+        if !self.draft.textarea.is_vim_enabled() {
+            self.finish_edit();
+        }
         self.note_sparkle_paste(&pasted);
         self.apply_paste(pasted)
+    }
+
+    pub(crate) fn flush_pending_paste_burst(&mut self) {
+        if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
+            self.apply_paste(pasted);
+        }
+    }
+
+    pub(in crate::bottom_pane) fn paste_handoff_deadline(&self) -> Option<Instant> {
+        if self.draft.disable_paste_burst {
+            return None;
+        }
+        self.draft.paste_burst.handoff_deadline()
+    }
+
+    pub(in crate::bottom_pane) fn has_paste_window(&self, now: Instant) -> bool {
+        !self.draft.disable_paste_burst
+            && self
+                .draft
+                .paste_burst
+                .newline_should_insert_instead_of_submit(now)
+    }
+
+    /// Display buffered keys while preserving their trailing paste window.
+    pub(in crate::bottom_pane) fn flush_handoff_paste(&mut self, now: Instant) -> bool {
+        let deadline = self.paste_handoff_deadline();
+        let flushed = self.handle_paste_burst_flush(now);
+        if flushed && let Some(deadline) = deadline.filter(|deadline| *deadline >= now) {
+            self.draft.paste_burst.preserve_window_until(deadline);
+        }
+        flushed
     }
 
     /// Enable or disable paste-burst handling.
@@ -86,10 +151,21 @@ impl ChatComposer {
         match self.draft.paste_burst.flush_if_due(now) {
             FlushResult::Paste(pasted) => {
                 self.apply_paste(pasted);
+                if !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
+                }
                 true
             }
             FlushResult::Typed(ch) => {
+                let completion_space = self.draft.skill_completion_space_for_char(ch);
+                let started_edit = completion_space.is_some() && self.begin_direct_edit();
+                if let Some(space) = completion_space {
+                    self.draft.textarea.replace_range(space..space + 1, "");
+                }
                 self.insert_str(ch.to_string().as_str());
+                if started_edit || !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
+                }
                 true
             }
             FlushResult::None => false,
@@ -128,8 +204,27 @@ impl ChatComposer {
             query.editor.insert_str(&pasted);
             return true;
         }
-        let started_vim_edit = self.begin_direct_vim_edit();
+        self.draft.textarea_state.get_mut().follow_cursor();
+        let started_edit = self.begin_direct_edit();
         let elements_before = self.draft.textarea.element_payloads();
+        // Resolve the target before editing: a selected range is replaced from its start,
+        // not from a cursor that may have moved past the selected quote prefix.
+        let target = self.draft.textarea.edit_target();
+        let before_cursor = &self.draft.textarea.text()[..target.start()];
+        let current_line = before_cursor.rsplit('\n').next().unwrap_or_default();
+        let is_blockquote = self.config.blockquote_paste_enabled
+            && !self.is_bang_shell_command()
+            && current_line.starts_with("> ")
+            && pasted.contains('\n');
+        let pasted = if is_blockquote {
+            let pasted = pasted
+                .strip_suffix('\n')
+                .filter(|pasted| !pasted.is_empty())
+                .unwrap_or(pasted.as_ref());
+            std::borrow::Cow::Owned(pasted.replace('\n', "\n> "))
+        } else {
+            pasted
+        };
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
@@ -146,11 +241,15 @@ impl ChatComposer {
         } else {
             self.insert_str(&pasted);
         }
+        if is_blockquote {
+            let textarea = &mut self.draft.textarea;
+            textarea.insert_str_at(textarea.cursor(), "\n\n");
+        }
         self.draft.paste_burst.clear_after_explicit_paste();
         self.reconcile_deleted_elements(elements_before);
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
         true
     }
@@ -170,6 +269,7 @@ impl ChatComposer {
             .paste_burst
             .append_control_char_if_active('\t', now)
         {
+            self.begin_promoted_paste_edit();
             return true;
         }
 
@@ -191,3 +291,7 @@ impl ChatComposer {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "blockquote_paste_tests.rs"]
+mod blockquote_paste_tests;

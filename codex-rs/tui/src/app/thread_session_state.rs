@@ -78,15 +78,22 @@ impl App {
         let permission_profile = self.current_permission_profile();
         let active_permission_profile = self.current_active_permission_profile();
         let mut session = if let Some(mut session) = self.primary_session_configured.clone() {
+            session.read_only_history = true;
             if session.thread_id != thread_id {
                 // `thread/read` does not include all thread settings, so do not carry
                 // thread-scoped state from the currently active session.
                 session.collaboration_mode = None;
-                session.personality = None;
+                session.thread_settings_confirmed = false;
+                session.primary_environment_cwd = None;
+                session.daybreak_enabled = false;
             }
             session
         } else {
             ThreadSessionState {
+                read_only_history: true,
+                thread_settings_confirmed: false,
+                daybreak_enabled: false,
+                primary_environment_cwd: None,
                 windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id,
                 forked_from_id: None,
@@ -106,15 +113,20 @@ impl App {
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: self.chat_widget.current_reasoning_effort(),
                 collaboration_mode: None,
-                personality: None,
                 message_history: None,
                 network_proxy: None,
                 rollout_path: thread.path.clone(),
             }
         };
+        if let Some(environments) = &thread.environments {
+            session.primary_environment_cwd =
+                crate::session_state::primary_environment_cwd(environments);
+        }
         session.windows_sandbox_host =
             crate::windows_sandbox::host_from_environments(thread.environments.as_deref());
         session.thread_id = thread_id;
+        session.set_fork_parent(thread.forked_from_id.as_deref());
+        session.daybreak_enabled = thread.daybreak_enabled.unwrap_or(false);
         session.thread_name = thread.name.clone();
         session.model_provider_id = thread.model_provider.clone();
         session.set_cwd_retargeting_implicit_runtime_workspace_root(thread.cwd.clone());
@@ -172,6 +184,10 @@ mod tests {
 
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            daybreak_enabled: false,
+            primary_environment_cwd: None,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
             forked_from_id: None,
@@ -189,7 +205,6 @@ mod tests {
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
-            personality: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -400,23 +415,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_read_fallback_uses_active_permission_settings() {
+    async fn reconstructed_session_uses_target_lineage_and_active_permissions() {
         let mut app = make_test_app().await;
         let primary_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000404").expect("valid thread");
         let read_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000405").expect("valid thread");
+        let other_parent = ThreadId::new();
         let primary_session = ThreadSessionState {
+            forked_from_id: Some(ThreadId::new()),
+            fork_parent_title: Some("Previous parent".into()),
             permission_profile: PermissionProfile::workspace_write(),
             ..test_thread_session(primary_thread_id, test_path_buf("/tmp/primary"))
         };
-        let read_thread = Thread {
+        let mut read_thread = Thread {
             originator: None,
             environments: None,
             id: read_thread_id.to_string(),
             extra: None,
             session_id: read_thread_id.to_string(),
-            forked_from_id: None,
+            forked_from_id: Some(other_parent.to_string()),
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
@@ -452,6 +471,10 @@ mod tests {
             .session_state_for_thread_read(read_thread_id, &read_thread)
             .await;
 
+        assert_eq!(
+            (session.forked_from_id, session.fork_parent_title),
+            (Some(other_parent), None)
+        );
         let expected_permission_profile = app
             .chat_widget
             .config_ref()
@@ -464,6 +487,27 @@ mod tests {
             app.config.permissions.permission_profile().clone(),
             "thread/read fallback must use the active widget permissions rather than stale app \
              config defaults"
+        );
+
+        read_thread.forked_from_id = None;
+        app.enqueue_thread_notification(
+            read_thread_id,
+            codex_app_server_protocol::ServerNotification::ThreadStarted(
+                codex_app_server_protocol::ThreadStartedNotification {
+                    thread: read_thread,
+                },
+            ),
+        )
+        .await
+        .expect("thread started");
+        let store = app.thread_event_channels[&read_thread_id]
+            .store
+            .lock()
+            .await;
+        let started = store.session.as_ref().expect("inferred session");
+        assert_eq!(
+            (started.forked_from_id, &started.fork_parent_title),
+            (None, &None)
         );
     }
 }

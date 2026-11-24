@@ -1,17 +1,23 @@
+use super::ThreadEvictionOutcome;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::agent::LocalAgentControl;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
 use crate::config::test_config;
+use crate::session::SUBMISSION_CHANNEL_CAPACITY;
 use crate::thread_manager::ThreadManagerState;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -38,10 +44,19 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
         .await
         .expect("start root thread");
     let control = manager.agent_control();
-    let state = control.upgrade().expect("thread manager should be live");
+    let state = control
+        .runtime
+        .upgrade()
+        .expect("thread manager should be live");
+    let membership = control.runtime.admit_start().expect("admit residency work");
 
     let first_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            &membership,
+            /*protected_thread_id*/ None,
+        )
         .await
         .expect("first resident slot");
     let first =
@@ -49,8 +64,72 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     first_slot.commit(first.thread_id);
     mark_thread_completed(first.thread.as_ref()).await;
 
+    // Public message submission must honor the same eviction gate as MAv2 sends.
+    let eviction_gate = Arc::clone(&first.thread.residency_gate).write_owned().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker_1").unwrap(),
+        Vec::new(),
+        "queued notice".into(),
+        /*trigger_turn*/ false,
+    );
+    let delivery = first.thread.submit(Op::InterAgentCommunication {
+        communication: communication.clone(),
+        start_options: Default::default(),
+    });
+    let injected = (0..=SUBMISSION_CHANNEL_CAPACITY)
+        .map(|index| {
+            let mut message = communication.clone();
+            message.content = format!("injected notice {index}");
+            message
+        })
+        .collect::<Vec<_>>();
+    let injection = first.thread.inject_response_items(
+        injected
+            .iter()
+            .map(InterAgentCommunication::to_model_input_item)
+            .collect(),
+    );
+    tokio::pin!(delivery);
+    tokio::pin!(injection);
+    assert!(futures::poll!(delivery.as_mut()).is_pending());
+    assert!(futures::poll!(injection.as_mut()).is_pending());
+    drop(eviction_gate);
+    delivery.await.expect("submit after eviction gate releases");
+    // Drain each accepted prefix while the batch yields, then attempt capacity eviction.
+    loop {
+        tokio::task::yield_now().await;
+        tokio::task::consume_budget().await;
+        if let std::task::Poll::Ready(result) = futures::poll!(injection.as_mut()) {
+            result.expect("inject after eviction gate releases");
+            break;
+        }
+        first
+            .thread
+            .update_thread_settings(ThreadSettingsOverrides::default())
+            .await
+            .expect("dispatch the accepted prefix");
+        assert_eq!(
+            state
+                .try_evict_v2_thread(Arc::clone(&first.thread), &membership)
+                .await
+                .unwrap(),
+            ThreadEvictionOutcome::Busy,
+        );
+    }
+    first
+        .thread
+        .update_thread_settings(ThreadSettingsOverrides::default())
+        .await
+        .expect("dispatch queued notice before eviction");
+
     let second_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            &membership,
+            /*protected_thread_id*/ None,
+        )
         .await
         .expect("second resident slot should evict the first idle agent");
     match manager.get_thread(first.thread_id).await {
@@ -60,6 +139,18 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
         },
         Ok(_) => panic!("expected evicted thread to be missing"),
     }
+    let retained = first
+        .thread
+        .session
+        .services
+        .local_agent_runtime
+        .mailboxes
+        .take(first.thread_id, |_| true);
+    let expected = std::iter::once(communication)
+        .chain(injected)
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    assert_eq!(retained, expected);
     let second = spawn_v2_subagent(&control, &state, config, root.thread_id, "worker-2").await;
     second_slot.commit(second.thread_id);
 
@@ -86,10 +177,19 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
         .await
         .expect("start root thread");
     let control = manager.agent_control();
-    let state = control.upgrade().expect("thread manager should be live");
+    let state = control
+        .runtime
+        .upgrade()
+        .expect("thread manager should be live");
+    let membership = control.runtime.admit_start().expect("admit residency work");
 
     let first_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            &membership,
+            /*protected_thread_id*/ None,
+        )
         .await
         .expect("first resident slot");
     let first =
@@ -98,7 +198,12 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
     mark_thread_interrupted(first.thread.as_ref()).await;
 
     let second_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            &membership,
+            /*protected_thread_id*/ None,
+        )
         .await
         .expect("second resident slot should evict the first interrupted idle agent");
     match manager.get_thread(first.thread_id).await {
@@ -141,18 +246,17 @@ async fn spawn_v2_subagent(
     label: &str,
 ) -> crate::thread_manager::NewThread {
     state
-        .spawn_new_thread_with_source(
-            config,
+        .spawn_child_thread(
+            crate::thread_manager::StartThreadOptions {
+                session_source: Some(SessionSource::SubAgent(SubAgentSource::Other(
+                    label.to_string(),
+                ))),
+                thread_source: Some(ThreadSource::Subagent),
+                ..crate::thread_manager::StartThreadOptions::new(config)
+            },
             control.clone(),
-            SessionSource::SubAgent(SubAgentSource::Other(label.to_string())),
-            /*history_mode*/ None,
             Some(parent_thread_id),
-            /*forked_from_thread_id*/ None,
-            Some(ThreadSource::Subagent),
-            /*metrics_service_name*/ None,
-            /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
-            /*environments*/ None,
         )
         .await
         .expect("spawn v2 subagent")
@@ -165,6 +269,7 @@ async fn mark_thread_completed(thread: &CodexThread) {
         .send_event(
             turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("done".to_string()),
@@ -185,9 +290,11 @@ async fn mark_thread_interrupted(thread: &CodexThread) {
         .send_event(
             turn.as_ref(),
             EventMsg::TurnAborted(TurnAbortedEvent {
+                root_turn_id: None,
                 turn_id: Some(turn.sub_id.clone()),
                 started_at: None,
                 reason: TurnAbortReason::Interrupted,
+                error: None,
                 completed_at: None,
                 duration_ms: None,
             }),

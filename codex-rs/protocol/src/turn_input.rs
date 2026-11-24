@@ -1,5 +1,6 @@
 //! Turn-input request and result types shared by Core's submission APIs.
 
+use crate::AgentPath;
 use crate::models::ResponseItem;
 use crate::protocol::AdditionalContextEntry;
 use crate::protocol::InterAgentCommunication;
@@ -9,6 +10,7 @@ use crate::protocol::W3cTraceContext;
 use crate::user_input::UserInput;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -18,12 +20,8 @@ use ts_rs::TS;
 /// Result of stopping an unfinished root turn so another worker can recover it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuspendTurnOutcome {
-    Suspended {
-        turn_id: String,
-    },
+    Suspended { turn_id: String },
     NotActive,
-    /// A currently loaded descendant would remain running after root handoff.
-    HasLiveDescendants,
     UnsupportedTask,
 }
 
@@ -35,7 +33,73 @@ pub enum TurnInput {
         client_id: Option<String>,
     },
     ResponseItem(ResponseItem),
+    AnnotatedResponseItem(AnnotatedResponseItem),
     InterAgentCommunication(InterAgentCommunication),
+}
+
+/// A Responses API item with caller-supplied, harness-only annotations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnnotatedResponseItem {
+    pub item: ResponseItem,
+    #[serde(default)]
+    pub annotations: ResponseItemAnnotations,
+}
+
+/// Public annotations accepted by Core; internal history metadata stays private.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseItemAnnotations {
+    /// Request compaction retention for a function-call output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retain: bool,
+}
+
+/// A Responses item for history injection. Wrapped items must specify a policy.
+#[derive(Clone, Debug)]
+pub struct InjectedResponseItem {
+    pub item: ResponseItem,
+    pub retention: ItemRetention,
+}
+
+impl<'de> Deserialize<'de> for InjectedResponseItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct WrappedItem {
+            item: ResponseItem,
+            retention: ItemRetention,
+        }
+
+        let value = Value::deserialize(deserializer)?;
+        if value.get("type").is_some() {
+            return ResponseItem::deserialize(value)
+                .map(Self::from)
+                .map_err(serde::de::Error::custom);
+        }
+
+        let WrappedItem { item, retention } =
+            WrappedItem::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { item, retention })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ItemRetention {
+    /// Raw items use the thread's configured retention rules.
+    #[serde(skip)]
+    Unspecified,
+    /// Apply ordinary history rules even when the thread retains client developer messages.
+    Default,
+    /// Carry the item into later context windows and newly spawned children.
+    Always,
+}
+
+impl From<ResponseItem> for InjectedResponseItem {
+    fn from(item: ResponseItem) -> Self {
+        Self {
+            item,
+            retention: ItemRetention::Unspecified,
+        }
+    }
 }
 
 /// One turn input and the context that follows it through submission.
@@ -45,11 +109,49 @@ pub enum TurnInput {
 #[derive(Clone, Debug)]
 pub struct TurnInputRequest {
     pub input: TurnInput,
+    /// Optional host-assigned UUID for the Responses message created from [`TurnInput::UserInput`].
+    /// Ignored for all other inputs, including raw user-role Responses items.
+    pub user_item_uuid: Option<uuid::Uuid>,
+    /// Host-supplied, extension-keyed data for this user input's completion.
+    /// Travels with the individual input and is never included in model input.
+    pub user_input_extension_data: BTreeMap<String, Value>,
     pub thread_settings: ThreadSettingsOverrides,
     pub start: TurnStartOptions,
     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
-    pub responsesapi_client_metadata: Option<HashMap<String, String>>,
+    pub responsesapi_client_metadata: ResponsesApiClientMetadataUpdate,
     pub trace: Option<W3cTraceContext>,
+}
+
+/// An optional replacement followed by a patch to the turn's client metadata.
+#[derive(Clone, Debug, Default)]
+pub struct ResponsesApiClientMetadataUpdate {
+    /// Replaces the existing map, including when empty.
+    pub replacement: Option<HashMap<String, String>>,
+    /// Adds or overwrites keys without removing other entries.
+    pub patch: Option<HashMap<String, String>>,
+}
+
+/// Attribution retained across recovery, sleep, and model-context compaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+pub struct TurnAttribution {
+    pub turn_id: String,
+    pub turn_trigger: Option<String>,
+    pub parent_turn_id: Option<String>,
+    pub initiating_agent_path: Option<AgentPath>,
+    pub root_turn_id: Option<String>,
+}
+
+impl TurnAttribution {
+    /// Restores provenance without changing the thread's execution settings.
+    pub fn start_options(&self) -> TurnStartOptions {
+        TurnStartOptions {
+            turn_trigger: self.turn_trigger.clone(),
+            parent_turn_id: self.parent_turn_id.clone(),
+            initiating_agent_path: self.initiating_agent_path.clone(),
+            root_turn_id: self.root_turn_id.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 /// Request to resume sampling for an interrupted regular turn.
@@ -61,6 +163,8 @@ pub struct RecoverTurnRequest {
     pub turn_id: String,
     pub thread_settings: ThreadSettingsOverrides,
     pub trace: Option<W3cTraceContext>,
+    /// Cache lifetime to reapply when resuming this turn.
+    pub prompt_cache_ttl: Option<PromptCacheTtl>,
     /// Program recorded in the interrupted turn's persisted context.
     pub cyber_access_program: Option<CyberAccessProgram>,
 }
@@ -70,10 +174,12 @@ impl TurnInputRequest {
     pub fn new(input: TurnInput) -> Self {
         Self {
             input,
+            user_item_uuid: None,
+            user_input_extension_data: BTreeMap::new(),
             thread_settings: ThreadSettingsOverrides::default(),
             start: TurnStartOptions::default(),
             additional_context: BTreeMap::new(),
-            responsesapi_client_metadata: None,
+            responsesapi_client_metadata: ResponsesApiClientMetadataUpdate::default(),
             trace: None,
         }
     }
@@ -96,8 +202,8 @@ impl TurnInputRequest {
         self
     }
 
-    /// Options consulted only by start-capable submission methods when this
-    /// request starts a turn.
+    /// Options for new turns, also consulted for input provenance and active-turn
+    /// compatibility when steering.
     pub fn on_start(mut self, start: TurnStartOptions) -> Self {
         self.start = start;
         self
@@ -112,12 +218,21 @@ impl TurnInputRequest {
         self
     }
 
-    /// Responses metadata attached whether this request starts or steers.
+    /// Replaces Responses client metadata whether this request starts or steers.
     pub fn with_responses_metadata(
         mut self,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
     ) -> Self {
-        self.responsesapi_client_metadata = responsesapi_client_metadata;
+        self.responsesapi_client_metadata.replacement = responsesapi_client_metadata;
+        self
+    }
+
+    /// Adds or overwrites Responses client metadata entries after any replacement.
+    pub fn with_responses_metadata_patch(
+        mut self,
+        responsesapi_client_metadata_patch: Option<HashMap<String, String>>,
+    ) -> Self {
+        self.responsesapi_client_metadata.patch = responsesapi_client_metadata_patch;
         self
     }
 
@@ -142,7 +257,7 @@ pub enum TurnInputMode {
     Steer { expected_turn_id: String },
 }
 
-/// Requested cyber treatment for a ChatGPT-authenticated Codex turn.
+/// Requested cyber treatment for an OpenAI model turn.
 /// Authorization and model-tier restrictions remain server-owned.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
@@ -153,6 +268,15 @@ pub enum CyberAccessProgram {
     DaybreakRed,
 }
 
+/// Minimum lifetime requested for new prompt cache entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+    #[serde(rename = "12h")]
+    TwelveHours,
+}
+
 /// Options for the new-turn branch of a submission.
 ///
 /// Core only records these options when input starts a turn. When input steers,
@@ -161,16 +285,23 @@ pub enum CyberAccessProgram {
 /// child input, Core also compares root lineage to detect ambiguity.
 #[derive(Clone, Debug, Default)]
 pub struct TurnStartOptions {
-    /// Source classification for the caller that starts a new turn.
-    /// Ignored when the submitted input steers an active turn.
+    /// Source classification for this request. Recorded on new turns and captured
+    /// as input provenance when steering, without changing the active turn's trigger.
     pub turn_trigger: Option<String>,
     /// Structured-output schema for a new turn. When steering, Core rejects
     /// the input if the active turn uses a different schema.
     pub final_output_json_schema: Option<Value>,
+    /// Direct-only tool namespaces for a new turn. Omission inherits the thread's
+    /// configuration. An empty list clears it for this turn. Ignored when steering.
+    pub direct_only_tool_namespaces: Option<Vec<String>>,
     /// Service tier for a new turn, without changing the thread's preference.
     pub service_tier: Option<String>,
+    /// Lifetime requested for new Responses prompt cache entries during this turn.
+    pub prompt_cache_ttl: Option<PromptCacheTtl>,
     /// Parent turn lineage recorded if this request starts a new turn.
     pub parent_turn_id: Option<String>,
+    /// Agent owning the parent turn, retained when recovering delegated work.
+    pub initiating_agent_path: Option<AgentPath>,
     /// Causal root turn lineage recorded if this request starts a new turn.
     pub root_turn_id: Option<String>,
     /// Explicit cyber treatment for this turn. Omission preserves the backend's
@@ -182,16 +313,26 @@ pub struct TurnStartOptions {
 ///
 /// Started and Steered only mean Core accepted the input for turn processing. They
 /// do not wait for user-prompt hooks, updating the in-memory model context,
-/// rollout persistence, or sampling.
+/// rollout persistence, or sampling. The returned root is the accepted turn's
+/// resolved causal root, including when steering preserves an existing turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TurnInputSubmission {
+    /// Core accepted an agent follow-up through native message delivery. The
+    /// receiving turn may still be running or finishing, so no turn ID is implied.
+    Accepted,
     /// Core started a turn. Persistent thread settings and start options were applied.
-    Started { turn_id: String },
+    Started {
+        turn_id: String,
+        root_turn_id: String,
+    },
     /// Core steered an active turn. Persistent thread settings were applied for
     /// subsequent turns. No new turn was created, so lineage metadata was not
     /// recorded. If the request included `final_output_json_schema`, the active
     /// turn already used the same schema.
-    Steered { turn_id: String },
+    Steered {
+        turn_id: String,
+        root_turn_id: String,
+    },
     /// Core rejected the input without applying settings or start options.
     NotSubmitted { reason: NotSubmittedReason },
 }
@@ -200,7 +341,10 @@ pub enum TurnInputSubmission {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartIfIdleSubmission {
     /// Core started a turn. Persistent thread settings and start options were applied.
-    Started { turn_id: String },
+    Started {
+        turn_id: String,
+        root_turn_id: String,
+    },
     /// Core rejected the input without applying settings or start options.
     NotSubmitted { reason: NotSubmittedReason },
 }

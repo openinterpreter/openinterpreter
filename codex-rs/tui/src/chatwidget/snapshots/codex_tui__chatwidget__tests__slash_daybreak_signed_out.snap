@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 2194
+expression: "lines_to_single_string(&cells[0])"
+---
+■ Daybreak requires the OpenAI provider with either ChatGPT sign-in or an API key with Daybreak support enabled.

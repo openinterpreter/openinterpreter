@@ -1,5 +1,7 @@
 use super::*;
 use crate::model::ThreadGoalRow;
+use crate::sqlite::SqlitePoolWriteExt;
+use crate::sqlite::SqliteWriteQueryExt;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -108,6 +110,10 @@ WHERE thread_id = ?
     /// idempotency key: a response-loss retry returns the recorded result, and
     /// a different request with the same key conflicts without replacing a
     /// Goal a second time.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "durable creation requires the complete caller-supplied identity, predecessor CAS, and document metadata"
+    )]
     pub async fn create_thread_goal_document(
         &self,
         thread_id: ThreadId,
@@ -323,6 +329,10 @@ ON CONFLICT(thread_id) DO UPDATE SET
     /// creation receipt records a null predecessor so a cold response-loss
     /// replay returns the original identity without treating an unavailable
     /// read as absence.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "durable initial creation keeps the explicit idempotency key and document metadata at the storage boundary"
+    )]
     pub async fn create_initial_thread_goal_document(
         &self,
         thread_id: ThreadId,
@@ -460,6 +470,10 @@ INSERT INTO thread_goal_creation_receipts (
 
     /// Atomically updates a managed Goal pointer and its document metadata
     /// under the complete supervisor-owned identity/revision condition.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the supervisor's complete identity and revision CAS must remain explicit at this storage boundary"
+    )]
     pub async fn update_thread_goal_document_cas(
         &self,
         thread_id: ThreadId,
@@ -538,7 +552,7 @@ ON CONFLICT(thread_id) DO UPDATE SET
         &self,
         goal: &crate::ThreadGoal,
     ) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_immediate().await?;
         sqlx::query(
             r#"
 INSERT INTO thread_goals (
@@ -622,7 +636,7 @@ SELECT EXISTS(
     ) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?")
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute_with_busy_retry(self.pool.as_ref())
             .await?;
 
         Ok(())
@@ -685,7 +699,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one_write(self.pool.as_ref())
         .await?;
 
         thread_goal_from_row(&row)
@@ -749,7 +763,7 @@ RETURNING
         .bind(token_budget)
         .bind(now_ms)
         .bind(now_ms)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional_write(self.pool.as_ref())
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
@@ -804,7 +818,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (Some(status), None) => {
@@ -838,7 +852,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (None, Some(token_budget)) => {
@@ -868,7 +882,7 @@ WHERE thread_id = ?
                 .bind(thread_id.to_string())
                 .bind(expected_goal_id)
                 .bind(expected_goal_id)
-                .execute(self.pool.as_ref())
+                .execute_with_busy_retry(self.pool.as_ref())
                 .await?
             }
             (None, None) => {
@@ -890,7 +904,7 @@ WHERE thread_id = ?
                     .bind(thread_id.to_string())
                     .bind(expected_goal_id)
                     .bind(expected_goal_id)
-                    .execute(self.pool.as_ref())
+                    .execute_with_busy_retry(self.pool.as_ref())
                     .await?
                 } else {
                     let goal = self.get_thread_goal(thread_id).await?;
@@ -980,14 +994,14 @@ WHERE thread_id = ?
         .bind(objective_changed)
         .bind(objective)
         .bind(objective_changed)
-        .bind(status.map(|status| status.as_str()))
-        .bind(status.map(|status| status.as_str()))
-        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
         .bind(token_budget_changed)
         .bind(new_token_budget)
         .bind(token_budget_changed)
         .bind(new_token_budget)
-        .bind(status.map(|status| status.as_str()))
+        .bind(status.map(crate::ThreadGoalStatus::as_str))
         .bind(token_budget_changed)
         .bind(new_token_budget)
         .bind(new_token_budget)
@@ -1091,7 +1105,7 @@ WHERE thread_id = ?
         .bind(now_ms)
         .bind(thread_id.to_string())
         .bind(status.as_str())
-        .execute(self.pool.as_ref())
+        .execute_with_busy_retry(self.pool.as_ref())
         .await?;
 
         if result.rows_affected() == 0 {
@@ -1243,7 +1257,10 @@ RETURNING
             "#,
         );
 
-        let row = builder.build().fetch_optional(self.pool.as_ref()).await?;
+        let row = builder
+            .build()
+            .fetch_optional_write(self.pool.as_ref())
+            .await?;
 
         let Some(row) = row else {
             return Ok(GoalAccountingOutcome::Unchanged(
@@ -1326,47 +1343,19 @@ fn thread_goal_from_creation_row_optional(
     let Some(goal_id) = goal_id else {
         return Ok(None);
     };
-    Ok(Some(thread_goal_from_row_fields(
-        row.try_get(column("thread_id").as_str())?,
+    Ok(Some(crate::ThreadGoal::try_from(ThreadGoalRow {
+        thread_id: row.try_get(column("thread_id").as_str())?,
         goal_id,
-        row.try_get(column("objective").as_str())?,
-        row.try_get(column("status").as_str())?,
-        row.try_get(column("token_budget").as_str())?,
-        row.try_get(column("tokens_used").as_str())?,
-        row.try_get(column("time_used_seconds").as_str())?,
-        row.try_get(column("mission_revision").as_str())?,
-        row.try_get(column("lifecycle_revision").as_str())?,
-        row.try_get(column("created_at_ms").as_str())?,
-        row.try_get(column("updated_at_ms").as_str())?,
-    )?))
-}
-
-fn thread_goal_from_row_fields(
-    thread_id: String,
-    goal_id: String,
-    objective: String,
-    status: String,
-    token_budget: Option<i64>,
-    tokens_used: i64,
-    time_used_seconds: i64,
-    mission_revision: i64,
-    lifecycle_revision: i64,
-    created_at_ms: i64,
-    updated_at_ms: i64,
-) -> anyhow::Result<crate::ThreadGoal> {
-    crate::ThreadGoal::try_from(ThreadGoalRow {
-        thread_id,
-        goal_id,
-        objective,
-        status,
-        token_budget,
-        tokens_used,
-        time_used_seconds,
-        mission_revision,
-        lifecycle_revision,
-        created_at_ms,
-        updated_at_ms,
-    })
+        objective: row.try_get(column("objective").as_str())?,
+        status: row.try_get(column("status").as_str())?,
+        token_budget: row.try_get(column("token_budget").as_str())?,
+        tokens_used: row.try_get(column("tokens_used").as_str())?,
+        time_used_seconds: row.try_get(column("time_used_seconds").as_str())?,
+        mission_revision: row.try_get(column("mission_revision").as_str())?,
+        lifecycle_revision: row.try_get(column("lifecycle_revision").as_str())?,
+        created_at_ms: row.try_get(column("created_at_ms").as_str())?,
+        updated_at_ms: row.try_get(column("updated_at_ms").as_str())?,
+    })?))
 }
 
 fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {

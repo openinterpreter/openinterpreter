@@ -23,6 +23,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use http::HeaderMap;
@@ -36,6 +37,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::process::Command;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
@@ -439,8 +441,9 @@ async fn amazon_bedrock_aws_auth_refresh_resigns() -> anyhow::Result<()> {
         let aws_executable = fixture
             .path()
             .join(format!("aws{}", std::env::consts::EXE_SUFFIX));
-        std::fs::hard_link(&test_executable, &aws_executable)
-            .or_else(|_| std::fs::copy(&test_executable, &aws_executable).map(|_| ()))?;
+        std::fs::hard_link(&test_executable, &aws_executable).or_else(|_| {
+            codex_utils_cargo_bin::copy_executable(&test_executable, &aws_executable)
+        })?;
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = std::env::split_paths(&inherited_path).collect::<Vec<_>>();
         paths.insert(/*index*/ 0, fixture.path().to_path_buf());
@@ -763,14 +766,7 @@ async fn external_auth_401_retry_uses_refreshed_chatgpt_headers() -> anyhow::Res
 
     let mut builder = test_codex().with_auth(CodexAuth::from_api_key("seed"));
     let test = builder.build_with_auto_env(&server).await?;
-    let external_auth = Arc::new(ScriptedExternalAuth {
-        current: Mutex::new(external_chatgpt_auth(INITIAL_ACCESS_TOKEN)?),
-        refreshed: external_chatgpt_auth(REFRESHED_ACCESS_TOKEN)?,
-    });
-    test.thread_manager
-        .auth_manager()
-        .set_external_auth(external_auth.clone())
-        .await?;
+    install_scripted_external_auth(&test).await?;
 
     test.submit_turn("hello").await?;
 
@@ -794,4 +790,85 @@ async fn external_auth_401_retry_uses_refreshed_chatgpt_headers() -> anyhow::Res
         ]
     );
     Ok(())
+}
+
+async fn install_scripted_external_auth(
+    test: &core_test_support::test_codex::TestCodex,
+) -> anyhow::Result<()> {
+    let external_auth = Arc::new(ScriptedExternalAuth {
+        current: Mutex::new(external_chatgpt_auth(INITIAL_ACCESS_TOKEN)?),
+        refreshed: external_chatgpt_auth(REFRESHED_ACCESS_TOKEN)?,
+    });
+    test.thread_manager
+        .auth_manager()
+        .set_external_auth(external_auth)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_gateway_retry_then_recovers_refreshable_primary_auth() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let source = tempfile::TempDir::new()?;
+    let token_path = source.path().join("gateway-token");
+    std::fs::write(&token_path, "gateway-token")?;
+    let test = command_gateway(&server, &token_path).await?;
+    install_scripted_external_auth(&test).await?;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("cookie", "gateway=gateway-token"))
+        .and(header(
+            "authorization",
+            format!("Bearer {INITIAL_ACCESS_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("cookie", "gateway=gateway-token"))
+        .and(header(
+            "authorization",
+            format!("Bearer {REFRESHED_ACCESS_TOKEN}"),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![ev_completed("resp-1")])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    test.submit_turn("hello").await?;
+    server.verify().await;
+    Ok(())
+}
+
+/// Exercise the same command-backed cookie delivery as the gateway auth suite,
+/// while supplying refreshable primary credentials in this suite.
+async fn command_gateway(server: &MockServer, token_path: &Path) -> anyhow::Result<TestCodex> {
+    let path_arg = serde_json::to_string(token_path)?;
+    let command = if cfg!(windows) {
+        format!("command = 'cmd.exe'\nargs = ['/D', '/C', 'type', {path_arg}]")
+    } else {
+        format!("command = 'cat'\nargs = [{path_arg}]")
+    };
+    let provider: ModelProviderInfo = toml::from_str(&format!(
+        r#"
+name = "gateway"
+base_url = "{base}/v1"
+requires_openai_auth = true
+[gateway_oauth]
+delivery = {{ kind = 'cookie', name = 'gateway' }}
+[gateway_oauth.credential_export]
+{command}
+"#,
+        base = server.uri(),
+    ))?;
+    test_codex()
+        .with_auth(CodexAuth::from_api_key("primary"))
+        .with_config(move |config| config.model_provider = provider)
+        .build_with_auto_env(server)
+        .await
 }

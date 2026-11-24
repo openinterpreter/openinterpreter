@@ -9,6 +9,7 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 codex-file-system = { workspace = true }
@@ -25,7 +26,7 @@ serde = { workspace = true, features = ["derive"] }
 similar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "process", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
 ts-rs = { workspace = true, features = [
     "uuid-impl",
     "serde-json-impl",
@@ -34,6 +35,7 @@ ts-rs = { workspace = true, features = [
 walkdir = { workspace = true }
 
 [dev-dependencies]
+codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
 
 [lib]

@@ -1,0 +1,23 @@
+---
+source: tui/src/config_panel/config_panel_tests.rs
+expression: "render(&panel, 50)"
+---
+
+  Configuration
+  Failed to save status line settings:
+  permission denied while writing config.toml
+
+   Appearance   Notifications   Input          ›
+
+› Theme                   Automatic ›
+  Effects                 Configure ›
+  Tips                    [ ] Off
+  Status line colors      [ ] Off
+  Status line display     Configure ›
+  Terminal title display  Configure ›
+
+  Choose a syntax color palette with a live
+  preview
+
+  left/right group · / search · enter open · esc
+  clear search/close

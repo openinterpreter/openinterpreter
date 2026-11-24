@@ -1,8 +1,4 @@
 use std::io;
-use std::sync::Mutex;
-use std::sync::PoisonError;
-use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -13,13 +9,10 @@ use codex_config::types::AuthKeyringBackendKind;
 use codex_exec_server::RouteAwareHttpClient;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
-use codex_keyring_store::CredentialStoreError;
 use codex_keyring_store::tests::MockKeyringStore;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
-use pretty_assertions::assert_ne;
 use serde_json::json;
-use tokio::sync::oneshot;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -29,7 +22,12 @@ use wiremock::matchers::path;
 use super::*;
 use crate::EmaAuthFailure;
 use crate::WrappedOAuthTokenResponse;
+use crate::oauth::RefreshCredentialLock;
 use crate::oauth::ResolvedOAuthCredentialStore;
+use crate::oauth::StoredOAuthCredentialSnapshot;
+use crate::oauth::test_support::GatedKeyringStore;
+use crate::oauth::test_support::REREAD_TEST_TIMEOUT;
+use crate::oauth::test_support::ReadOutcome;
 use crate::oauth::test_support::TempCodexHome;
 
 fn credentials(issuer: &str, subject: &str, expires_at: u64) -> StoredOAuthTokens {
@@ -64,9 +62,13 @@ fn request<'a>(
     credentials: &'a StoredOAuthCredentialSnapshot,
 ) -> EmaIdpIdentityRequest<'a> {
     EmaIdpIdentityRequest {
+        client_secret: None,
+        token_endpoint_auth_method: None,
         issuer,
         client_id: "idp-client",
-        credentials,
+        credentials: EmaCredentialLease {
+            credentials: credentials.clone(),
+        },
         http_client: Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
             OutboundProxyPolicy::ReqwestDefault,
         ))),
@@ -142,9 +144,15 @@ async fn enterprise_discovery_shares_idp_checks_but_keeps_login_endpoint_policy(
             /*has_configured_headers*/ false,
             StreamableHttpRedirectMode::Legacy,
         )?);
-        let shared = resolve_ema_idp_authorization_manager(&issuer, client.clone()).await;
+        let shared = resolve_ema_idp_authorization_manager(
+            &issuer,
+            client.clone(),
+            /*client_secret*/ None,
+            /*token_endpoint_auth_method*/ None,
+        )
+        .await;
         let login = crate::enterprise_oauth_login::resolve_enterprise_authorization_manager(
-            &issuer, client,
+            &issuer, client, /*client_secret*/ None, /*token_endpoint_auth_method*/ None,
         )
         .await;
         assert_eq!(
@@ -168,72 +176,11 @@ async fn enterprise_discovery_shares_idp_checks_but_keeps_login_endpoint_policy(
     Ok(())
 }
 
-const REREAD_TEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
-const REREAD_PANIC_SENTINEL: &str = "credential-panic-payload-sentinel";
-
-#[derive(Clone, Copy, Debug)]
-enum ReadOutcome {
-    Stored,
-    BackendError,
-    Panic,
-}
-
-#[derive(Clone, Debug)]
-struct GatedKeyringStore {
-    inner: MockKeyringStore,
-    executor_thread: thread::ThreadId,
-    entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    release: Arc<Mutex<mpsc::Receiver<ReadOutcome>>>,
-}
-
-impl KeyringStore for GatedKeyringStore {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
-        // Fail before blocking if a regression puts this read on the current-thread executor.
-        assert_ne!(thread::current().id(), self.executor_thread);
-        if let Some(entered) = self
-            .entered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            let _ = entered.send(());
-        }
-        let outcome = match self
-            .release
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .recv_timeout(REREAD_TEST_TIMEOUT)
-        {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvTimeoutError::Disconnected) => ReadOutcome::Stored,
-            Err(mpsc::RecvTimeoutError::Timeout) => panic!("credential reread gate timed out"),
-        };
-        match outcome {
-            ReadOutcome::Stored => self.inner.load(service, account),
-            ReadOutcome::BackendError => Err(CredentialStoreError::new(
-                keyring::Error::PlatformFailure(Box::new(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "credential backend unavailable",
-                ))),
-            )),
-            ReadOutcome::Panic => panic!("{REREAD_PANIC_SENTINEL}"),
-        }
-    }
-
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
-        self.inner.save(service, account, value)
-    }
-
-    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-        self.inner.delete(service, account)
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn refresh_subject_reread_is_cancellable_and_releases_guard_on_failure() -> Result<()> {
     let _home = TempCodexHome::new();
     let (_server, issuer) = discovery().await;
-    let store = ResolvedOAuthCredentialStore::Keyring(AuthKeyringBackendKind::Direct);
+    let store = ResolvedOAuthCredentialStore::keyring(AuthKeyringBackendKind::Direct);
     let stored = credentials(&issuer, "user", /*expires_at*/ 0);
     let snapshot = StoredOAuthCredentialSnapshot::new(stored.clone(), store);
     for outcome in [
@@ -243,15 +190,7 @@ async fn refresh_subject_reread_is_cancellable_and_releases_guard_on_failure() -
     ] {
         let inner = MockKeyringStore::default();
         store.save(&inner, &stored.server_name, &stored)?;
-        let (entered_tx, entered_rx) = oneshot::channel();
-        // Dropping the sole sender releases the worker on any early return or panic.
-        let (release_tx, release_rx) = mpsc::channel();
-        let keyring = GatedKeyringStore {
-            inner,
-            executor_thread: thread::current().id(),
-            entered: Arc::new(Mutex::new(Some(entered_tx))),
-            release: Arc::new(Mutex::new(release_rx)),
-        };
+        let (keyring, entered_rx, release_tx) = GatedKeyringStore::new(inner);
         let request = request(&issuer, &snapshot);
         crate::oauth::test_support::warm_http_client(request.http_client.as_ref()).await?;
         let mut identity = Box::pin(resolve_ema_idp_identity_in(request, &keyring));
@@ -288,14 +227,15 @@ async fn refresh_subject_reread_is_cancellable_and_releases_guard_on_failure() -
                     "enterprise IdP credential reread task failed"
                 );
             } else {
-                assert!(error.to_string().contains("refusing file fallback"));
-                // The store's transparent wrapper exposes a platform error's source.
-                assert!(error.chain().any(|cause| {
-                    matches!(
-                        cause.downcast_ref::<io::Error>(),
-                        Some(error) if error.kind() == io::ErrorKind::PermissionDenied
-                    )
-                }));
+                assert_eq!(
+                    format!("{error:#}"),
+                    "failed to read enterprise IdP credentials from keyring"
+                );
+                assert!(
+                    !error
+                        .chain()
+                        .any(<dyn std::error::Error + 'static>::is::<io::Error>)
+                );
             }
         }
         // Drain the detached read before TempCodexHome changes the process environment.
@@ -312,7 +252,7 @@ async fn refresh_subject_reread_is_cancellable_and_releases_guard_on_failure() -
 async fn refresh_subject_rereads_pinned_credentials_after_id_token_expiry() -> Result<()> {
     let _home = TempCodexHome::new();
     let (_server, issuer) = discovery().await;
-    let store = ResolvedOAuthCredentialStore::Keyring(AuthKeyringBackendKind::Direct);
+    let store = ResolvedOAuthCredentialStore::keyring(AuthKeyringBackendKind::Direct);
     let stored = credentials(&issuer, "user", /*expires_at*/ 0);
     let snapshot = StoredOAuthCredentialSnapshot::new(stored.clone(), store);
     let keyring = MockKeyringStore::default();
@@ -323,15 +263,6 @@ async fn refresh_subject_rereads_pinned_credentials_after_id_token_expiry() -> R
         (&identity.token_endpoint, identity.refresh_token.as_str()),
         (&format!("{issuer}/token"), "stored-refresh")
     );
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(/*millis*/ 50),
-            RefreshCredentialLock::acquire_for_server(&stored.server_name, &issuer),
-        )
-        .await
-        .is_err()
-    );
-    drop(identity);
     let _released = RefreshCredentialLock::acquire_for_server(&stored.server_name, &issuer).await?;
     Ok(())
 }
@@ -341,7 +272,7 @@ async fn refresh_subject_rejects_removed_replaced_or_missing_credentials() -> Re
     let _home = TempCodexHome::new();
     let (server, issuer) = discovery().await;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let store = ResolvedOAuthCredentialStore::Keyring(AuthKeyringBackendKind::Direct);
+    let store = ResolvedOAuthCredentialStore::keyring(AuthKeyringBackendKind::Direct);
     let original = credentials(&issuer, "user", /*expires_at*/ 0);
     for change in [
         "deleted",
@@ -357,7 +288,7 @@ async fn refresh_subject_rejects_removed_replaced_or_missing_credentials() -> Re
         let snapshot = StoredOAuthCredentialSnapshot::new(
             original.clone(),
             if change == "file" {
-                ResolvedOAuthCredentialStore::File
+                ResolvedOAuthCredentialStore::file()
             } else {
                 store
             },

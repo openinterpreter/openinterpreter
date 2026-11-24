@@ -18,7 +18,7 @@ pub(crate) struct PreparedUnifiedExecSpawn {
 /// escalation server alive for the session and performs post-spawn cleanup.
 /// Returns `Ok(None)` when unified exec should use its normal spawn path.
 pub(crate) async fn maybe_prepare_unified_exec(
-    req: &UnifiedExecRequest,
+    req: &UnifiedExecRequest<'_>,
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx,
     exec_request: ExecRequest,
@@ -60,7 +60,7 @@ mod imp {
     }
 
     pub(super) async fn maybe_prepare_unified_exec(
-        req: &UnifiedExecRequest,
+        req: &UnifiedExecRequest<'_>,
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
         exec_request: ExecRequest,
@@ -93,7 +93,7 @@ mod imp {
     use super::*;
 
     pub(super) async fn maybe_prepare_unified_exec(
-        req: &UnifiedExecRequest,
+        req: &UnifiedExecRequest<'_>,
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
         exec_request: ExecRequest,

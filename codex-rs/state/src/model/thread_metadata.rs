@@ -4,9 +4,6 @@ use chrono::Utc;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use serde::Deserialize;
@@ -36,13 +33,17 @@ pub enum SortDirection {
     Desc,
 }
 
-/// Spawn-graph relationship used to filter thread listings.
+/// Thread relationship used to filter thread listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadRelationFilter {
+    /// Include attached threads alongside ordinary threads for search.
+    IncludeAttached,
     /// Return only threads whose immediate parent is the given thread.
     DirectChildrenOf(ThreadId),
     /// Return every thread transitively descended from the given thread.
     DescendantsOf(ThreadId),
+    /// Return only saved threads attached to this parent.
+    AttachedThreadsOf(ThreadId),
 }
 
 /// A pagination anchor used for keyset pagination.
@@ -123,8 +124,14 @@ pub struct ExtractionOutcome {
 /// Canonical persisted thread metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMetadata {
+    /// The parent of an attached thread, derived from canonical rollout metadata.
+    pub attached_thread_parent_id: Option<ThreadId>,
     /// Originator recorded at creation, if available.
     pub originator: Option<String>,
+    /// ChatGPT user that created the thread, if known.
+    pub creator_user_id: Option<String>,
+    /// ChatGPT account at creation, if known.
+    pub creator_account_id: Option<String>,
     /// The thread identifier.
     pub id: ThreadId,
     /// The absolute rollout path on disk.
@@ -163,7 +170,7 @@ pub struct ThreadMetadata {
     pub name: Option<String>,
     /// Best available user-facing preview for discovery and list display.
     pub preview: Option<String>,
-    /// The sandbox policy (stringified enum).
+    /// Serialized permission profile or legacy sandbox value.
     pub sandbox_policy: String,
     /// The approval mode (stringified enum).
     pub approval_mode: String,
@@ -189,144 +196,6 @@ pub struct ThreadMetadata {
     pub git_branch: Option<String>,
     /// The git origin URL, if known.
     pub git_origin_url: Option<SanitizedGitUrl>,
-}
-
-/// Builder data required to construct [`ThreadMetadata`] without parsing filenames.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ThreadMetadataBuilder {
-    /// Originator recorded at creation, if available.
-    pub originator: Option<String>,
-    /// The thread identifier.
-    pub id: ThreadId,
-    /// The absolute rollout path on disk.
-    pub rollout_path: PathBuf,
-    /// The creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// The last update timestamp, if known.
-    pub updated_at: Option<DateTime<Utc>>,
-    /// The product recency timestamp, if known.
-    pub recency_at: Option<DateTime<Utc>>,
-    /// The session source.
-    pub source: SessionSource,
-    /// Persisted thread history contract selected when this thread was created.
-    pub history_mode: ThreadHistoryMode,
-    /// Optional analytics source classification for this thread.
-    pub thread_source: Option<ThreadSource>,
-    /// Optional random unique nickname assigned to the session.
-    pub agent_nickname: Option<String>,
-    /// Optional role (agent_role) assigned to the session.
-    pub agent_role: Option<String>,
-    /// Optional canonical agent path assigned to the session.
-    pub agent_path: Option<String>,
-    /// The model provider identifier, if known.
-    pub model_provider: Option<String>,
-    /// The working directory for the thread.
-    pub cwd: PathBuf,
-    /// Version of the CLI that created the thread.
-    pub cli_version: Option<String>,
-    /// The sandbox policy.
-    pub sandbox_policy: SandboxPolicy,
-    /// The approval mode.
-    pub approval_mode: AskForApproval,
-    /// The archive timestamp, if the thread is archived.
-    pub archived_at: Option<DateTime<Utc>>,
-    /// The git commit SHA, if known.
-    pub git_sha: Option<String>,
-    /// The git branch name, if known.
-    pub git_branch: Option<String>,
-    /// The git origin URL, if known.
-    pub git_origin_url: Option<SanitizedGitUrl>,
-}
-
-impl ThreadMetadataBuilder {
-    /// Create a new builder with required fields and sensible defaults.
-    pub fn new(
-        id: ThreadId,
-        rollout_path: PathBuf,
-        created_at: DateTime<Utc>,
-        source: SessionSource,
-    ) -> Self {
-        Self {
-            id,
-            rollout_path,
-            created_at,
-            updated_at: None,
-            recency_at: None,
-            originator: None,
-            source,
-            history_mode: ThreadHistoryMode::Legacy,
-            thread_source: None,
-            agent_nickname: None,
-            agent_role: None,
-            agent_path: None,
-            model_provider: None,
-            cwd: PathBuf::new(),
-            cli_version: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            approval_mode: AskForApproval::OnRequest,
-            archived_at: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
-        }
-    }
-
-    /// Build canonical thread metadata, filling missing values from defaults.
-    pub fn build(&self, default_provider: &str) -> ThreadMetadata {
-        let source = crate::extract::enum_to_string(&self.source);
-        let sandbox_policy = crate::extract::enum_to_string(&self.sandbox_policy);
-        let approval_mode = crate::extract::enum_to_string(&self.approval_mode);
-        let created_at = canonicalize_datetime(self.created_at);
-        let updated_at = self
-            .updated_at
-            .map(canonicalize_datetime)
-            .unwrap_or(created_at);
-        let recency_at = self
-            .recency_at
-            .map(canonicalize_datetime)
-            .unwrap_or(updated_at);
-        ThreadMetadata {
-            originator: self.originator.clone(),
-            id: self.id,
-            rollout_path: self.rollout_path.clone(),
-            created_at,
-            updated_at,
-            recency_at,
-            source,
-            history_mode: self.history_mode,
-            thread_source: self.thread_source.clone(),
-            agent_nickname: self.agent_nickname.clone(),
-            agent_role: self.agent_role.clone(),
-            agent_path: self
-                .agent_path
-                .clone()
-                .or_else(|| self.source.get_agent_path().map(Into::into)),
-            model_provider: self
-                .model_provider
-                .clone()
-                .unwrap_or_else(|| default_provider.to_string()),
-            model: None,
-            reasoning_effort: None,
-            cwd: self.cwd.clone(),
-            cli_version: self.cli_version.clone().unwrap_or_default(),
-            title: String::new(),
-            name: None,
-            preview: None,
-            sandbox_policy,
-            approval_mode,
-            tokens_used: 0,
-            first_user_message: None,
-            archived_at: self.archived_at.map(canonicalize_datetime),
-            section: None,
-            section_position: None,
-            section_entered_at: None,
-            project_id: None,
-            daybreak_enabled: None,
-            git_sha: self.git_sha.clone(),
-            git_branch: self.git_branch.clone(),
-            git_origin_url: self.git_origin_url.clone(),
-        }
-    }
 }
 
 impl ThreadMetadata {
@@ -365,7 +234,11 @@ impl ThreadMetadata {
         }
 
         let title = self.title.trim();
-        if title.is_empty() || self.first_user_message.as_deref().map(str::trim) == Some(title) {
+        if title.is_empty()
+            || self.first_user_message.as_deref().map(str::trim) == Some(title)
+            || (title == crate::GUARDIAN_THREAD_TITLE
+                && crate::extract::metadata_is_guardian_review(self))
+        {
             self.title = existing.title.clone();
         }
     }
@@ -387,6 +260,12 @@ impl ThreadMetadata {
         }
         if self.source != other.source {
             diffs.push("source");
+        }
+        if self.creator_user_id != other.creator_user_id {
+            diffs.push("creator_user_id");
+        }
+        if self.creator_account_id != other.creator_account_id {
+            diffs.push("creator_account_id");
         }
         if self.originator != other.originator {
             diffs.push("originator");
@@ -467,13 +346,16 @@ impl ThreadMetadata {
     }
 }
 
-fn canonicalize_datetime(dt: DateTime<Utc>) -> DateTime<Utc> {
+pub(super) fn canonicalize_datetime(dt: DateTime<Utc>) -> DateTime<Utc> {
     epoch_millis_to_datetime(datetime_to_epoch_millis(dt)).unwrap_or(dt)
 }
 
 #[derive(Debug)]
 pub(crate) struct ThreadRow {
+    attached_thread_parent_id: Option<String>,
     originator: Option<String>,
+    creator_user_id: Option<String>,
+    creator_account_id: Option<String>,
     id: String,
     rollout_path: String,
     created_at: i64,
@@ -513,7 +395,10 @@ pub(crate) struct ThreadRow {
 impl ThreadRow {
     pub(crate) fn try_from_row(row: &SqliteRow) -> Result<Self> {
         Ok(Self {
+            attached_thread_parent_id: row.try_get("attached_thread_parent_id")?,
             originator: row.try_get("originator")?,
+            creator_user_id: row.try_get("creator_user_id")?,
+            creator_account_id: row.try_get("creator_account_id")?,
             id: row.try_get("id")?,
             rollout_path: row.try_get("rollout_path")?,
             created_at: row.try_get("created_at")?,
@@ -557,7 +442,10 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
 
     fn try_from(row: ThreadRow) -> std::result::Result<Self, Self::Error> {
         let ThreadRow {
+            attached_thread_parent_id,
             originator,
+            creator_user_id,
+            creator_account_id,
             id,
             rollout_path,
             created_at,
@@ -616,7 +504,12 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
         };
         Ok(Self {
             id: ThreadId::try_from(id)?,
+            attached_thread_parent_id: attached_thread_parent_id
+                .map(ThreadId::try_from)
+                .transpose()?,
             originator,
+            creator_user_id,
+            creator_account_id,
             rollout_path: PathBuf::from(rollout_path),
             created_at: epoch_millis_to_datetime(created_at)?,
             updated_at: epoch_millis_to_datetime(updated_at)?,
@@ -656,11 +549,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
     }
 }
 
-pub(crate) fn anchor_from_item(
-    item: &ThreadMetadata,
-    sort_key: SortKey,
-    include_thread_id_tiebreaker: bool,
-) -> Option<Anchor> {
+pub(crate) fn anchor_from_item(item: &ThreadMetadata, sort_key: SortKey) -> Option<Anchor> {
     let ts = match sort_key {
         SortKey::CreatedAt => item.created_at,
         SortKey::UpdatedAt => item.updated_at,
@@ -669,9 +558,7 @@ pub(crate) fn anchor_from_item(
     };
     Some(Anchor {
         ts,
-        id: (include_thread_id_tiebreaker
-            || matches!(sort_key, SortKey::RecencyAt | SortKey::SectionPosition))
-        .then_some(item.id),
+        id: Some(item.id),
     })
 }
 
@@ -727,7 +614,10 @@ mod tests {
 
     fn thread_row(reasoning_effort: Option<&str>) -> ThreadRow {
         ThreadRow {
+            attached_thread_parent_id: None,
             originator: None,
+            creator_user_id: None,
+            creator_account_id: None,
             id: "00000000-0000-0000-0000-000000000123".to_string(),
             rollout_path: "/tmp/rollout-123.jsonl".to_string(),
             created_at: 1_700_000_000,
@@ -767,7 +657,10 @@ mod tests {
 
     fn expected_thread_metadata(reasoning_effort: Option<ReasoningEffort>) -> ThreadMetadata {
         ThreadMetadata {
+            attached_thread_parent_id: None,
             originator: None,
+            creator_user_id: None,
+            creator_account_id: None,
             id: ThreadId::from_string("00000000-0000-0000-0000-000000000123")
                 .expect("valid thread id"),
             rollout_path: PathBuf::from("/tmp/rollout-123.jsonl"),

@@ -5,6 +5,7 @@ use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerEnvVar;
 use codex_config::types::McpServerToolConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_config::types::McpStartupReadiness;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use toml_edit::Array as TomlArray;
@@ -115,8 +116,15 @@ fn serialize_mcp_server_table(config: &McpServerConfig) -> anyhow::Result<TomlTa
     if config.required {
         entry["required"] = value(true);
     }
+    match config.startup_readiness {
+        McpStartupReadiness::Connection => {}
+        McpStartupReadiness::Catalog => entry["startup_readiness"] = value("catalog"),
+    }
     if config.supports_parallel_tool_calls {
         entry["supports_parallel_tool_calls"] = value(true);
+    }
+    if let Some(budget) = config.tool_input_schema_max_bytes {
+        entry["tool_input_schema_max_bytes"] = value(i64::try_from(budget.get())?);
     }
     if let Some(omit_tools_from) = &config.omit_tools_from {
         entry["omit_tools_from"] = array_from_iter(omit_tools_from.iter().map(ToString::to_string));
@@ -157,6 +165,12 @@ fn serialize_mcp_server_table(config: &McpServerConfig) -> anyhow::Result<TomlTa
             && !client_id.is_empty()
         {
             oauth_table["client_id"] = value(client_id.clone());
+        }
+        if let Some(client_secret) = &oauth.client_secret {
+            oauth_table["client_secret"] = value(client_secret.as_str());
+        }
+        if let Some(method) = oauth.token_endpoint_auth_method {
+            oauth_table["token_endpoint_auth_method"] = value(method.as_str());
         }
         if let Some(callback_url) = &oauth.callback_url {
             oauth_table["callback_url"] = value(callback_url.clone());

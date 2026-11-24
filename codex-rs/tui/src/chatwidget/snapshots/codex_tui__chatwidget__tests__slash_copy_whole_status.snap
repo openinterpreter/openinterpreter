@@ -4,8 +4,8 @@ expression: "whole_status.replace(&directory,\n\"[[workspace]]\").replace(crate:
 ---
 >_ OpenAI Codex (vVERSION)
 
-Visit https://chatgpt.com/codex/settings/usage for up-to-date
-information on rate limits and credits
+  Visit https://chatgpt.com/settings/usage for up-to-date
+  information on rate limits and credits
 
  Model:                GPT-5.5 (reasoning medium, summaries auto)
  Model provider:       openai
@@ -16,5 +16,5 @@ information on rate limits and credits
  Collaboration mode:   Default
  Session:              00000000-0000-0000-0000-000000000123
 
- Token usage:          0 total  (0 input + 0 output)
- Limits:               data not available yet
+  Token usage:         0 total  (0 input + 0 output)
+  Limits:              data not available yet

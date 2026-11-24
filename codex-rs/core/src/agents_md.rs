@@ -30,6 +30,8 @@ use codex_exec_server::ReadFileOptions;
 use codex_extension_api::Instructions;
 use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::FindUpErrorPolicy;
+use codex_file_system::MAX_METADATA_BATCH_BYTES;
+use codex_file_system::MAX_METADATA_BATCH_PROBES;
 use codex_file_system::find_nearest_ancestor_with_markers;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
@@ -48,30 +50,36 @@ pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
 /// concatenated with the following separator.
 const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 
+const PROJECT_DOC_BUDGET_GUIDANCE: &str = "Trim your project instructions to fit the budget. If you need to keep them all, increase `project_doc_max_bytes`.";
+
 // Metadata probes are cheap and the exec-server transport already bounds total in-flight calls.
 // This covers typical project hierarchies in one remote round trip without monopolizing that
 // transport when independent startup discovery runs concurrently.
 const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 
-/// Loads project AGENTS.md content and combines it with host-provided user
-/// instructions.
+/// Loads repository instructions across the selected environments.
 pub(crate) async fn load_project_instructions(
     config: &Config,
-    user_instructions: Option<Instructions>,
     environments: &TurnEnvironmentSnapshot,
-) -> io::Result<Option<LoadedAgentsMd>> {
-    let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
-    if config.active_project.is_untrusted() {
-        return Ok((!loaded.is_empty()).then_some(loaded));
+    warnings: &mut Vec<String>,
+) -> io::Result<LoadedAgentsMd> {
+    let mut loaded = LoadedAgentsMd::default();
+    if config.active_project.is_untrusted() || config.project_doc_max_bytes == 0 {
+        return Ok(loaded);
     }
 
     let mut remaining = config.project_doc_max_bytes;
     for turn_environment in environments.turn_environments() {
         if remaining == 0 {
+            warnings.push(format!(
+                "The {}-byte project instruction budget was exhausted before checking environment `{}` or any later environments. {PROJECT_DOC_BUDGET_GUIDANCE}",
+                config.project_doc_max_bytes,
+                turn_environment.selection.environment_id
+            ));
             break;
         }
 
-        let filesystem = turn_environment.environment.get_filesystem();
+        let filesystem = turn_environment.environment().get_filesystem();
         let sandbox = (!turn_environment
             .permission_profile()
             .file_system_sandbox_policy()
@@ -84,6 +92,7 @@ pub(crate) async fn load_project_instructions(
             turn_environment.cwd(),
             remaining,
             sandbox.as_ref(),
+            warnings,
         )
         .await
         {
@@ -112,7 +121,7 @@ pub(crate) async fn load_project_instructions(
         }
     }
 
-    Ok((!loaded.is_empty()).then_some(loaded))
+    Ok(loaded)
 }
 
 /// Attempt to locate and load AGENTS.md documentation.
@@ -129,21 +138,19 @@ async fn read_agents_md(
     cwd: &PathUri,
     max_total: usize,
     sandbox: Option<&FileSystemSandboxContext>,
+    warnings: &mut Vec<String>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
-    if max_total == 0 {
-        return Ok(None);
-    }
-
     let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
-    if paths.is_empty() {
-        return Ok(None);
-    }
-
-    let mut remaining: u64 = max_total as u64;
+    let mut remaining = max_total;
     let mut loaded = LoadedAgentsMd::default();
 
     for p in paths {
         if remaining == 0 {
+            warnings.push(format!(
+                "Skipped project instructions in environment `{environment_id}` starting at `{}` because the {}-byte budget was exhausted. {PROJECT_DOC_BUDGET_GUIDANCE}",
+                p.inferred_native_path_string(),
+                config.project_doc_max_bytes
+            ));
             break;
         }
 
@@ -152,12 +159,14 @@ async fn read_agents_md(
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
-        let size = data.len() as u64;
+        let size = data.len();
         if size > remaining {
-            data.truncate(remaining as usize);
-        }
-
-        if size > remaining {
+            data.truncate(remaining);
+            warnings.push(format!(
+                "Loaded only {remaining} of {size} bytes from `{}` in environment `{environment_id}` under the {}-byte project instruction budget. {PROJECT_DOC_BUDGET_GUIDANCE}",
+                p.inferred_native_path_string(),
+                config.project_doc_max_bytes
+            ));
             tracing::warn!(
                 path = %p,
                 remaining_bytes = remaining,
@@ -175,7 +184,7 @@ async fn read_agents_md(
                     cwd: cwd.clone(),
                 },
             });
-            remaining = remaining.saturating_sub(data.len() as u64);
+            remaining -= data.len();
         }
     }
 
@@ -212,6 +221,13 @@ async fn agents_md_paths(
             default_project_root_markers()
         }
     };
+    let filenames = candidate_filenames(config, cwd);
+    match batched_instruction_paths(fs, cwd, &project_root_markers, &filenames, sandbox).await {
+        Ok(paths) => return Ok(paths),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+        Err(err) => return Err(err),
+    }
+
     let project_root = find_nearest_ancestor_with_markers(
         fs,
         &dir,
@@ -239,22 +255,18 @@ async fn agents_md_paths(
         vec![dir]
     };
 
-    let candidate_filenames = candidate_filenames(config, cwd);
-    let candidate_filenames = &candidate_filenames;
+    let candidate_filenames = &filenames;
     let mut results = futures::stream::iter(search_dirs)
         .map(|directory| async move {
             for name in candidate_filenames {
                 let candidate = directory
                     .join(name)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-                match fs
+                let metadata = fs
                     .get_metadata(&candidate, GetMetadataOptions::default(), sandbox)
-                    .await
-                {
-                    Ok(metadata) if metadata.is_file => return Ok(Some(candidate)),
-                    Ok(_) => {}
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                    Err(err) => return Err(err),
+                    .await;
+                if let Some(result) = select_instruction(candidate, metadata) {
+                    return result.map(Some);
                 }
             }
             Ok(None)
@@ -267,6 +279,96 @@ async fn agents_md_paths(
         }
     }
     Ok(found)
+}
+
+/// Start with the working directory, which is always in scope. The first batch
+/// also checks root markers to find any other directories to include. Each round
+/// checks just the next filename in each unresolved directory.
+async fn batched_instruction_paths(
+    fs: &dyn ExecutorFileSystem,
+    cwd: &PathUri,
+    markers: &[String],
+    names: &[&str],
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> io::Result<Vec<PathUri>> {
+    let search_directory = |dir| (dir, names.iter(), None);
+    let mut directories = vec![search_directory(cwd.clone())];
+    let mut check_markers = !markers.is_empty();
+
+    loop {
+        let mut paths = Vec::new();
+        let mut bytes = 0usize;
+        let mut add_path = |dir: &PathUri, name: &str| {
+            let path = dir.join(name).map_err(|_| io::ErrorKind::Unsupported)?;
+            bytes = bytes.saturating_add(path.to_string().len());
+            if paths.len() >= MAX_METADATA_BATCH_PROBES || bytes > MAX_METADATA_BATCH_BYTES {
+                return Err(io::ErrorKind::Unsupported);
+            }
+            paths.push(path);
+            Ok(())
+        };
+        let mut instruction_slots = Vec::new();
+        for (dir, remaining, found) in directories.iter_mut().rev() {
+            if matches!(found, Some(Err(_))) {
+                break;
+            }
+            if found.is_none()
+                && let Some(name) = remaining.next()
+            {
+                add_path(dir, name)?;
+                instruction_slots.push(found);
+            }
+        }
+        if instruction_slots.is_empty() {
+            break;
+        }
+
+        if check_markers {
+            for dir in cwd.ancestors() {
+                for marker in markers {
+                    add_path(&dir, marker)?;
+                }
+            }
+            check_markers = false;
+        }
+
+        let results = fs
+            .get_metadata_batch(&paths, GetMetadataOptions::default(), sandbox)
+            .await?;
+        if results.len() != paths.len() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+
+        // Marker results, when present, follow the instruction results, nearest directory first.
+        let nearest_marker = results[instruction_slots.len()..]
+            .iter()
+            .position(Result::is_ok);
+        for ((slot, path), result) in instruction_slots.into_iter().zip(paths).zip(results) {
+            *slot = select_instruction(path, result);
+        }
+
+        if let Some(index) = nearest_marker {
+            let depth = index / markers.len();
+            directories.extend(cwd.ancestors().skip(1).take(depth).map(search_directory));
+        }
+    }
+    directories
+        .into_iter()
+        .rev()
+        .filter_map(|(_, _, found)| found)
+        .collect()
+}
+
+fn select_instruction(
+    path: PathUri,
+    result: io::Result<codex_file_system::FileMetadata>,
+) -> Option<io::Result<PathUri>> {
+    match result {
+        Ok(metadata) if metadata.is_file => Some(Ok(path)),
+        Ok(_) => None,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => Some(Err(err)),
+    }
 }
 
 fn candidate_filenames<'a>(config: &'a Config, cwd: &PathUri) -> Vec<&'a str> {
@@ -310,6 +412,19 @@ pub struct LoadedAgentsMd {
 }
 
 impl LoadedAgentsMd {
+    /// Host child startup inherits the two instruction scopes independently.
+    pub(crate) fn user_instructions_text(&self) -> Option<&str> {
+        self.user_instructions
+            .as_ref()
+            .map(|entry| entry.text.as_str())
+    }
+
+    pub(crate) fn thread_instructions_text(&self) -> Option<&str> {
+        self.thread_instructions
+            .as_ref()
+            .map(|entry| entry.text.as_str())
+    }
+
     /// Creates loaded instructions containing one user-level AGENTS.md entry.
     pub fn new_user(contents: String, path: AbsolutePathBuf) -> Self {
         if contents.trim().is_empty() {

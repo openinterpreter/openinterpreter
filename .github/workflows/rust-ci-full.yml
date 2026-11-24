@@ -17,6 +17,8 @@ env:
   # dependencies with nested submodules. Use the system git CLI, which has
   # better network/proxy behavior and matches Cargo's own suggested fallback.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CODEX_BAZEL_GCS_BUCKET: ${{ secrets.CODEX_BAZEL_GCS_BUCKET }}
+  CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.CODEX_BAZEL_GCS_WORKLOAD_IDENTITY_PROVIDER }}
 
 jobs:
   # --- CI that doesn't need specific targets ---------------------------------
@@ -32,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt
       - name: cargo fmt
@@ -52,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: cargo-shear@1.11.2
@@ -64,16 +66,16 @@ jobs:
     name: Argument comment lint package
     runs-on: ubuntu-24.04
     env:
-      CARGO_DYLINT_VERSION: 5.0.0
-      DYLINT_LINK_VERSION: 5.0.0
+      CARGO_DYLINT_VERSION: 6.3.0
+      DYLINT_LINK_VERSION: 6.3.0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
-          toolchain: nightly-2025-09-18
+          toolchain: nightly-2026-08-20
           components: llvm-tools-preview, rustc-dev, rust-src
       - name: Cache cargo-dylint tooling
         id: cargo_dylint_cache
@@ -98,12 +100,15 @@ jobs:
         run: python3 -m unittest discover -s tools/argument-comment-lint -p 'test_*.py'
       - name: Test argument comment lint package
         working-directory: tools/argument-comment-lint
-        run: cargo test
+        run: cargo test --locked
         env:
           RUST_MIN_STACK: "8388608" # 8 MiB
 
   argument_comment_lint_prebuilt:
     if: ${{ inputs.scope == 'all' }}
+    permissions:
+      contents: read
+      id-token: write
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     # A cold Bazel build of the prebuilt lint can exceed 30 minutes on each
@@ -127,52 +132,56 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-bazel-ci
+      - name: Run argument comment lint on codex-rs via Bazel
+        uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
-      - name: Install Linux sandbox build dependencies
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os != 'Windows' }}
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-          ./.github/scripts/run-bazel-ci.sh \
-            -- \
-            build \
-            --config=argument-comment-lint \
-            --keep_going \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
-            -- \
-            ${bazel_targets}
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ runner.os == 'Windows' }}
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        shell: bash
-        run: |
-          ./.github/scripts/run-argument-comment-lint-bazel.sh \
-            --config=argument-comment-lint \
-            --platforms=//:local_windows \
-            --keep_going \
-            --build_metadata=COMMIT_SHA=${GITHUB_SHA}
 
   # --- CI to validate on different os/targets --------------------------------
+  cargo_voice_inputs:
+    name: Cargo voice inputs - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    environment:
+      name: bazel
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { target: aarch64-apple-darwin, runner: macos-15 }
+          - target: x86_64-pc-windows-msvc
+            runner:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-windows-x64
+          - target: aarch64-pc-windows-msvc
+            runner:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-windows-arm64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./third_party/voice/cargo-ci/produce
+        with:
+          target: ${{ matrix.target }}
+
   lint_build:
-    if: ${{ inputs.scope == 'all' }}
-    name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
-    defaults:
+    needs: cargo_voice_inputs
+    if: &lint_build_if ${{ inputs.scope == 'all' }}
+    name: &lint_build_name Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
+    runs-on: &lint_build_runner ${{ matrix.runs_on || matrix.runner }}
+    timeout-minutes: &lint_build_timeout 30
+    defaults: &lint_build_defaults
       run:
         working-directory: codex-rs
-    env:
+    env: &lint_build_env
       # Speed up repeated builds across CI runs by caching compiled objects, except on
       # arm64 macOS runners cross-targeting x86_64 where ring/cc-rs can produce
       # mixed-architecture archives under sccache.
@@ -229,7 +238,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             profile: release
 
-    steps:
+    steps: &lint_build_steps
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -243,7 +252,7 @@ jobs:
             sudo apt-get update -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev
           fi
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           targets: ${{ matrix.target }}
           components: clippy
@@ -362,6 +371,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Set up native voice dependencies
+        if: ${{ !endsWith(matrix.target, '-musl') }}
+        uses: ./third_party/voice/cargo-ci/setup
+        with:
+          target: ${{ matrix.target }}
+
       - name: Install cargo-chef
         if: ${{ matrix.profile == 'release' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
@@ -440,6 +455,43 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
+  lint_build_musl:
+    if: *lint_build_if
+    name: *lint_build_name
+    runs-on: *lint_build_runner
+    timeout-minutes: *lint_build_timeout
+    defaults: *lint_build_defaults
+    env: *lint_build_env
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            profile: dev
+            runs_on:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            profile: dev
+            runs_on:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-linux-arm64
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            profile: release
+            runs_on:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            profile: release
+            runs_on:
+              group: ${{ github.event.repository.name }}-runners
+              labels: ${{ github.event.repository.name }}-linux-arm64
+    steps: *lint_build_steps
+
   tests_macos_aarch64:
     if: ${{ inputs.scope == 'all' }}
     name: Tests — macos-15-xlarge - aarch64-apple-darwin
@@ -512,7 +564,9 @@ jobs:
         cargo_shear,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
+        cargo_voice_inputs,
         lint_build,
+        lint_build_musl,
         tests_macos_aarch64,
         tests_linux_x64_remote,
         tests_linux_arm64,
@@ -530,6 +584,7 @@ jobs:
           echo "general: ${{ needs.general.result }}"
           echo "shear  : ${{ needs.cargo_shear.result }}"
           echo "lint   : ${{ needs.lint_build.result }}"
+          echo "musl   : ${{ needs.lint_build_musl.result }}"
           echo "test macos : ${{ needs.tests_macos_aarch64.result }}"
           echo "test linux : ${{ needs.tests_linux_x64_remote.result }}"
           echo "test arm64 : ${{ needs.tests_linux_arm64.result }}"
@@ -539,7 +594,9 @@ jobs:
           [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
           [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
           [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
+          [[ '${{ needs.cargo_voice_inputs.result }}' == 'success' ]] || { echo 'cargo_voice_inputs failed'; exit 1; }
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
+          [[ '${{ needs.lint_build_musl.result }}' == 'success' ]] || { echo 'lint_build_musl failed'; exit 1; }
           [[ '${{ needs.tests_macos_aarch64.result }}' == 'success' ]] || { echo 'tests_macos_aarch64 failed'; exit 1; }
           [[ '${{ needs.tests_linux_x64_remote.result }}' == 'success' ]] || { echo 'tests_linux_x64_remote failed'; exit 1; }
           [[ '${{ needs.tests_linux_arm64.result }}' == 'success' ]] || { echo 'tests_linux_arm64 failed'; exit 1; }

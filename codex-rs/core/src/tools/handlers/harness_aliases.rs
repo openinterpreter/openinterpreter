@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -32,6 +33,7 @@ use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use futures::StreamExt;
 use regex_lite::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -40,11 +42,13 @@ use sha2::Digest;
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::agent::api::AgentControl;
+use crate::agent::api::AgentInput;
+use crate::agent::api::SpawnRequest;
 use crate::agent::child_config::SpawnConfigOptions;
 use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::build_agent_spawn_config;
 use crate::agent::child_config::prepare_agent_spawn_config;
-use crate::agent::control::LocalAgentControl;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::types::SpawnAgentOptions;
 use crate::function_tool::FunctionCallError;
@@ -385,24 +389,28 @@ async fn handle_kimi_code_foreground_agent(
         Some(role_name),
         Some(task_name),
     )?;
-    let spawned = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-        config,
-        vec![UserInput::Text {
-            text: args.prompt,
-            text_elements: Vec::new(),
-        }],
-        Some(spawn_source),
-        SpawnAgentOptions {
-            fork_parent_spawn_call_id: Some(call_id),
-            parent_thread_id: Some(parent_thread_id),
-            ..Default::default()
-        },
-    ))
-    .await
-    .map_err(collab_spawn_error)?;
+    let (spawned, _) = session
+        .services
+        .agent_control
+        .spawn(SpawnRequest {
+            caller: parent_thread_id,
+            config,
+            input: AgentInput::UserInput(vec![UserInput::Text {
+                text: args.prompt,
+                text_elements: Vec::new(),
+            }]),
+            source: spawn_source,
+            options: SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(call_id),
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        })
+        .await
+        .map_err(collab_spawn_error)?;
     let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
         .await
-        .unwrap_or(spawned.status);
+        .unwrap_or(spawned.status.clone());
     let result = match status {
         AgentStatus::Completed(Some(message)) => message,
         AgentStatus::Completed(None) => String::new(),
@@ -469,24 +477,28 @@ async fn handle_zcode_agent(
         Some(task_name),
     )?;
     let started_at = Instant::now();
-    let spawned = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-        config,
-        vec![UserInput::Text {
-            text: args.prompt,
-            text_elements: Vec::new(),
-        }],
-        Some(spawn_source),
-        SpawnAgentOptions {
-            fork_parent_spawn_call_id: Some(call_id),
-            parent_thread_id: Some(parent_thread_id),
-            ..Default::default()
-        },
-    ))
-    .await
-    .map_err(collab_spawn_error)?;
+    let (spawned, _) = session
+        .services
+        .agent_control
+        .spawn(SpawnRequest {
+            caller: parent_thread_id,
+            config,
+            input: AgentInput::UserInput(vec![UserInput::Text {
+                text: args.prompt,
+                text_elements: Vec::new(),
+            }]),
+            source: spawn_source,
+            options: SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(call_id),
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        })
+        .await
+        .map_err(collab_spawn_error)?;
     let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
         .await
-        .unwrap_or(spawned.status);
+        .unwrap_or(spawned.status.clone());
     let result = match status {
         AgentStatus::Completed(Some(message)) => message,
         AgentStatus::Completed(None) => String::new(),
@@ -682,14 +694,13 @@ async fn execute_harness_command(
     payload_for_result: &ToolPayload,
 ) -> Result<serde_json::Value, FunctionCallError> {
     let handler = ExecCommandHandler::new(ExecCommandHandlerOptions {
-        allow_login_shell: invocation.turn.config.permissions.allow_login_shell,
         allow_tty: false,
         exec_permission_approvals_enabled: invocation
             .session
             .features()
             .enabled(codex_features::Feature::ExecPermissionApprovals),
         include_environment_id: false,
-        include_shell_parameter: false,
+        include_shell_parameter: true,
         include_windows_shell_guidance: false,
     });
     let output = handler
@@ -1018,6 +1029,8 @@ pub(crate) fn take_claude_code_bare_completed_task_notification() -> Option<Resp
     );
     Some(ResponseItem::Message {
         id: None,
+        encrypted_content: None,
+        status: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text }],
         phase: Some(MessagePhase::Commentary),
@@ -2751,7 +2764,7 @@ fn response_content_text(content: &[ContentItem]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 Some(text.as_str())
             }
             _ => None,
@@ -2921,20 +2934,24 @@ async fn handle_opencode_task(
         Some(opencode_task_name(&args.description)),
     )?;
     let initial_operation = parse_collab_input(Some(args.prompt), /*items*/ None)?;
-    let spawned = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-        config,
-        initial_operation,
-        Some(spawn_source),
-        SpawnAgentOptions {
-            parent_thread_id: Some(parent_thread_id),
-            ..Default::default()
-        },
-    ))
-    .await
-    .map_err(|err| FunctionCallError::RespondToModel(format!("task failed: {err}")))?;
+    let (spawned, _) = session
+        .services
+        .agent_control
+        .spawn(SpawnRequest {
+            caller: parent_thread_id,
+            config,
+            input: AgentInput::UserInput(initial_operation),
+            source: spawn_source,
+            options: SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        })
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("task failed: {err}")))?;
     let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
         .await
-        .unwrap_or(spawned.status);
+        .unwrap_or(spawned.status.clone());
     let task_result = match status {
         AgentStatus::Completed(Some(message)) => message,
         AgentStatus::Completed(None) => String::new(),
@@ -2978,14 +2995,13 @@ fn opencode_task_name(description: &str) -> String {
 }
 
 async fn zcode_agent_result_with_footer(
-    agent_control: &LocalAgentControl,
+    agent_control: &Arc<dyn AgentControl>,
     thread_id: ThreadId,
     result: String,
     fallback_duration_ms: i64,
 ) -> String {
-    let token_info = agent_control.get_agent_token_usage_info(thread_id).await;
-    let rollout_items = agent_control
-        .get_agent_rollout_items(thread_id)
+    let (token_info, rollout_items) = agent_control
+        .agent_result_history(thread_id)
         .await
         .unwrap_or_default();
     let subagent_tokens = token_info
@@ -3039,6 +3055,7 @@ fn zcode_agent_rollout_stats(
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DynamicToolsUpdated { .. }
             | RolloutItem::EventMsg(_) => {}
         }
     }
@@ -3052,21 +3069,20 @@ fn zcode_agent_rollout_stats(
 }
 
 async fn wait_for_agent_final_status(
-    agent_control: &LocalAgentControl,
+    agent_control: &Arc<dyn AgentControl>,
     thread_id: codex_protocol::ThreadId,
 ) -> Option<AgentStatus> {
-    let mut status_rx = agent_control.subscribe_status(thread_id).await.ok()?;
-    let mut status = status_rx.borrow().clone();
-    while matches!(
-        status,
-        AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
-    ) {
-        if status_rx.changed().await.is_err() {
-            return Some(agent_control.get_status(thread_id).await);
+    let mut updates = agent_control.subscribe_status(thread_id).await.ok()?;
+    while let Some(snapshot) = updates.next().await {
+        let status = snapshot.ok()?.status()?.clone();
+        if !matches!(
+            status,
+            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+        ) {
+            return Some(status);
         }
-        status = status_rx.borrow().clone();
     }
-    Some(status)
+    None
 }
 
 async fn handle_deepseek_list_dir(
@@ -4445,13 +4461,10 @@ mod tests {
         selection.workspace_roots = vec![workspace_root_uri];
         selection.config =
             codex_protocol::protocol::EnvironmentConfigState::Ready(environment_config);
-        turn.initial_environments.environments[0] =
-            TurnEnvironmentState::Ready(TurnEnvironment::new(
-                selection,
-                current.config_origin,
-                current.environment,
-                current.shell,
-            ));
+        let environment = Arc::clone(current.environment());
+        turn.initial_environments.environments[0] = TurnEnvironmentState::Ready(
+            TurnEnvironment::new(selection, current.config_origin, environment, current.shell),
+        );
         let turn = Arc::new(turn);
         (
             ToolInvocation {
@@ -4468,6 +4481,8 @@ mod tests {
                 payload: ToolPayload::Function {
                     arguments: args.to_string(),
                 },
+                native_call: None,
+                environments: Default::default(),
             },
             events,
         )
@@ -5200,6 +5215,8 @@ mod tests {
             .join("read-target.txt");
         let history = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Write".to_string(),
                 namespace: None,
@@ -5263,6 +5280,8 @@ mod tests {
             invocation_with_harness(&workspace, "Read", json!({}), Some("zcode")).await;
         let retained_arguments = json!({ "file_path": retained_path }).to_string();
         let history = vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -5668,6 +5687,8 @@ mod tests {
     fn zcode_read_session_context_prompt_has_expected_shape() {
         let history = vec![
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -5678,6 +5699,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
@@ -5687,6 +5710,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "Write".to_string(),
                 namespace: None,
@@ -5761,6 +5786,8 @@ mod tests {
         let history = vec![
             RolloutItem::ResponseItem(ResponseItemEnvelope {
                 item: ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Bash".to_string(),
                     namespace: None,
@@ -5774,6 +5801,8 @@ mod tests {
             }),
             RolloutItem::ResponseItem(ResponseItemEnvelope {
                 item: ResponseItem::FunctionCall {
+                    encrypted_content: None,
+                    status: None,
                     id: None,
                     name: "Read".to_string(),
                     namespace: None,
@@ -5788,6 +5817,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TurnComplete(
                 codex_protocol::protocol::TurnCompleteEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     last_agent_message: Some("done".to_string()),
                     started_at: None,
                     completed_at: None,
@@ -5811,6 +5841,8 @@ mod tests {
     fn zcode_todo_history_restore_excludes_current_write_call() {
         let history = vec![
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,
@@ -5829,6 +5861,8 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "TodoWrite".to_string(),
                 namespace: None,

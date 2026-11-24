@@ -11,6 +11,20 @@ impl EmptyStateAnimation {
 }
 
 #[test]
+fn provisional_animation_handoff_retains_phase_without_elapsed_hidden_time() {
+    let mut provisional = EmptyStateAnimation::default();
+    provisional.start_fresh();
+    provisional.spin_elapsed = Duration::from_millis(700);
+    provisional.last_frame = Some(Instant::now() - Duration::from_secs(30));
+    let mut live = EmptyStateAnimation::default();
+    live.continue_from(&mut provisional);
+    assert!(live.is_eligible());
+    assert!(!provisional.is_eligible());
+    assert_eq!(live.spin_elapsed, Duration::from_millis(700));
+    assert!(live.last_frame.is_none());
+}
+
+#[test]
 fn loop_closes_and_light_themes_preserve_coverage() {
     let mut renderer = Renderer::default();
     let dark = Lighting::terminal(/*fg*/ (210, 221, 235), /*bg*/ (15, 20, 37));
@@ -46,6 +60,31 @@ fn loop_closes_and_light_themes_preserve_coverage() {
             "light-theme ink must contrast with the background"
         );
     }
+}
+
+#[test]
+fn background_only_keeps_logo_visible_and_composer_shaded() {
+    let colors = terminal_palette::DefaultColors {
+        fg: None,
+        bg: (210, 221, 235),
+    };
+    terminal_palette::with_test_palette(Some(colors), || {
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 17,
+        );
+        let mut buffer = Buffer::empty(area);
+        let mut animation = EmptyStateAnimation::default();
+        animation.start_fresh();
+        animation.render_in(area, &mut buffer, Presentation::Animated);
+        let ink = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() != " ")
+            .map(|cell| cell.fg)
+            .collect::<std::collections::HashSet<_>>();
+        let fill = crate::style::user_message_style().bg;
+        insta::assert_snapshot!(format!("Logo {ink:?}, composer {fill:?}"), @"Logo {Reset}, composer Some(Rgb(201, 212, 225))");
+    });
 }
 
 #[test]

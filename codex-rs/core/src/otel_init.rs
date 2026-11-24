@@ -4,11 +4,16 @@ use codex_config::types::OtelHttpProtocol as Protocol;
 use codex_features::Feature;
 use codex_login::default_client::originator;
 use codex_otel::OtelExporter;
+use codex_otel::OtelHeadersHelper;
 use codex_otel::OtelHttpProtocol;
 use codex_otel::OtelProvider;
 use codex_otel::OtelSettings;
 use codex_otel::OtelTlsConfig as OtelTlsSettings;
 use std::error::Error;
+use std::num::NonZeroU64;
+use std::time::Duration;
+
+const DEFAULT_HEADERS_HELPER_REFRESH_INTERVAL_MS: u64 = 29 * 60 * 1_000;
 
 /// Build an OpenTelemetry provider from the app Config.
 ///
@@ -37,7 +42,7 @@ pub fn build_provider(
                 endpoint: endpoint.clone(),
                 headers: headers
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(name, value)| (name.clone(), value.as_str().to_owned()))
                     .collect(),
                 protocol,
                 tls: tls.as_ref().map(|config| OtelTlsSettings {
@@ -55,7 +60,7 @@ pub fn build_provider(
             endpoint: endpoint.clone(),
             headers: headers
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(name, value)| (name.clone(), value.as_str().to_owned()))
                 .collect(),
             tls: tls.as_ref().map(|config| OtelTlsSettings {
                 ca_certificate: config.ca_certificate.clone(),
@@ -67,20 +72,45 @@ pub fn build_provider(
 
     let exporter = to_otel_exporter(&config.otel.exporter);
     let trace_exporter = to_otel_exporter(&config.otel.trace_exporter);
-    let metrics_exporter = if config
-        .analytics_enabled
-        .unwrap_or(default_analytics_enabled)
+    // Analytics consent controls the built-in exporter, not explicit OTLP collectors.
+    let metrics_exporter = if matches!(config.otel.metrics_exporter, Kind::Statsig)
+        && !config
+            .analytics_enabled
+            .unwrap_or(default_analytics_enabled)
     {
-        to_otel_exporter(&config.otel.metrics_exporter)
-    } else {
         OtelExporter::None
+    } else {
+        to_otel_exporter(&config.otel.metrics_exporter)
     };
 
     let originator = originator();
     let service_name = service_name_override.unwrap_or(originator.value.as_str());
     let runtime_metrics = config.features.enabled(Feature::RuntimeMetrics);
 
+    let managed = config
+        .config_layer_stack
+        .requirements_toml()
+        .otel
+        .as_deref();
+    let headers_helper = config
+        .otel
+        .headers_helper
+        .as_ref()
+        .map(|command| OtelHeadersHelper {
+            command: command.clone(),
+            apply_to_logs: managed.is_none_or(|otel| otel.exporter.is_none()),
+            apply_to_traces: managed.is_none_or(|otel| otel.trace_exporter.is_none()),
+            apply_to_metrics: managed.is_none_or(|otel| otel.metrics_exporter.is_none()),
+            refresh_interval: Duration::from_millis(
+                config
+                    .otel
+                    .headers_helper_refresh_interval_ms
+                    .map_or(DEFAULT_HEADERS_HELPER_REFRESH_INTERVAL_MS, NonZeroU64::get),
+            ),
+        });
     OtelProvider::try_new(&OtelSettings {
+        headers_helper,
+        http_client_factory: config.http_client_factory(),
         service_name: service_name.to_string(),
         service_version: service_version.to_string(),
         codex_home: config.codex_home.to_path_buf(),
