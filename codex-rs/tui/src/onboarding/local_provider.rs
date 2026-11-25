@@ -11,8 +11,20 @@
 //! When `model_providers.local` already exists the flow never overwrites it:
 //! the auth step surfaces a collision picker so the user can adopt the existing
 //! entry or save the form as a new `local-N` provider.
+//!
+//! Both risky steps are guarded: a config read or write failure keeps the
+//! completed form on screen, and the `local-N` id chosen by the picker is
+//! revalidated (under the config version the write is pinned to) immediately
+//! before `config/batchWrite`, so an entry created by another writer in the
+//! meantime is never replaced.
 
+#![allow(clippy::unwrap_used)]
+
+use super::auth::SignInState;
 use super::keys;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::ConfigEdit;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -24,6 +36,8 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use std::sync::Arc;
+use std::sync::RwLock;
 use url::Url;
 
 /// The provider id written to `model_provider` / `model_providers.<id>` when
@@ -79,6 +93,23 @@ impl LocalProviderState {
         Self {
             values: Default::default(),
             selected_field: 0,
+        }
+    }
+
+    /// Rebuild a form from a validated config.
+    ///
+    /// Used wherever the completed form has to survive a state that is not the
+    /// form itself — backing out of the collision picker, or a failed config
+    /// read/write — so the user never has to retype what they already entered.
+    pub(super) fn from_config(config: &LocalProviderConfig) -> Self {
+        Self {
+            values: [
+                config.base_url.clone(),
+                config.env_key.clone().unwrap_or_default(),
+                config.model.clone(),
+            ],
+            // Focus the last field, which is where Enter submits.
+            selected_field: 2,
         }
     }
 
@@ -250,9 +281,14 @@ impl LocalProviderState {
 pub(super) struct LocalProviderCollisionState {
     /// The validated form values awaiting persistence.
     pub config: LocalProviderConfig,
+    /// The completed form itself, restored verbatim when the user backs out of
+    /// the picker or the write fails, so no typed value is lost.
+    pub form: LocalProviderState,
     /// Human-readable summary of the existing entry (e.g. its base URL).
     pub existing_summary: String,
-    /// First unused `local-N` provider id for the "create new" choice.
+    /// First unused `local-N` provider id for the "create new" choice. It is
+    /// only a proposal: the id is revalidated against the effective config right
+    /// before the write.
     pub new_provider_id: String,
     selected: usize,
 }
@@ -270,6 +306,7 @@ impl LocalProviderCollisionState {
         new_provider_id: String,
     ) -> Self {
         Self {
+            form: LocalProviderState::from_config(&config),
             config,
             existing_summary,
             new_provider_id,
@@ -348,6 +385,14 @@ impl LocalProviderCollisionState {
     }
 }
 
+/// Whether `provider_id` is still unused in `existing_ids`. Provider ids are
+/// compared case-insensitively because the config loader resolves them that way.
+pub(super) fn is_provider_id_free(provider_id: &str, existing_ids: &[String]) -> bool {
+    !existing_ids
+        .iter()
+        .any(|id| id.eq_ignore_ascii_case(provider_id))
+}
+
 /// Pick the first free `local`, `local-2`, `local-3`, ... provider id given the
 /// ids already present in the effective config.
 pub(super) fn next_local_provider_id(existing_ids: &[String]) -> String {
@@ -358,10 +403,7 @@ pub(super) fn next_local_provider_id(existing_ids: &[String]) -> String {
         } else {
             format!("{LOCAL_PROVIDER_ID}-{suffix}")
         };
-        if !existing_ids
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case(&candidate))
-        {
+        if is_provider_id_free(&candidate, existing_ids) {
             return candidate;
         }
         suffix += 1;
@@ -435,6 +477,216 @@ pub(super) fn adopt_existing_provider_edits(
         ));
     }
     edits
+}
+
+/// The provider-relevant slice of the effective config, plus the version of the
+/// user layer it was read from.
+///
+/// `user_config_version` is passed back to `config/batchWrite` as
+/// `expected_version`, so a write that was computed from this snapshot is
+/// rejected by the server once another writer has changed the config in the
+/// meantime, instead of silently replacing that writer's entry.
+pub(super) struct ProviderSnapshot {
+    pub existing_ids: Vec<String>,
+    /// Summary of an existing `model_providers.local` entry, if any.
+    pub local_summary: Option<String>,
+    pub user_config_version: Option<String>,
+}
+
+impl ProviderSnapshot {
+    pub(super) async fn load(
+        request_handle: &AppServerRequestHandle,
+    ) -> color_eyre::eyre::Result<Self> {
+        let cwd = std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let (response, user_config_version) =
+            crate::config_update::read_effective_config_with_user_version(
+                request_handle.clone(),
+                cwd,
+            )
+            .await?;
+        let providers = response
+            .config
+            .additional
+            .get("model_providers")
+            .and_then(|value| value.as_object());
+        let existing_ids = providers
+            .map(|providers| providers.keys().cloned().collect())
+            .unwrap_or_default();
+        let local_summary = providers
+            .and_then(|providers| providers.get(LOCAL_PROVIDER_ID))
+            .map(|existing| {
+                let name = existing
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Local / custom endpoint");
+                existing
+                    .get("base_url")
+                    .and_then(|value| value.as_str())
+                    .map_or_else(
+                        || format!("Existing '{name}' provider is already configured."),
+                        |base_url| format!("Existing '{name}' provider points at {base_url}."),
+                    )
+            });
+        Ok(Self {
+            existing_ids,
+            local_summary,
+            user_config_version,
+        })
+    }
+}
+
+/// The handles the local-provider persistence flow drives: the app-server
+/// connection plus the auth step's shared sign-in state and error slot.
+#[derive(Clone)]
+pub(super) struct LocalProviderFlow {
+    pub request_handle: AppServerRequestHandle,
+    pub sign_in_state: Arc<RwLock<SignInState>>,
+    pub error: Arc<RwLock<Option<String>>>,
+}
+
+impl LocalProviderFlow {
+    /// Save a completed form: read the current provider configuration, then
+    /// either surface the collision picker or write the provider outright.
+    pub(super) async fn save(&self, config: LocalProviderConfig) {
+        let form = LocalProviderState::from_config(&config);
+        let snapshot = match ProviderSnapshot::load(&self.request_handle).await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.fail(
+                    form,
+                    format!("Failed to check existing provider configuration: {err}"),
+                );
+                return;
+            }
+        };
+        let ProviderSnapshot {
+            existing_ids,
+            local_summary,
+            user_config_version,
+        } = snapshot;
+        match local_summary {
+            Some(summary) => {
+                let picker = LocalProviderCollisionState::new(
+                    config,
+                    summary,
+                    next_local_provider_id(&existing_ids),
+                );
+                *self.error.write().unwrap() = None;
+                *self.sign_in_state.write().unwrap() = SignInState::LocalProviderCollision(picker);
+            }
+            None => {
+                let edits = local_provider_edits(LOCAL_PROVIDER_ID, &config);
+                self.persist(form, user_config_version, edits).await;
+            }
+        }
+    }
+
+    /// Resolve a collision: adopt the existing entry, or save the form under the
+    /// `local-N` id the picker proposed.
+    ///
+    /// The proposed id is revalidated against the effective config immediately
+    /// before the write, and the write itself is pinned to the version that
+    /// revalidation read, so an id claimed by another writer between the picker
+    /// and the write is reported instead of overwritten.
+    pub(super) async fn resolve_collision(
+        &self,
+        collision: LocalProviderCollisionState,
+        resolution: LocalProviderResolution,
+    ) {
+        let LocalProviderCollisionState {
+            config,
+            form,
+            new_provider_id,
+            ..
+        } = collision;
+        let prepared = match ProviderSnapshot::load(&self.request_handle).await {
+            Ok(snapshot) => match resolution {
+                LocalProviderResolution::UseExisting => Ok((
+                    snapshot.user_config_version,
+                    adopt_existing_provider_edits(LOCAL_PROVIDER_ID, &config),
+                )),
+                LocalProviderResolution::CreateNew
+                    if !is_provider_id_free(&new_provider_id, &snapshot.existing_ids) =>
+                {
+                    Err(format!(
+                        "'{new_provider_id}' was created by another configuration change before \
+                         this form could be saved, so nothing was written. Your entries are kept — \
+                         press Enter to save under the next free id."
+                    ))
+                }
+                LocalProviderResolution::CreateNew => Ok((
+                    snapshot.user_config_version,
+                    local_provider_edits(&new_provider_id, &config),
+                )),
+            },
+            Err(err) => Err(format!("Failed to re-check provider configuration: {err}")),
+        };
+        match prepared {
+            Ok((expected_version, edits)) => self.persist(form, expected_version, edits).await,
+            Err(message) => self.fail(form, message),
+        }
+    }
+
+    /// Run `config/batchWrite` for the form and record the outcome.
+    ///
+    /// A failed write keeps the user's entries: the form is put back on screen
+    /// with the error, so the next Enter retries the save instead of asking for
+    /// the whole form again.
+    pub(super) async fn persist(
+        &self,
+        form: LocalProviderState,
+        expected_version: Option<String>,
+        edits: Vec<ConfigEdit>,
+    ) {
+        match crate::config_update::write_config_batch_checked(
+            self.request_handle.clone(),
+            edits,
+            expected_version,
+        )
+        .await
+        {
+            Ok(_) => {
+                *self.error.write().unwrap() = None;
+                *self.sign_in_state.write().unwrap() = SignInState::LocalProviderConfigured;
+            }
+            Err(err) if is_config_version_conflict(&err) => self.fail(
+                form,
+                "Your configuration changed while this form was open, so the local provider was \
+                 not saved. Your entries are kept — press Enter to try again."
+                    .to_string(),
+            ),
+            Err(err) => self.fail(
+                form,
+                format!("Failed to save local provider configuration: {err}"),
+            ),
+        }
+    }
+
+    /// Surface `message` and restore the completed form.
+    fn fail(&self, form: LocalProviderState, message: String) {
+        *self.error.write().unwrap() = Some(message);
+        *self.sign_in_state.write().unwrap() = SignInState::LocalProvider(form);
+    }
+}
+
+/// True when the server rejected a write because the user config no longer
+/// matched the version the write was based on.
+fn is_config_version_conflict(err: &color_eyre::eyre::Report) -> bool {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<TypedRequestError>())
+        .is_some_and(|err| match err {
+            TypedRequestError::Server { source, .. } => {
+                source
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("config_write_error_code"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("configVersionConflict")
+            }
+            TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. } => false,
+        })
 }
 
 #[cfg(test)]

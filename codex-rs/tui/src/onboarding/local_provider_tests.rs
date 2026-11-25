@@ -1,10 +1,20 @@
 use super::*;
 
+use crate::legacy_core::config::ConfigBuilder;
+use crate::onboarding::auth::SignInState;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_client::InProcessAppServerClient;
+use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
+use pretty_assertions::assert_eq;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::RwLock;
+use tempfile::TempDir;
 
 fn press(state: &mut LocalProviderState, code: KeyCode) -> Option<LocalProviderAction> {
     state.handle_key_event(&KeyEvent::new(code, KeyModifiers::NONE))
@@ -343,4 +353,226 @@ fn collision_render_shows_existing_and_choices() {
     assert!(visible.contains("already exists"));
     assert!(visible.contains("local-2"));
     assert!(visible.contains("qwen2.5"));
+}
+
+/// A user config that already defines `model_providers.local`, which is what
+/// forces the collision picker.
+const EXISTING_LOCAL_PROVIDER: &str = r#"
+[model_providers.local]
+name = "Local / custom endpoint"
+base_url = "http://localhost:11434/v1"
+wire_api = "chat"
+requires_openai_auth = false
+"#;
+
+/// Embedded app-server harness for the persistence flow: a temp `codex_home`
+/// with a `config.toml`, the flow pointed at it, and a second request handle
+/// that stands in for another writer of the same config.
+struct FlowHarness {
+    flow: LocalProviderFlow,
+    other_writer: AppServerRequestHandle,
+    config_path: PathBuf,
+    _app_server: InProcessAppServerClient,
+    _codex_home: TempDir,
+}
+
+async fn flow_harness(config_toml: &str) -> Result<FlowHarness> {
+    let codex_home = TempDir::new()?;
+    let config_path = codex_home.path().join("config.toml");
+    std::fs::write(&config_path, config_toml)?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let app_server = crate::tests::start_test_embedded_app_server(config).await?;
+    let request_handle = AppServerRequestHandle::InProcess(app_server.request_handle());
+    Ok(FlowHarness {
+        flow: LocalProviderFlow {
+            request_handle: request_handle.clone(),
+            sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
+            error: Arc::new(RwLock::new(None)),
+        },
+        other_writer: request_handle,
+        config_path,
+        _app_server: app_server,
+        _codex_home: codex_home,
+    })
+}
+
+/// The form values currently held by the sign-in state, when it is showing the
+/// local-provider form.
+fn form_values(state: &SignInState) -> Option<Vec<String>> {
+    match state {
+        SignInState::LocalProvider(form) => Some(form.values.to_vec()),
+        _ => None,
+    }
+}
+
+fn entered_values(config: &LocalProviderConfig) -> Vec<String> {
+    vec![
+        config.base_url.clone(),
+        config.env_key.clone().unwrap_or_default(),
+        config.model.clone(),
+    ]
+}
+
+/// Regression: backing out of the collision picker returns to the completed
+/// form, not to an empty one.
+#[test]
+fn collision_picker_keeps_completed_form_for_back_navigation() {
+    let config = LocalProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        env_key: Some("LMSTUDIO_API_KEY".to_string()),
+        model: "qwen2.5".to_string(),
+    };
+    let picker = LocalProviderCollisionState::new(
+        config.clone(),
+        "Existing 'Local / custom endpoint' provider points at http://localhost:11434/v1."
+            .to_string(),
+        "local-2".to_string(),
+    );
+
+    assert_eq!(picker.form.values.to_vec(), entered_values(&config));
+    assert_eq!(picker.form.selected_field, 2);
+}
+
+/// Regression: a rejected write must keep the entered values on screen and must
+/// not touch the config — the write is pinned to the version it was derived
+/// from, so a config that changed in the meantime is never overwritten.
+#[tokio::test]
+async fn stale_config_version_write_keeps_entries_and_writes_nothing() -> Result<()> {
+    let harness = flow_harness("model = \"gpt-old\"\n").await?;
+    let config = LocalProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        env_key: Some("LMSTUDIO_API_KEY".to_string()),
+        model: "qwen2.5".to_string(),
+    };
+
+    harness
+        .flow
+        .persist(
+            LocalProviderState::from_config(&config),
+            Some("sha256:stale".to_string()),
+            local_provider_edits("local-2", &config),
+        )
+        .await;
+
+    assert_eq!(
+        form_values(&harness.flow.sign_in_state.read().unwrap()),
+        Some(entered_values(&config))
+    );
+    let error = harness
+        .flow
+        .error
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        error.contains("configuration changed"),
+        "unexpected error: {error}"
+    );
+    let persisted = std::fs::read_to_string(&harness.config_path)?;
+    assert!(
+        !persisted.contains("local-2"),
+        "a rejected write must not create a provider: {persisted}"
+    );
+    Ok(())
+}
+
+/// Regression: the `local-N` id proposed by the picker is revalidated right
+/// before the write. An id claimed by another writer in between is reported and
+/// neither that writer's entry nor the submitted form is written.
+#[tokio::test]
+async fn new_provider_id_claimed_between_read_and_write_is_not_overwritten() -> Result<()> {
+    let harness = flow_harness(EXISTING_LOCAL_PROVIDER).await?;
+    let config = LocalProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        env_key: None,
+        model: "qwen2.5".to_string(),
+    };
+
+    harness.flow.save(config.clone()).await;
+    let collision = match &*harness.flow.sign_in_state.read().unwrap() {
+        SignInState::LocalProviderCollision(collision) => collision.clone(),
+        _ => panic!("expected the collision picker"),
+    };
+    assert_eq!(collision.new_provider_id, "local-2");
+
+    // Another writer claims the id the picker allocated before this form is
+    // written.
+    let other_config = LocalProviderConfig {
+        base_url: "http://localhost:8080/v1".to_string(),
+        env_key: None,
+        model: "other-model".to_string(),
+    };
+    crate::config_update::write_config_batch(
+        harness.other_writer.clone(),
+        local_provider_edits(&collision.new_provider_id, &other_config),
+    )
+    .await?;
+
+    harness
+        .flow
+        .resolve_collision(collision, LocalProviderResolution::CreateNew)
+        .await;
+
+    let error = harness
+        .flow
+        .error
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        error.contains("was created by another configuration change"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        form_values(&harness.flow.sign_in_state.read().unwrap()),
+        Some(entered_values(&config))
+    );
+    let persisted = std::fs::read_to_string(&harness.config_path)?;
+    assert!(
+        !persisted.contains("http://localhost:1234/v1"),
+        "the submitted form must not be written over the claimed id: {persisted}"
+    );
+    assert!(
+        persisted.contains("http://localhost:8080/v1"),
+        "the other writer's entry must survive: {persisted}"
+    );
+    Ok(())
+}
+
+/// Regression: a failing config read keeps the entered values instead of
+/// replacing the completed form with an empty one.
+#[tokio::test]
+async fn config_read_failure_keeps_entries() -> Result<()> {
+    let harness = flow_harness("model = \"gpt-old\"\n").await?;
+    let config = LocalProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        env_key: Some("LMSTUDIO_API_KEY".to_string()),
+        model: "qwen2.5".to_string(),
+    };
+    // Break the user config so the pre-write read has to fail.
+    std::fs::write(&harness.config_path, "not = a = valid = config\n")?;
+
+    harness.flow.save(config.clone()).await;
+
+    let error = harness
+        .flow
+        .error
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        error.contains("Failed to check existing provider configuration"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        form_values(&harness.flow.sign_in_state.read().unwrap()),
+        Some(entered_values(&config))
+    );
+    Ok(())
 }

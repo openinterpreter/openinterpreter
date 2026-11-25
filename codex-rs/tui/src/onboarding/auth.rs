@@ -53,16 +53,12 @@ use crate::motion::MotionMode;
 use crate::motion::shimmer_text;
 use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::keys;
-use crate::onboarding::local_provider::LOCAL_PROVIDER_ID;
 use crate::onboarding::local_provider::LocalProviderAction;
 use crate::onboarding::local_provider::LocalProviderCollisionAction;
 use crate::onboarding::local_provider::LocalProviderCollisionState;
 use crate::onboarding::local_provider::LocalProviderConfig;
-use crate::onboarding::local_provider::LocalProviderResolution;
+use crate::onboarding::local_provider::LocalProviderFlow;
 use crate::onboarding::local_provider::LocalProviderState;
-use crate::onboarding::local_provider::adopt_existing_provider_edits;
-use crate::onboarding::local_provider::local_provider_edits;
-use crate::onboarding::local_provider::next_local_provider_id;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -1032,26 +1028,24 @@ impl AuthModeWidget {
         };
         match state.handle_key_event(key_event) {
             Some(LocalProviderCollisionAction::BackToForm) => {
-                *guard = SignInState::LocalProvider(LocalProviderState::new());
+                // Backing out returns to the completed form, not an empty one.
+                let form = state.form.clone();
+                *guard = SignInState::LocalProvider(form);
                 drop(guard);
                 self.set_error(/*message*/ None);
                 self.request_frame.schedule_frame();
             }
             Some(LocalProviderCollisionAction::Resolve(resolution)) => {
-                let config = state.config.clone();
-                let new_provider_id = state.new_provider_id.clone();
+                let collision = state.clone();
                 drop(guard);
                 self.set_error(/*message*/ None);
-                match resolution {
-                    LocalProviderResolution::UseExisting => {
-                        let edits = adopt_existing_provider_edits(LOCAL_PROVIDER_ID, &config);
-                        self.write_local_provider_edits(edits);
-                    }
-                    LocalProviderResolution::CreateNew => {
-                        let edits = local_provider_edits(&new_provider_id, &config);
-                        self.write_local_provider_edits(edits);
-                    }
-                }
+                let flow = self.local_provider_flow();
+                let request_frame = self.request_frame.clone();
+                tokio::spawn(async move {
+                    flow.resolve_collision(collision, resolution).await;
+                    request_frame.schedule_frame();
+                });
+                self.request_frame.schedule_frame();
             }
             None => {
                 drop(guard);
@@ -1064,56 +1058,27 @@ impl AuthModeWidget {
     /// Persist the provider through `config/batchWrite` — the same source of
     /// truth as every other provider configuration, not a second one.
     ///
-    /// Before writing, the effective config is read back so an existing
-    /// `model_providers.local` entry is never overwritten silently: a
-    /// collision surfaces a picker that either adopts the entry or saves the
-    /// form under the first free `local-N` id.
+    /// The read/write pairing itself lives in `local_provider`, which checks for
+    /// an existing `model_providers.local` first and revalidates the `local-N` id
+    /// it proposes, so neither an existing entry nor a concurrently created one
+    /// is overwritten.
     fn save_local_provider(&mut self, config: LocalProviderConfig) {
-        let request_handle = self.app_server_request_handle.clone();
-        let sign_in_state = self.sign_in_state.clone();
-        let error = self.error.clone();
+        let flow = self.local_provider_flow();
         let request_frame = self.request_frame.clone();
         tokio::spawn(async move {
-            match existing_local_provider(&request_handle).await {
-                Ok(Some((existing_summary, existing_ids))) => {
-                    *error.write().unwrap() = None;
-                    *sign_in_state.write().unwrap() =
-                        SignInState::LocalProviderCollision(LocalProviderCollisionState::new(
-                            config,
-                            existing_summary,
-                            next_local_provider_id(&existing_ids),
-                        ));
-                }
-                Ok(None) => {
-                    let edits = local_provider_edits(LOCAL_PROVIDER_ID, &config);
-                    persist_local_provider(request_handle, sign_in_state, error, edits).await;
-                }
-                Err(err) => {
-                    *error.write().unwrap() = Some(format!(
-                        "Failed to check existing provider configuration: {err}"
-                    ));
-                    *sign_in_state.write().unwrap() =
-                        SignInState::LocalProvider(LocalProviderState::new());
-                }
-            }
+            flow.save(config).await;
             request_frame.schedule_frame();
         });
         self.request_frame.schedule_frame();
     }
 
-    /// Run the `config/batchWrite` persistence half of the local-provider flow;
-    /// split out so both the fresh-write and collision-resolution paths share
-    /// the same success/error handling.
-    fn write_local_provider_edits(&mut self, edits: Vec<codex_app_server_protocol::ConfigEdit>) {
-        let request_handle = self.app_server_request_handle.clone();
-        let sign_in_state = self.sign_in_state.clone();
-        let error = self.error.clone();
-        let request_frame = self.request_frame.clone();
-        tokio::spawn(async move {
-            persist_local_provider(request_handle, sign_in_state, error, edits).await;
-            request_frame.schedule_frame();
-        });
-        self.request_frame.schedule_frame();
+    /// Handles the local-provider flow needs to drive the sign-in state machine.
+    fn local_provider_flow(&self) -> LocalProviderFlow {
+        LocalProviderFlow {
+            request_handle: self.app_server_request_handle.clone(),
+            sign_in_state: self.sign_in_state.clone(),
+            error: self.error.clone(),
+        }
     }
 
     fn handle_existing_chatgpt_login(&mut self) -> bool {
@@ -1252,61 +1217,6 @@ impl StepStateProvider for AuthModeWidget {
             | SignInState::ApiKeyConfigured
             | SignInState::BedrockConfigured
             | SignInState::LocalProviderConfigured => StepState::Complete,
-        }
-    }
-}
-
-/// Read the effective config and report whether `model_providers.local` is
-/// already defined. Returns a human-readable summary of the entry plus every
-/// configured provider id (used to allocate a free `local-N` id).
-async fn existing_local_provider(
-    request_handle: &AppServerRequestHandle,
-) -> color_eyre::eyre::Result<Option<(String, Vec<String>)>> {
-    let cwd = std::env::current_dir()
-        .map(|dir| dir.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let response = crate::config_update::read_effective_config(request_handle.clone(), cwd).await?;
-    let providers = response
-        .config
-        .additional
-        .get("model_providers")
-        .and_then(|value| value.as_object());
-    let existing_ids: Vec<String> = providers
-        .map(|providers| providers.keys().cloned().collect())
-        .unwrap_or_default();
-    let Some(existing) = providers.and_then(|providers| providers.get(LOCAL_PROVIDER_ID)) else {
-        return Ok(None);
-    };
-    let name = existing
-        .get("name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Local / custom endpoint");
-    let summary = existing
-        .get("base_url")
-        .and_then(|value| value.as_str())
-        .map(|base_url| format!("Existing '{name}' provider points at {base_url}."))
-        .unwrap_or_else(|| format!("Existing '{name}' provider is already configured."));
-    Ok(Some((summary, existing_ids)))
-}
-
-/// Persist the local-provider config edits and update the sign-in state with
-/// the outcome. Shared by the fresh-write and collision-resolution paths.
-async fn persist_local_provider(
-    request_handle: AppServerRequestHandle,
-    sign_in_state: Arc<RwLock<SignInState>>,
-    error: Arc<RwLock<Option<String>>>,
-    edits: Vec<codex_app_server_protocol::ConfigEdit>,
-) {
-    match crate::config_update::write_config_batch(request_handle, edits).await {
-        Ok(_) => {
-            *error.write().unwrap() = None;
-            *sign_in_state.write().unwrap() = SignInState::LocalProviderConfigured;
-        }
-        Err(err) => {
-            *error.write().unwrap() = Some(format!(
-                "Failed to save local provider configuration: {err}"
-            ));
-            *sign_in_state.write().unwrap() = SignInState::LocalProvider(LocalProviderState::new());
         }
     }
 }
