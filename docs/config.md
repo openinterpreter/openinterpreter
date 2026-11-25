@@ -149,6 +149,28 @@ wire_api = "chat"
 
 Set `APPNZ_API_KEY` to your app.nz API key.
 
+### Synap
+
+[Synap](https://synap402.com/) is a hosted OpenAI-compatible gateway run by
+Linkrra. Add it as a custom chat-completions provider and point `model` at
+its `synap-v1` auto-router, which picks the cheapest model that can do the
+job:
+
+```toml
+model_provider = "synap"
+model = "synap-v1"
+
+[model_providers.synap]
+name = "Synap"
+base_url = "https://synap402.com/v1"
+env_key = "SYNAP_API_KEY"
+wire_api = "chat"
+```
+
+Set `SYNAP_API_KEY` to your Synap API key.
+
+<!-- vendor disclosure: this example was added by the Synap/Linkrra team. -->
+
 ## Harness
 
 Open Interpreter adds a `harness` setting for compatibility modes that shape
@@ -236,3 +258,4 @@ codex-rs/core/config.schema.json
 ```
 
 Use it for editor completion or CI validation when maintaining shared config.
+
