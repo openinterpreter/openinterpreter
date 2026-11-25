@@ -15,6 +15,7 @@ use std::time::Duration;
 use codex_code_mode::CellId;
 use codex_code_mode::CodeModeNestedToolCall;
 use codex_code_mode::CodeModeSession;
+use codex_code_mode::CodeModeSessionCellExecutionLimits;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::CodeModeToolKind;
 use codex_code_mode::RuntimeResponse;
@@ -77,6 +78,7 @@ pub(crate) struct CodeModeService {
     availability: Result<(), String>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
     default_exec_yield_time_ms: u64,
+    cell_execution_limits: CodeModeSessionCellExecutionLimits,
     shutdown_token: CancellationToken,
     unavailable_warning_emitted: AtomicBool,
 }
@@ -96,6 +98,10 @@ impl CodeModeService {
             availability,
             dispatch_broker,
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
+            cell_execution_limits: CodeModeSessionCellExecutionLimits {
+                max_yield_time_ms: config.max_exec_yield_time_ms,
+                ..Default::default()
+            },
             shutdown_token: CancellationToken::new(),
             unavailable_warning_emitted: AtomicBool::new(false),
         }
@@ -240,7 +246,7 @@ impl CodeModeService {
                     }
                     session = self
                         .session_provider
-                        .create_session() => session?,
+                        .create_session_with_limits(self.cell_execution_limits.clone()) => session?,
                 };
                 if self.shutdown_token.is_cancelled() {
                     let _ = session.shutdown().await;

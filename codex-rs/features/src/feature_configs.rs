@@ -26,6 +26,9 @@ pub struct CodeModeConfigToml {
     /// Default yield timeout for code-mode exec calls, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_exec_yield_time_ms: Option<u64>,
+    /// Maximum yield timeout for code-mode cells, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_exec_yield_time_ms: Option<u64>,
     /// Show handler duration, code-mode host duration, and harness overhead
     /// in each code-mode cell response.
     /// Experimental: this option and the response format may change or be removed.

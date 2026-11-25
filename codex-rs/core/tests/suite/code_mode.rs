@@ -1325,6 +1325,37 @@ async fn code_mode_terminated_empty_cell_has_complete_tool_inventory() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_caps_pragma_yield_and_keeps_cell_running() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let (test, follow_up) = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_code_mode_turn_with_config(
+            &server,
+            "Start a long-running cell",
+            "// @exec: {\"yield_time_ms\": 60000}\nawait new Promise(() => {});",
+            |config| config.code_mode.max_exec_yield_time_ms = Some(100),
+        ),
+    )
+    .await??;
+    let request = follow_up.single_request();
+    let items = custom_tool_output_items(&request, "call-1");
+    let cell_id = extract_running_cell_id(text_item(&items, /*index*/ 0));
+    let wait = responses::mount_function_call_agent_response(
+        &server,
+        "call-2",
+        &serde_json::json!({"cell_id": cell_id, "terminate": true}).to_string(),
+        "wait",
+    )
+    .await;
+    test.submit_turn("Terminate the cell").await?;
+    let request = wait.completion.single_request();
+    let items = function_tool_output_items(&request, "call-2");
+    assert!(text_item(&items, /*index*/ 0).starts_with("Script terminated"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(false, false, false; "disabled")]
 #[test_case(true, false, false; "completed")]
 #[test_case(true, true, false; "yielded")]
