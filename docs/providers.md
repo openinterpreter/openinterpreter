@@ -127,6 +127,21 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
+Another example, the hosted [Synap](https://synap402.com/) gateway (by
+Linkrra) is an OpenAI-compatible chat-completions provider whose `synap-v1`
+model auto-routes across the models it serves and picks the cheapest one that
+can do the job:
+
+```toml
+[model_providers.synap]
+name = "Synap"
+base_url = "https://synap402.com/v1"
+env_key = "SYNAP_API_KEY"
+wire_api = "chat"
+```
+
+<!-- vendor disclosure: this example was added by the Synap/Linkrra team. -->
+
 ## Authentication
 
 Provider auth can come from:
@@ -333,3 +348,4 @@ Live sources require their documented provider auth environment variables. For
 example, Moonshot requires `MOONSHOT_API_KEY` or `KIMI_API_KEY`, Z.AI requires
 `ZAI_API_KEY` or `ZHIPU_API_KEY`, and Groq requires `GROQ_API_KEY`. Missing
 auth is a generator failure, not a reason to silently keep stale data.
+
