@@ -132,7 +132,7 @@ jobs:
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     # Linux releases also build the native voice runtime in this job.
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
       id-token: write
@@ -154,25 +154,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-xlarge
+          - runner: macos-15
             target: aarch64-apple-darwin
             bundle: primary
             artifact_name: aarch64-apple-darwin
             binaries: "codex codex-code-mode-host codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-15-xlarge
+          - runner: macos-15
             target: aarch64-apple-darwin
             bundle: app-server
             artifact_name: aarch64-apple-darwin-app-server
             binaries: "codex-app-server codex-code-mode-host"
             build_dmg: "false"
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             bundle: primary
             artifact_name: x86_64-apple-darwin
             binaries: "codex codex-code-mode-host codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             bundle: app-server
             artifact_name: x86_64-apple-darwin-app-server
@@ -1081,7 +1081,7 @@ jobs:
         )
       }}
     name: Package macOS artifacts (${{ needs.resolve_macos_signing_mode.outputs.signing_mode }}) - ${{ matrix.target }} - ${{ matrix.bundle }}
-    runs-on: macos-15-xlarge
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -1525,7 +1525,7 @@ jobs:
         )
       }}
     name: Verify macOS artifacts (${{ needs.resolve_macos_signing_mode.outputs.signing_mode }}) - ${{ matrix.target }} - ${{ matrix.bundle }}
-    runs-on: macos-15-xlarge
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 30
     permissions:
       contents: read
