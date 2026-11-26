@@ -473,7 +473,27 @@ fn synthetic_sse_from_chat_completion_response(body: &[u8]) -> Result<String, Ap
             delta.insert("reasoning".to_string(), reasoning.clone());
         }
         if let Some(tool_calls) = message.get("tool_calls") {
-            delta.insert("tool_calls".to_string(), tool_calls.clone());
+            // Non-streaming tool calls carry no `index`; without one, the chunk
+            // parser treats every call as a continuation of the previous one.
+            let tool_calls = match tool_calls {
+                Value::Array(calls) => Value::Array(
+                    calls
+                        .iter()
+                        .enumerate()
+                        .map(|(position, call)| {
+                            let mut call = call.clone();
+                            if let Some(object) = call.as_object_mut() {
+                                object
+                                    .entry("index")
+                                    .or_insert_with(|| Value::Number(position.into()));
+                            }
+                            call
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            };
+            delta.insert("tool_calls".to_string(), tool_calls);
         }
         chunks.push(serde_json::json!({
             "id": id,
@@ -551,6 +571,7 @@ fn subagent_header(source: &Option<codex_protocol::protocol::SessionSource>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::ToolOutputKind;
     use codex_api::Compression;
     use codex_api::OpenAiVerbosity;
     use codex_api::ResponsesApiRequest;
@@ -564,6 +585,7 @@ mod tests {
     use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -636,6 +658,27 @@ mod tests {
                 headers: HeaderMap::new(),
                 bytes: Box::pin(futures::stream::empty()),
             })
+        }
+    }
+
+    struct NonStreamingTransport {
+        body: Value,
+    }
+
+    impl HttpTransport for NonStreamingTransport {
+        async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
+            Ok(Response {
+                status: http::StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::from(self.body.to_string()),
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: Request,
+        ) -> Result<codex_client::StreamResponse, TransportError> {
+            unreachable!("non-streaming test only uses execute")
         }
     }
 
@@ -1008,5 +1051,80 @@ mod tests {
             .expect("second json body");
         assert_eq!(first_body["max_tokens"], serde_json::json!(1024));
         assert_eq!(second_body["max_tokens"], serde_json::json!(140));
+    }
+
+    #[tokio::test]
+    async fn non_streaming_response_keeps_parallel_tool_calls_separate() {
+        // Non-streaming `message.tool_calls` entries carry no `index`.
+        let response = serde_json::json!({
+            "id": "chatcmpl-parallel",
+            "model": "gpt-4.1",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_ls",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+                        },
+                        {
+                            "id": "call_pwd",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}
+                        }
+                    ]
+                }
+            }]
+        });
+        let client = ChatCompletionsCompatClient::new(
+            NonStreamingTransport { body: response },
+            test_provider(),
+            Arc::new(StaticAuth),
+        );
+        let body = serde_json::json!({
+            "model": "gpt-4.1",
+            "messages": [{"role": "user", "content": "list and print cwd"}],
+        });
+
+        let stream = client
+            .stream_chat_request_value(
+                body,
+                HashMap::from([("bash".to_string(), ToolOutputKind::Function)]),
+                ResponsesOptions {
+                    session_id: None,
+                    thread_id: None,
+                    session_source: None,
+                    extra_headers: HeaderMap::new(),
+                    compression: Compression::None,
+                    turn_state: Some(Arc::new(OnceLock::new())),
+                },
+            )
+            .await
+            .expect("non-streaming request should succeed");
+        let calls = stream
+            .filter_map(|event| async move {
+                match event.expect("chat stream event") {
+                    codex_api::ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                        call_id,
+                        arguments,
+                        ..
+                    }) => Some((call_id, arguments)),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                ("call_ls".to_string(), r#"{"command":"ls"}"#.to_string()),
+                ("call_pwd".to_string(), r#"{"command":"pwd"}"#.to_string()),
+            ]
+        );
     }
 }
