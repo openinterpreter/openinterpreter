@@ -31,10 +31,12 @@ def asset(dist, name):
 
 
 def verify_attestation(path, args):
+    workflow_ref = args.workflow_ref or args.ref
+    workflow_commit = args.workflow_commit or args.commit
     result = subprocess.run(
         ["gh", "attestation", "verify", str(path), "--repo", args.repo,
-         "--cert-identity", f"https://github.com/{args.repo}/.github/workflows/rust-release.yml@{args.ref}",
-         "--source-ref", args.ref, "--source-digest", args.commit,
+         "--cert-identity", f"https://github.com/{args.repo}/.github/workflows/rust-release.yml@{workflow_ref}",
+         "--source-ref", workflow_ref, "--source-digest", workflow_commit,
          "--format", "json"],
         check=True, capture_output=True, text=True,
     )
@@ -54,11 +56,18 @@ def main():
     parser.add_argument("--repo", required=True)
     parser.add_argument("--ref", required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--workflow-ref")
+    parser.add_argument("--workflow-commit")
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     checked(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo), "invalid repository")
     checked(re.fullmatch(r"refs/tags/rust-v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?", args.ref), "not a release tag")
     checked(re.fullmatch(r"[0-9a-f]{40}", args.commit), "invalid source commit")
+    checked((args.workflow_ref is None) == (args.workflow_commit is None),
+            "workflow ref and commit must be supplied together")
+    if args.workflow_ref is not None:
+        checked(args.workflow_ref in (args.ref, "refs/heads/main"), "invalid workflow ref")
+        checked(re.fullmatch(r"[0-9a-f]{40}", args.workflow_commit), "invalid workflow commit")
     checked(re.fullmatch(r"[0-9]+", args.run_id), "invalid original run ID")
 
     lines = []
