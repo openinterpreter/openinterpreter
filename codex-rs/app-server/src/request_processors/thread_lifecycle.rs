@@ -499,12 +499,17 @@ pub(super) async fn handle_thread_listener_command(
             .await;
             let _ = completion_tx.send(());
         }
-        ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, goal } => {
+        ThreadListenerCommand::EmitThreadGoalUpdated {
+            turn_id,
+            goal_id,
+            goal,
+        } => {
             outgoing
                 .send_server_notification(ServerNotification::ThreadGoalUpdated(
                     ThreadGoalUpdatedNotification {
                         thread_id: conversation_id.to_string(),
                         turn_id,
+                        goal_id,
                         goal,
                     },
                 ))
@@ -821,11 +826,13 @@ pub(super) async fn send_thread_goal_snapshot_notification(
 ) {
     match state_db.thread_goals().get_thread_goal(thread_id).await {
         Ok(Some(goal)) => {
+            let goal_id = goal.goal_id.clone();
             outgoing
                 .send_server_notification(ServerNotification::ThreadGoalUpdated(
                     ThreadGoalUpdatedNotification {
                         thread_id: thread_id.to_string(),
                         turn_id: None,
+                        goal_id: Some(goal_id),
                         goal: api_thread_goal_from_state(goal),
                     },
                 ))

@@ -541,6 +541,7 @@ fn write_goal_started_session_file(
     let goal_event = EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
         thread_id,
         turn_id: None,
+        goal_id: None,
         goal: ThreadGoal {
             thread_id,
             objective: objective.to_string(),
