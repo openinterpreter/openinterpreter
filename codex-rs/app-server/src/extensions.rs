@@ -375,6 +375,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_server_event_sink_preserves_goal_id_without_listener() {
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            outgoing_tx,
+            AnalyticsEventsClient::disabled(),
+        ));
+        let thread_id = ThreadId::new();
+        let connection_id = ConnectionId(1);
+        let thread_state_manager = ThreadStateManager::new();
+        thread_state_manager
+            .connection_initialized(connection_id, ConnectionCapabilities::default())
+            .await;
+        thread_state_manager
+            .try_ensure_connection_subscribed(thread_id, connection_id, false)
+            .await
+            .expect("connection should be subscribed");
+        let sink = app_server_extension_event_sink(outgoing, thread_state_manager);
+
+        sink.emit(thread_goal_updated_event(thread_id, "turn-1"));
+
+        let envelope = timeout(Duration::from_secs(1), outgoing_rx.recv())
+            .await
+            .expect("timed out waiting for Goal notification")
+            .expect("outgoing channel closed unexpectedly");
+        let OutgoingEnvelope::ToConnection { message, .. } = envelope else {
+            panic!("expected connection-targeted Goal notification");
+        };
+        let OutgoingMessage::AppServerNotification(envelope) = message else {
+            panic!("expected app-server Goal notification");
+        };
+        let ServerNotification::ThreadGoalUpdated(notification) = envelope.notification else {
+            panic!("expected thread/goal/updated notification");
+        };
+        assert_eq!(notification.thread_id, thread_id.to_string());
+        assert_eq!(notification.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            notification.goal_id.as_deref(),
+            Some("01234567-89ab-4cde-8f01-23456789abcd")
+        );
+    }
+
+    #[tokio::test]
     async fn app_server_event_sink_truncates_warning_before_listener_enqueue() {
         let (outgoing_tx, _outgoing_rx) = mpsc::channel(4);
         let outgoing = Arc::new(OutgoingMessageSender::new(
