@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +11,73 @@ import write_provider_catalog as catalog
 
 
 class ProviderCatalogRefreshTests(unittest.TestCase):
+    def test_overrides_are_utf8_without_python_utf8_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            overrides = Path(directory) / "overrides.json"
+            overrides.write_text('{"note": "\U0001f9ea"}', encoding="utf-8")
+            script = (
+                "import sys; from pathlib import Path; "
+                "sys.path.insert(0, sys.argv[1]); "
+                "import write_provider_catalog as c; "
+                "c.OVERRIDES_PATH = Path(sys.argv[2]); "
+                "assert c.load_overrides() == {'note': '\\U0001f9ea'}"
+            )
+            self.run_without_utf8_mode(script, overrides)
+
+    def test_scoped_generation_reads_utf8_existing_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "catalog.json"
+            untouched = {
+                "id": "untouched",
+                "name": "\U0001f9ea",
+                "sort_priority": 1,
+                "models": [],
+            }
+            output.write_text(
+                json.dumps({"providers": [untouched]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            script = """
+import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import write_provider_catalog as c
+c.OUTPUT_PATH = Path(sys.argv[2])
+source = {'example': {'name': 'Example', 'api': 'https://example.com/v1',
+                      'models': {'model': {'tool_call': True}}}}
+with patch.object(c, 'load_models_dev_catalog', return_value=source), \
+     patch.object(c, 'load_overrides', return_value={'include_provider_ids': ['example']}):
+    c.write_catalog({'example'})
+"""
+            self.run_without_utf8_mode(script, output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["providers"][0], untouched)
+            self.assertEqual(payload["providers"][1]["id"], "example")
+
+    def run_without_utf8_mode(self, script, path):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-X",
+                "utf8=0",
+                "-c",
+                script,
+                str(Path(__file__).parent),
+                str(path),
+            ],
+            env={
+                **os.environ,
+                "LC_ALL": "C",
+                "PYTHONCOERCECLOCALE": "0",
+                "PYTHONIOENCODING": "utf-8",
+            },
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_exclusions_apply_after_source_and_additions(self):
         overrides = {
             "provider_model_additions": {
