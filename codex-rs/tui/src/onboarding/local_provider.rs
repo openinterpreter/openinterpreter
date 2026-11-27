@@ -22,6 +22,7 @@
 
 use super::auth::SignInState;
 use super::keys;
+use crate::key_hint::KeyBindingListExt;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ConfigEdit;
@@ -63,7 +64,7 @@ pub(super) struct LocalProviderState {
 }
 
 /// Outcome returned to the auth step once the form is complete.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct LocalProviderConfig {
     pub base_url: String,
     pub env_key: Option<String>,
