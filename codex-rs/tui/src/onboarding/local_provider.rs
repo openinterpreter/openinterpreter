@@ -45,6 +45,18 @@ use url::Url;
 /// no entry exists yet.
 pub(super) const LOCAL_PROVIDER_ID: &str = "local";
 
+/// Version an empty `config.toml` hashes to. When a config read found no user
+/// layer at all — meaning `config.toml` did not exist at read time — there is
+/// no real version to pin the write to, so this sentinel stands in for it:
+/// `config/batchWrite` creates an empty layer when the file is still absent
+/// (whose version matches the sentinel and lets the write through), but a file
+/// created by a concurrent writer in the meantime carries real content whose
+/// version differs, so the write is rejected instead of silently replacing
+/// that writer's entries.
+fn empty_user_layer_version() -> String {
+    codex_config::version_for_toml(&codex_config::TomlValue::Table(Default::default()))
+}
+
 /// How a collision with an existing `model_providers.local` entry is resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LocalProviderResolution {
@@ -285,6 +297,12 @@ pub(super) struct LocalProviderCollisionState {
     /// The completed form itself, restored verbatim when the user backs out of
     /// the picker or the write fails, so no typed value is lost.
     pub form: LocalProviderState,
+    /// The actual key of the existing `local` entry — usually `local`, but a
+    /// config authored by hand can hold `LOCAL`, `Local`, and so on. Adoption
+    /// must point `model_provider` at this exact key, not the lowercase
+    /// canonical form, or the selection would reference a provider id that does
+    /// not exist.
+    pub existing_provider_id: String,
     /// Human-readable summary of the existing entry (e.g. its base URL).
     pub existing_summary: String,
     /// First unused `local-N` provider id for the "create new" choice. It is
@@ -303,12 +321,14 @@ pub(super) enum LocalProviderCollisionAction {
 impl LocalProviderCollisionState {
     pub(super) fn new(
         config: LocalProviderConfig,
+        existing_provider_id: String,
         existing_summary: String,
         new_provider_id: String,
     ) -> Self {
         Self {
             form: LocalProviderState::from_config(&config),
             config,
+            existing_provider_id,
             existing_summary,
             new_provider_id,
             // Default to the non-destructive choice.
@@ -483,15 +503,23 @@ pub(super) fn adopt_existing_provider_edits(
 /// The provider-relevant slice of the effective config, plus the version of the
 /// user layer it was read from.
 ///
-/// `user_config_version` is passed back to `config/batchWrite` as
-/// `expected_version`, so a write that was computed from this snapshot is
-/// rejected by the server once another writer has changed the config in the
-/// meantime, instead of silently replacing that writer's entry.
+/// `expected_version` is passed back to `config/batchWrite`, so a write that
+/// was computed from this snapshot is rejected by the server once another
+/// writer has changed the config in the meantime, instead of silently
+/// replacing that writer's entry. It is never `None` here: when the read found
+/// no user layer, [`empty_user_layer_version`] pins the write to "the file was
+/// absent", so a first write still races safely — a concurrent writer that
+/// created `config.toml` in between is detected rather than overwritten.
 pub(super) struct ProviderSnapshot {
     pub existing_ids: Vec<String>,
+    /// The actual key of an existing `local` entry, matched
+    /// case-insensitively so a hand-authored `model_providers.LOCAL` is found
+    /// by the same rule [`is_provider_id_free`] uses to allocate ids.
+    pub existing_local_id: Option<String>,
     /// Summary of an existing `model_providers.local` entry, if any.
     pub local_summary: Option<String>,
-    pub user_config_version: Option<String>,
+    /// The version `config/batchWrite` should pin the write to.
+    pub expected_version: String,
 }
 
 impl ProviderSnapshot {
@@ -512,11 +540,21 @@ impl ProviderSnapshot {
             .additional
             .get("model_providers")
             .and_then(|value| value.as_object());
-        let existing_ids = providers
+        let existing_ids: Vec<String> = providers
             .map(|providers| providers.keys().cloned().collect())
             .unwrap_or_default();
-        let local_summary = providers
-            .and_then(|providers| providers.get(LOCAL_PROVIDER_ID))
+        // The collision rule and the id allocator must agree on what "exists"
+        // means. `is_provider_id_free` compares case-insensitively because the
+        // config loader can resolve provider ids that way, so a `LOCAL` or
+        // `Local` entry counts as an existing local provider here too — not
+        // only the exact lowercase key a `get("local")` lookup would find.
+        let existing_local_id = existing_ids
+            .iter()
+            .find(|id| id.eq_ignore_ascii_case(LOCAL_PROVIDER_ID))
+            .cloned();
+        let local_summary = existing_local_id
+            .as_ref()
+            .and_then(|id| providers.and_then(|providers| providers.get(id)))
             .map(|existing| {
                 let name = existing
                     .get("name")
@@ -532,8 +570,9 @@ impl ProviderSnapshot {
             });
         Ok(Self {
             existing_ids,
+            existing_local_id,
             local_summary,
-            user_config_version,
+            expected_version: user_config_version.unwrap_or_else(empty_user_layer_version),
         })
     }
 }
@@ -564,13 +603,17 @@ impl LocalProviderFlow {
         };
         let ProviderSnapshot {
             existing_ids,
+            existing_local_id,
             local_summary,
-            user_config_version,
+            expected_version,
         } = snapshot;
         match local_summary {
             Some(summary) => {
                 let picker = LocalProviderCollisionState::new(
                     config,
+                    // The collision summary only exists when a local entry was
+                    // found, so its id is present here.
+                    existing_local_id.unwrap_or_else(|| LOCAL_PROVIDER_ID.to_string()),
                     summary,
                     next_local_provider_id(&existing_ids),
                 );
@@ -579,7 +622,7 @@ impl LocalProviderFlow {
             }
             None => {
                 let edits = local_provider_edits(LOCAL_PROVIDER_ID, &config);
-                self.persist(form, user_config_version, edits).await;
+                self.persist(form, expected_version, edits).await;
             }
         }
     }
@@ -587,10 +630,12 @@ impl LocalProviderFlow {
     /// Resolve a collision: adopt the existing entry, or save the form under the
     /// `local-N` id the picker proposed.
     ///
-    /// The proposed id is revalidated against the effective config immediately
-    /// before the write, and the write itself is pinned to the version that
-    /// revalidation read, so an id claimed by another writer between the picker
-    /// and the write is reported instead of overwritten.
+    /// Both paths revalidate the entry they are about to touch against the
+    /// effective config immediately before the write — the "use existing" id
+    /// must still be present, and the proposed `local-N` id must still be free —
+    /// and the write itself is pinned to the version that revalidation read, so
+    /// an entry removed or an id claimed by another writer between the picker
+    /// and the write is reported instead of silently selected or overwritten.
     pub(super) async fn resolve_collision(
         &self,
         collision: LocalProviderCollisionState,
@@ -599,15 +644,31 @@ impl LocalProviderFlow {
         let LocalProviderCollisionState {
             config,
             form,
+            existing_provider_id,
             new_provider_id,
             ..
         } = collision;
         let prepared = match ProviderSnapshot::load(&self.request_handle).await {
             Ok(snapshot) => match resolution {
-                LocalProviderResolution::UseExisting => Ok((
-                    snapshot.user_config_version,
-                    adopt_existing_provider_edits(LOCAL_PROVIDER_ID, &config),
-                )),
+                LocalProviderResolution::UseExisting => {
+                    // Re-check with the same case-insensitive rule that showed
+                    // the picker: another writer may have removed or renamed the
+                    // entry while the picker was open, and adopting a provider
+                    // id that no longer resolves leaves `model_provider`
+                    // dangling.
+                    match snapshot.existing_local_id {
+                        Some(existing_id) => Ok((
+                            snapshot.expected_version,
+                            adopt_existing_provider_edits(&existing_id, &config),
+                        )),
+                        None => Err(format!(
+                            "The '{existing_provider_id}' provider was removed by another \
+                             configuration change before it could be selected, so nothing was \
+                             written. Your entries are kept — press Enter to save as a new \
+                             provider instead."
+                        )),
+                    }
+                }
                 LocalProviderResolution::CreateNew
                     if !is_provider_id_free(&new_provider_id, &snapshot.existing_ids) =>
                 {
@@ -618,7 +679,7 @@ impl LocalProviderFlow {
                     ))
                 }
                 LocalProviderResolution::CreateNew => Ok((
-                    snapshot.user_config_version,
+                    snapshot.expected_version,
                     local_provider_edits(&new_provider_id, &config),
                 )),
             },
@@ -638,13 +699,13 @@ impl LocalProviderFlow {
     pub(super) async fn persist(
         &self,
         form: LocalProviderState,
-        expected_version: Option<String>,
+        expected_version: String,
         edits: Vec<ConfigEdit>,
     ) {
         match crate::config_update::write_config_batch_checked(
             self.request_handle.clone(),
             edits,
-            expected_version,
+            Some(expected_version),
         )
         .await
         {
