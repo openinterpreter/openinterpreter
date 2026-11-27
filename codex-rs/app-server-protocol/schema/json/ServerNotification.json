@@ -4553,6 +4553,13 @@
         "goal": {
           "$ref": "#/definitions/ThreadGoal"
         },
+        "goalId": {
+          "description": "Immutable ID captured with the Goal transition, not from a later read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "threadId": {
           "type": "string"
         },
