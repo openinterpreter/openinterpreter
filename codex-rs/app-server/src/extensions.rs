@@ -204,6 +204,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
             EventMsg::ThreadGoalUpdated(thread_goal_event) => {
                 let thread_id = thread_goal_event.thread_id;
                 let turn_id = thread_goal_event.turn_id;
+                let goal_id = thread_goal_event.goal_id;
                 let goal: ThreadGoal = thread_goal_event.goal.into();
                 if let Some(listener_command_tx) = self
                     .thread_state_manager
@@ -211,6 +212,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
                 {
                     let command = ThreadListenerCommand::EmitThreadGoalUpdated {
                         turn_id: turn_id.clone(),
+                        goal_id: goal_id.clone(),
                         goal: goal.clone(),
                     };
                     if listener_command_tx.send(command).is_ok() {
@@ -227,6 +229,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
                             ThreadGoalUpdatedNotification {
                                 thread_id: thread_id.to_string(),
                                 turn_id,
+                                goal_id,
                                 goal,
                             },
                         ))
@@ -343,7 +346,13 @@ mod tests {
                 .expect("timed out waiting for listener command")
                 .expect("listener command channel closed unexpectedly");
             match command {
-                ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, .. } => {
+                ThreadListenerCommand::EmitThreadGoalUpdated {
+                    turn_id, goal_id, ..
+                } => {
+                    assert_eq!(
+                        goal_id.as_deref(),
+                        Some("01234567-89ab-4cde-8f01-23456789abcd")
+                    );
                     observed.push(turn_id.expect("extension goal updates should include turn ids"));
                 }
                 ThreadListenerCommand::EmitWarning { message } => observed.push(message),
@@ -598,6 +607,7 @@ mod tests {
             msg: EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
                 thread_id,
                 turn_id: Some(turn_id.to_string()),
+                goal_id: Some("01234567-89ab-4cde-8f01-23456789abcd".to_string()),
                 goal: CoreThreadGoal {
                     thread_id,
                     objective: "wire extension events".to_string(),

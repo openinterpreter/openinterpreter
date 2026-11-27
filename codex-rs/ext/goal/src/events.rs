@@ -20,6 +20,7 @@ impl GoalEventEmitter {
         &self,
         event_id: impl Into<String>,
         turn_id: Option<String>,
+        goal_id: String,
         goal: ThreadGoal,
     ) {
         self.sink.emit(Event {
@@ -27,6 +28,7 @@ impl GoalEventEmitter {
             msg: EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
                 thread_id: goal.thread_id,
                 turn_id,
+                goal_id: Some(goal_id),
                 goal,
             }),
         });

@@ -2240,6 +2240,10 @@ pub struct ThreadNameUpdatedNotification {
 pub struct ThreadGoalUpdatedNotification {
     pub thread_id: String,
     pub turn_id: Option<String>,
+    /// Immutable ID captured with the Goal transition, not from a later read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub goal_id: Option<String>,
     pub goal: ThreadGoal,
 }
 

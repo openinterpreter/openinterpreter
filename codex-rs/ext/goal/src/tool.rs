@@ -309,9 +309,10 @@ impl GoalToolExecutor {
             previous_status,
             GoalEventAttribution::Turn(invocation.turn_id.as_str()),
         );
+        let goal_id = goal.goal_id.clone();
         let goal = protocol_goal_from_state(goal);
         let turn_id = self.accounting_state.clear_current_turn_goal();
-        self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal.clone());
+        self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal_id, goal.clone());
         goal_response(
             Some(goal),
             if args.status == ThreadGoalStatus::Complete {
@@ -326,10 +327,11 @@ impl GoalToolExecutor {
         &self,
         invocation: &ToolCall<'_>,
         turn_id: Option<String>,
+        goal_id: String,
         goal: ThreadGoal,
     ) {
         self.event_emitter
-            .thread_goal_updated(invocation.call_id.clone(), turn_id, goal);
+            .thread_goal_updated(invocation.call_id.clone(), turn_id, goal_id, goal);
     }
 
     async fn account_active_goal_progress(
@@ -387,10 +389,12 @@ impl GoalToolExecutor {
                     goal.status,
                     budget_limited_goal_disposition,
                 );
+                let goal_id = goal.goal_id.clone();
                 let goal = protocol_goal_from_state(goal);
                 self.event_emitter.thread_goal_updated(
                     event_id.to_string(),
                     Some(turn_id),
+                    goal_id,
                     goal.clone(),
                 );
                 Some(goal)
