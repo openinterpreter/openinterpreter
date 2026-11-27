@@ -37,11 +37,11 @@ class ReleaseProvenanceTest(unittest.TestCase):
                     "GH_CALLS": str(self.calls),
                     "GH_RUN_URI": "https://github.com/openinterpreter/openinterpreter/actions/runs/123/attempts/1"}
 
-    def run_script(self, mode):
+    def run_script(self, mode, *extra):
         return subprocess.run(
             [sys.executable, str(SCRIPT), mode, "--dist", str(self.dist),
              "--repo", "openinterpreter/openinterpreter", "--ref", REF,
-             "--commit", COMMIT, "--run-id", "123"],
+             "--commit", COMMIT, "--run-id", "123", *extra],
             env=self.env, capture_output=True, text=True,
         )
 
@@ -77,6 +77,23 @@ class ReleaseProvenanceTest(unittest.TestCase):
     def test_different_run_attestation_fails_closed(self):
         self.env["GH_RUN_URI"] = "https://github.com/openinterpreter/openinterpreter/actions/runs/124/attempts/1"
         self.assertNotEqual(self.run_script("prepare").returncode, 0)
+        self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
+
+    def test_manual_existing_tag_uses_actual_workflow_identity(self):
+        source_sha = "b" * 40
+        self.assertEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/main",
+                                        "--workflow-commit", source_sha).returncode, 0)
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all("--source-ref refs/heads/main" in c and
+                            "--source-digest " + source_sha in c and
+                            "--cert-identity https://github.com/openinterpreter/openinterpreter/.github/workflows/rust-release.yml@refs/heads/main" in c
+                            for c in calls))
+
+    def test_manual_attestation_identity_cannot_be_arbitrary(self):
+        self.assertNotEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/other",
+                                            "--workflow-commit", "b" * 40).returncode, 0)
+        self.assertNotEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/main").returncode, 0)
         self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
 
 
