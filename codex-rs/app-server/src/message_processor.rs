@@ -1410,6 +1410,16 @@ impl MessageProcessor {
                 .session_status(connection_id, params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::AgentCallerPolicyRead { params, .. } => self
+                .agent_contract_processor
+                .caller_policy_read(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AgentCallerPolicyRepair { params, .. } => self
+                .agent_contract_processor
+                .caller_policy_repair(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
                 .add(params)
