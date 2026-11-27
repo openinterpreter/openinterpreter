@@ -243,8 +243,9 @@ impl GoalToolExecutor {
             &goal,
             GoalEventAttribution::Turn(invocation.turn_id.as_str()),
         );
+        let goal_id = goal.goal_id.clone();
         let goal = protocol_goal_from_state(goal);
-        self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal.clone());
+        self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal_id, goal.clone());
         goal_response(Some(goal), CompletionBudgetReport::Omit)
     }
 
