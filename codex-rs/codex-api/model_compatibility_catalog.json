@@ -5,7 +5,6 @@
       "id": "1024-x-1024/50-steps/bedrock/amazon.nova-canvas-v1:0",
       "aliases": [
         "50-steps/bedrock/amazon.nova-canvas-v1:0",
-        "amazon.nova-canvas-v1:0",
         "bedrock/amazon.nova-canvas-v1:0"
       ],
       "description": null,
@@ -2742,9 +2741,7 @@
     },
     {
       "id": "azure/computer-use-preview",
-      "aliases": [
-        "computer-use-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -3897,9 +3894,7 @@
     },
     {
       "id": "azure/gpt-3.5-turbo-0125",
-      "aliases": [
-        "gpt-3.5-turbo-0125"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -3918,9 +3913,7 @@
     },
     {
       "id": "azure/gpt-3.5-turbo-instruct-0914",
-      "aliases": [
-        "gpt-3.5-turbo-instruct-0914"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -4096,9 +4089,7 @@
     },
     {
       "id": "azure/gpt-4-0125-preview",
-      "aliases": [
-        "gpt-4-0125-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -4136,9 +4127,7 @@
     },
     {
       "id": "azure/gpt-4-1106-preview",
-      "aliases": [
-        "gpt-4-1106-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -4218,9 +4207,7 @@
     },
     {
       "id": "azure/gpt-4-turbo-2024-04-09",
-      "aliases": [
-        "gpt-4-turbo-2024-04-09"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -4484,9 +4471,7 @@
     },
     {
       "id": "azure/gpt-4o-audio-preview-2024-12-17",
-      "aliases": [
-        "gpt-4o-audio-preview-2024-12-17"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -4545,9 +4530,7 @@
     },
     {
       "id": "azure/gpt-4o-mini-audio-preview-2024-12-17",
-      "aliases": [
-        "gpt-4o-mini-audio-preview-2024-12-17"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -4585,9 +4568,7 @@
     },
     {
       "id": "azure/gpt-4o-mini-transcribe",
-      "aliases": [
-        "gpt-4o-mini-transcribe"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -4603,9 +4584,7 @@
     },
     {
       "id": "azure/gpt-4o-mini-tts",
-      "aliases": [
-        "gpt-4o-mini-tts"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -4659,9 +4638,7 @@
     },
     {
       "id": "azure/gpt-4o-transcribe",
-      "aliases": [
-        "gpt-4o-transcribe"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -4677,9 +4654,7 @@
     },
     {
       "id": "azure/gpt-4o-transcribe-diarize",
-      "aliases": [
-        "gpt-4o-transcribe-diarize"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -4797,9 +4772,7 @@
     },
     {
       "id": "azure/gpt-5-chat-latest",
-      "aliases": [
-        "gpt-5-chat-latest"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -5003,9 +4976,7 @@
     },
     {
       "id": "azure/gpt-5-pro",
-      "aliases": [
-        "gpt-5-pro"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -5077,9 +5048,7 @@
     },
     {
       "id": "azure/gpt-5.1-2025-11-13",
-      "aliases": [
-        "gpt-5.1-2025-11-13"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -5405,9 +5374,7 @@
     },
     {
       "id": "azure/gpt-5.2-2025-12-11",
-      "aliases": [
-        "gpt-5.2-2025-12-11"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -5580,9 +5547,7 @@
     },
     {
       "id": "azure/gpt-5.2-pro-2025-12-11",
-      "aliases": [
-        "gpt-5.2-pro-2025-12-11"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -6043,9 +6008,7 @@
     },
     {
       "id": "azure/gpt-5.5-pro",
-      "aliases": [
-        "gpt-5.5-pro"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -6084,9 +6047,7 @@
     },
     {
       "id": "azure/gpt-5.5-pro-2026-04-23",
-      "aliases": [
-        "gpt-5.5-pro-2026-04-23"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -6314,9 +6275,7 @@
     },
     {
       "id": "azure/gpt-audio-2025-08-28",
-      "aliases": [
-        "gpt-audio-2025-08-28"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -6335,9 +6294,7 @@
     },
     {
       "id": "azure/gpt-audio-mini-2025-10-06",
-      "aliases": [
-        "gpt-audio-mini-2025-10-06"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -6437,9 +6394,7 @@
     },
     {
       "id": "azure/gpt-image-2-2026-04-21",
-      "aliases": [
-        "gpt-image-2-2026-04-21"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6478,9 +6433,7 @@
     },
     {
       "id": "azure/gpt-realtime-2025-08-28",
-      "aliases": [
-        "gpt-realtime-2025-08-28"
-      ],
+      "aliases": [],
       "description": "Tool calling",
       "visibility": "hide",
       "supported_parameters": [
@@ -6500,9 +6453,7 @@
     },
     {
       "id": "azure/gpt-realtime-mini-2025-10-06",
-      "aliases": [
-        "gpt-realtime-mini-2025-10-06"
-      ],
+      "aliases": [],
       "description": "Tool calling",
       "visibility": "hide",
       "supported_parameters": [
@@ -6522,9 +6473,7 @@
     },
     {
       "id": "azure/gpt-realtime-whisper",
-      "aliases": [
-        "gpt-realtime-whisper"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6540,9 +6489,7 @@
     },
     {
       "id": "azure/hd/1024-x-1024/dall-e-3",
-      "aliases": [
-        "hd/1024-x-1024/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6558,9 +6505,7 @@
     },
     {
       "id": "azure/hd/1024-x-1792/dall-e-3",
-      "aliases": [
-        "hd/1024-x-1792/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6576,9 +6521,7 @@
     },
     {
       "id": "azure/hd/1792-x-1024/dall-e-3",
-      "aliases": [
-        "hd/1792-x-1024/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6594,9 +6537,7 @@
     },
     {
       "id": "azure/high/1024-x-1024/gpt-image-1",
-      "aliases": [
-        "high/1024-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6630,9 +6571,7 @@
     },
     {
       "id": "azure/high/1024-x-1536/gpt-image-1",
-      "aliases": [
-        "high/1024-x-1536/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6666,9 +6605,7 @@
     },
     {
       "id": "azure/high/1536-x-1024/gpt-image-1",
-      "aliases": [
-        "high/1536-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6702,9 +6639,7 @@
     },
     {
       "id": "azure/low/1024-x-1024/gpt-image-1",
-      "aliases": [
-        "low/1024-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6720,9 +6655,7 @@
     },
     {
       "id": "azure/low/1024-x-1024/gpt-image-1-mini",
-      "aliases": [
-        "low/1024-x-1024/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6738,9 +6671,7 @@
     },
     {
       "id": "azure/low/1024-x-1536/gpt-image-1",
-      "aliases": [
-        "low/1024-x-1536/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6756,9 +6687,7 @@
     },
     {
       "id": "azure/low/1024-x-1536/gpt-image-1-mini",
-      "aliases": [
-        "low/1024-x-1536/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6774,9 +6703,7 @@
     },
     {
       "id": "azure/low/1536-x-1024/gpt-image-1",
-      "aliases": [
-        "low/1536-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6792,9 +6719,7 @@
     },
     {
       "id": "azure/low/1536-x-1024/gpt-image-1-mini",
-      "aliases": [
-        "low/1536-x-1024/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6810,9 +6735,7 @@
     },
     {
       "id": "azure/medium/1024-x-1024/gpt-image-1",
-      "aliases": [
-        "medium/1024-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6828,9 +6751,7 @@
     },
     {
       "id": "azure/medium/1024-x-1024/gpt-image-1-mini",
-      "aliases": [
-        "medium/1024-x-1024/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6846,9 +6767,7 @@
     },
     {
       "id": "azure/medium/1024-x-1536/gpt-image-1",
-      "aliases": [
-        "medium/1024-x-1536/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6864,9 +6783,7 @@
     },
     {
       "id": "azure/medium/1024-x-1536/gpt-image-1-mini",
-      "aliases": [
-        "medium/1024-x-1536/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6882,9 +6799,7 @@
     },
     {
       "id": "azure/medium/1536-x-1024/gpt-image-1",
-      "aliases": [
-        "medium/1536-x-1024/gpt-image-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -6900,9 +6815,7 @@
     },
     {
       "id": "azure/medium/1536-x-1024/gpt-image-1-mini",
-      "aliases": [
-        "medium/1536-x-1024/gpt-image-1-mini"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -7226,9 +7139,7 @@
     },
     {
       "id": "azure/o3-deep-research",
-      "aliases": [
-        "o3-deep-research"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -7329,9 +7240,7 @@
     },
     {
       "id": "azure/o3-pro",
-      "aliases": [
-        "o3-pro"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -7365,9 +7274,7 @@
     },
     {
       "id": "azure/o3-pro-2025-06-10",
-      "aliases": [
-        "o3-pro-2025-06-10"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
       "supported_parameters": [
@@ -7575,7 +7482,6 @@
     {
       "id": "azure/standard/1024-x-1024/dall-e-2",
       "aliases": [
-        "1024-x-1024/dall-e-2",
         "standard/1024-x-1024/dall-e-2"
       ],
       "description": null,
@@ -7593,9 +7499,7 @@
     },
     {
       "id": "azure/standard/1024-x-1024/dall-e-3",
-      "aliases": [
-        "standard/1024-x-1024/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -7611,9 +7515,7 @@
     },
     {
       "id": "azure/standard/1024-x-1792/dall-e-3",
-      "aliases": [
-        "standard/1024-x-1792/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -7629,9 +7531,7 @@
     },
     {
       "id": "azure/standard/1792-x-1024/dall-e-3",
-      "aliases": [
-        "standard/1792-x-1024/dall-e-3"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -7695,9 +7595,7 @@
     },
     {
       "id": "azure/tts-1",
-      "aliases": [
-        "tts-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -7713,9 +7611,7 @@
     },
     {
       "id": "azure/tts-1-hd",
-      "aliases": [
-        "tts-1-hd"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -8691,9 +8587,7 @@
     },
     {
       "id": "azure/whisper-1",
-      "aliases": [
-        "whisper-1"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -14346,7 +14240,6 @@
     {
       "id": "bedrock/us-gov-west-1/anthropic.claude-3-7-sonnet-20250219-v1:0",
       "aliases": [
-        "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "us-gov-west-1/anthropic.claude-3-7-sonnet-20250219-v1:0"
       ],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
@@ -15020,9 +14913,7 @@
     },
     {
       "id": "bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0",
-      "aliases": [
-        "us.anthropic.claude-3-5-haiku-20241022-v1:0"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -15399,9 +15290,7 @@
     },
     {
       "id": "bedrock_mantle/openai.gpt-oss-safeguard-120b",
-      "aliases": [
-        "openai.gpt-oss-safeguard-120b"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "hide",
       "supported_parameters": [
@@ -15434,9 +15323,7 @@
     },
     {
       "id": "bedrock_mantle/openai.gpt-oss-safeguard-20b",
-      "aliases": [
-        "openai.gpt-oss-safeguard-20b"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "hide",
       "supported_parameters": [
@@ -15968,9 +15855,7 @@
     },
     {
       "id": "chatgpt/gpt-5.3-chat-latest",
-      "aliases": [
-        "gpt-5.3-chat-latest"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -22456,9 +22341,7 @@
     },
     {
       "id": "deepseek/deepseek-reasoner",
-      "aliases": [
-        "deepseek-reasoner"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Reasoning effort",
       "visibility": "hide",
       "supported_parameters": [
@@ -32475,9 +32358,7 @@
     },
     {
       "id": "gemini/gemini-2.0-flash-exp-image-generation",
-      "aliases": [
-        "gemini-2.0-flash-exp-image-generation"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -32515,9 +32396,7 @@
     },
     {
       "id": "gemini/gemini-2.0-flash-lite-001",
-      "aliases": [
-        "gemini-2.0-flash-lite-001"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -32538,9 +32417,7 @@
     },
     {
       "id": "gemini/gemini-2.5-computer-use-preview-10-2025",
-      "aliases": [
-        "gemini-2.5-computer-use-preview-10-2025"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -32616,9 +32493,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-lite",
-      "aliases": [
-        "gemini-2.5-flash-lite"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -32653,9 +32528,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-lite-preview-06-17",
-      "aliases": [
-        "gemini-2.5-flash-lite-preview-06-17"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -32690,9 +32563,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-lite-preview-09-2025",
-      "aliases": [
-        "gemini-2.5-flash-lite-preview-09-2025"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -32727,9 +32598,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-native-audio-latest",
-      "aliases": [
-        "gemini-2.5-flash-native-audio-latest"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -32745,9 +32614,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-native-audio-preview-09-2025",
-      "aliases": [
-        "gemini-2.5-flash-native-audio-preview-09-2025"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -32763,9 +32630,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-native-audio-preview-12-2025",
-      "aliases": [
-        "gemini-2.5-flash-native-audio-preview-12-2025"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -32781,9 +32646,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-preview-09-2025",
-      "aliases": [
-        "gemini-2.5-flash-preview-09-2025"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -32818,9 +32681,7 @@
     },
     {
       "id": "gemini/gemini-2.5-flash-preview-tts",
-      "aliases": [
-        "gemini-2.5-flash-preview-tts"
-      ],
+      "aliases": [],
       "description": null,
       "visibility": "hide",
       "supported_parameters": [],
@@ -32871,9 +32732,7 @@
     },
     {
       "id": "gemini/gemini-2.5-pro-preview-tts",
-      "aliases": [
-        "gemini-2.5-pro-preview-tts"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Search",
       "visibility": "hide",
       "supported_parameters": [
@@ -33109,9 +32968,7 @@
     },
     {
       "id": "gemini/gemini-3.1-flash-live-preview",
-      "aliases": [
-        "gemini-3.1-flash-live-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -33377,9 +33234,7 @@
     },
     {
       "id": "gemini/gemini-exp-1206",
-      "aliases": [
-        "gemini-exp-1206"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -33399,9 +33254,7 @@
     },
     {
       "id": "gemini/gemini-flash-latest",
-      "aliases": [
-        "gemini-flash-latest"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -33436,9 +33289,7 @@
     },
     {
       "id": "gemini/gemini-flash-lite-latest",
-      "aliases": [
-        "gemini-flash-lite-latest"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -33517,9 +33368,7 @@
     },
     {
       "id": "gemini/gemini-live-2.5-flash-preview-native-audio-09-2025",
-      "aliases": [
-        "gemini-live-2.5-flash-preview-native-audio-09-2025"
-      ],
+      "aliases": [],
       "description": "Tool calling \u2022 Search",
       "visibility": "hide",
       "supported_parameters": [
@@ -33540,9 +33389,7 @@
     },
     {
       "id": "gemini/gemini-omni-flash-preview",
-      "aliases": [
-        "gemini-omni-flash-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Reasoning effort",
       "visibility": "hide",
       "supported_parameters": [
@@ -33574,9 +33421,7 @@
     },
     {
       "id": "gemini/gemini-pro-latest",
-      "aliases": [
-        "gemini-pro-latest"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -33611,9 +33456,7 @@
     },
     {
       "id": "gemini/gemini-robotics-er-1.5-preview",
-      "aliases": [
-        "gemini-robotics-er-1.5-preview"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -50902,9 +50745,7 @@
     },
     {
       "id": "openrouter/deepseek/deepseek-chat",
-      "aliases": [
-        "deepseek/deepseek-chat"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -51467,8 +51308,7 @@
     {
       "id": "openrouter/minimax/minimax-m2.5",
       "aliases": [
-        "minimax-m2.5",
-        "minimax/minimax-m2.5"
+        "minimax-m2.5"
       ],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
       "visibility": "list",
@@ -51757,7 +51597,6 @@
     {
       "id": "openrouter/openai/gpt-3.5-turbo-16k",
       "aliases": [
-        "gpt-3.5-turbo-16k",
         "openai/gpt-3.5-turbo-16k"
       ],
       "description": "Chat-compatible \u2022 Tool calling",
@@ -54597,9 +54436,7 @@
     },
     {
       "id": "perplexity/xai/grok-4-1-fast-non-reasoning",
-      "aliases": [
-        "xai/grok-4-1-fast-non-reasoning"
-      ],
+      "aliases": [],
       "description": "Responses \u2022 Tool calling \u2022 Search",
       "visibility": "list",
       "supported_parameters": [
@@ -59328,7 +59165,6 @@
     {
       "id": "tensormesh/deepseek-ai/DeepSeek-V4-Flash",
       "aliases": [
-        "DeepSeek-V4-Flash",
         "deepseek-ai/DeepSeek-V4-Flash"
       ],
       "description": "Chat-compatible \u2022 Tool calling \u2022 Reasoning effort",
@@ -62704,8 +62540,7 @@
     {
       "id": "vercel_ai_gateway/cohere/command-r",
       "aliases": [
-        "cohere/command-r",
-        "command-r"
+        "cohere/command-r"
       ],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
@@ -62746,9 +62581,7 @@
     },
     {
       "id": "vercel_ai_gateway/cohere/embed-v4.0",
-      "aliases": [
-        "cohere/embed-v4.0"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -62802,9 +62635,7 @@
     },
     {
       "id": "vercel_ai_gateway/deepseek/deepseek-v3",
-      "aliases": [
-        "deepseek/deepseek-v3"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -62949,8 +62780,7 @@
     {
       "id": "vercel_ai_gateway/google/text-embedding-005",
       "aliases": [
-        "google/text-embedding-005",
-        "text-embedding-005"
+        "google/text-embedding-005"
       ],
       "description": null,
       "visibility": "hide",
@@ -62968,8 +62798,7 @@
     {
       "id": "vercel_ai_gateway/google/text-multilingual-embedding-002",
       "aliases": [
-        "google/text-multilingual-embedding-002",
-        "text-multilingual-embedding-002"
+        "google/text-multilingual-embedding-002"
       ],
       "description": null,
       "visibility": "hide",
@@ -63260,9 +63089,7 @@
     },
     {
       "id": "vercel_ai_gateway/mistral/codestral-embed",
-      "aliases": [
-        "mistral/codestral-embed"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63388,9 +63215,7 @@
     },
     {
       "id": "vercel_ai_gateway/mistral/mistral-embed",
-      "aliases": [
-        "mistral/mistral-embed"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63446,9 +63271,7 @@
     },
     {
       "id": "vercel_ai_gateway/mistral/mistral-small",
-      "aliases": [
-        "mistral/mistral-small"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -63556,9 +63379,7 @@
     },
     {
       "id": "vercel_ai_gateway/morph/morph-v3-fast",
-      "aliases": [
-        "morph/morph-v3-fast"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63574,9 +63395,7 @@
     },
     {
       "id": "vercel_ai_gateway/morph/morph-v3-large",
-      "aliases": [
-        "morph/morph-v3-large"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63612,7 +63431,6 @@
     {
       "id": "vercel_ai_gateway/openai/gpt-3.5-turbo-instruct",
       "aliases": [
-        "gpt-3.5-turbo-instruct",
         "openai/gpt-3.5-turbo-instruct"
       ],
       "description": "Chat-compatible",
@@ -63903,9 +63721,7 @@
     },
     {
       "id": "vercel_ai_gateway/perplexity/sonar-pro",
-      "aliases": [
-        "perplexity/sonar-pro"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63921,9 +63737,7 @@
     },
     {
       "id": "vercel_ai_gateway/perplexity/sonar-reasoning",
-      "aliases": [
-        "perplexity/sonar-reasoning"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -63939,9 +63753,7 @@
     },
     {
       "id": "vercel_ai_gateway/perplexity/sonar-reasoning-pro",
-      "aliases": [
-        "perplexity/sonar-reasoning-pro"
-      ],
+      "aliases": [],
       "description": "Chat-compatible",
       "visibility": "hide",
       "supported_parameters": [],
@@ -64001,9 +63813,7 @@
     },
     {
       "id": "vercel_ai_gateway/xai/grok-2",
-      "aliases": [
-        "xai/grok-2"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64022,9 +63832,7 @@
     },
     {
       "id": "vercel_ai_gateway/xai/grok-2-vision",
-      "aliases": [
-        "xai/grok-2-vision"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64044,9 +63852,7 @@
     },
     {
       "id": "vercel_ai_gateway/xai/grok-3",
-      "aliases": [
-        "xai/grok-3"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64087,9 +63893,7 @@
     },
     {
       "id": "vercel_ai_gateway/xai/grok-3-mini",
-      "aliases": [
-        "xai/grok-3-mini"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64108,9 +63912,7 @@
     },
     {
       "id": "vercel_ai_gateway/xai/grok-3-mini-fast",
-      "aliases": [
-        "xai/grok-3-mini-fast"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64148,9 +63950,7 @@
     },
     {
       "id": "vercel_ai_gateway/zai/glm-4.5",
-      "aliases": [
-        "zai/glm-4.5"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64169,9 +63969,7 @@
     },
     {
       "id": "vercel_ai_gateway/zai/glm-4.5-air",
-      "aliases": [
-        "zai/glm-4.5-air"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -64190,9 +63988,7 @@
     },
     {
       "id": "vercel_ai_gateway/zai/glm-4.6",
-      "aliases": [
-        "zai/glm-4.6"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -66245,9 +66041,7 @@
     },
     {
       "id": "vertex_ai/jamba-1.5",
-      "aliases": [
-        "jamba-1.5"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -66285,9 +66079,7 @@
     },
     {
       "id": "vertex_ai/jamba-1.5-large@001",
-      "aliases": [
-        "jamba-1.5-large@001"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
@@ -66325,9 +66117,7 @@
     },
     {
       "id": "vertex_ai/jamba-1.5-mini@001",
-      "aliases": [
-        "jamba-1.5-mini@001"
-      ],
+      "aliases": [],
       "description": "Chat-compatible \u2022 Tool calling",
       "visibility": "list",
       "supported_parameters": [
