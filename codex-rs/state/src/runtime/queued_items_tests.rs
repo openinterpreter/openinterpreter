@@ -218,6 +218,83 @@ async fn terminal_completion_proof_survives_reopen_and_cannot_be_borrowed_by_goa
 }
 
 #[tokio::test]
+async fn terminal_admission_receipt_blocks_replayed_effect_after_reopen() {
+    let (runtime, thread_id) = runtime_with_thread().await;
+    let sqlite = runtime.sqlite().clone();
+    let admission = runtime
+        .thread_queue()
+        .enqueue_admission(
+            thread_id,
+            r#"{"effect":"synthetic-cache-action"}"#,
+            "effect-once",
+            r#"{"goal_id":"goal-a","mission_revision":1,"lifecycle_revision":1,"objective":"mission A","status":"active"}"#,
+            "queue",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_starting(thread_id, &admission.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .thread_queue()
+            .mark_admission_started(thread_id, &admission.id, "turn-a")
+            .await
+            .unwrap()
+    );
+    runtime
+        .thread_queue()
+        .mark_admission_completed(
+            thread_id,
+            "effect-once",
+            "turn-a",
+            "goal-a",
+            1,
+            2,
+            "mission A",
+        )
+        .await
+        .unwrap()
+        .expect("the synthetic effect must have a durable terminal receipt");
+
+    // Reopen the same durable queue as a fresh runtime. Reusing the original
+    // admission ID is the only permitted retry shape after response loss;
+    // the unique admission row must return a conflict and preserve the
+    // terminal receipt rather than enqueueing a second effect.
+    let reopened = StateRuntime::init(sqlite, "test-provider".to_string())
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .thread_queue()
+            .enqueue_admission(
+                thread_id,
+                r#"{"effect":"synthetic-cache-action-replay"}"#,
+                "effect-once",
+                r#"{"goal_id":"goal-a","mission_revision":1,"lifecycle_revision":1,"objective":"mission A","status":"active"}"#,
+                "queue",
+                None,
+            )
+            .await
+            .is_err()
+    );
+    let retained = reopened
+        .thread_queue()
+        .find_admission(thread_id, "effect-once")
+        .await
+        .unwrap()
+        .expect("the terminal receipt must survive reopen");
+    assert_eq!(Some("completed".to_string()), retained.terminal_outcome);
+    assert_eq!(Some("turn-a".to_string()), retained.terminal_turn_id);
+    assert_eq!(Some("goal-a".to_string()), retained.terminal_goal_id);
+}
+
+#[tokio::test]
 async fn continuation_completion_retains_dispatch_and_completion_turn_lineage() {
     let (runtime, thread_id) = runtime_with_thread().await;
     let admission = runtime
