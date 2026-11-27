@@ -11,6 +11,10 @@ use crate::JsonSchema;
 use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt;
+
+/// Version of the content-free native caller-policy contract.
+pub const AGENT_CALLER_POLICY_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
@@ -337,4 +341,193 @@ pub struct AgentSessionStatusResponse {
     pub exit_code: Option<i32>,
     pub terminal_generation: Option<u64>,
     pub observation_timed_out: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase", export_to = "v2/")]
+pub enum AgentCallerPolicyAvailability {
+    Available,
+    Unavailable,
+    NotFound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum AgentCallerPolicyUnavailableReason {
+    CallerNotOwner,
+    ThreadNotLoaded,
+    ThreadActive,
+    PendingIncompatibleWork,
+    StaleGeneration,
+    RuntimeUnsupported,
+    StateUnavailable,
+}
+
+/// Presence-only projection for the native caller carrier. Values are never
+/// returned, hashed individually, or included in this response.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyKeyPresence {
+    pub interpreter_cli_path: bool,
+    pub interpreter_cli_server_connection: bool,
+    pub interpreter_caller_token: bool,
+    pub path: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyReadParams {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyReadResponse {
+    pub contract_version: u32,
+    pub thread_id: String,
+    pub availability: AgentCallerPolicyAvailability,
+    pub key_presence: Option<AgentCallerPolicyKeyPresence>,
+    /// Opaque digest used only for a subsequent CAS repair.
+    pub policy_generation: Option<String>,
+    /// Stable opaque owner identity for this exact thread. The caller must
+    /// still be subscribed to the thread; this is not a bearer credential.
+    pub owner_identity: Option<String>,
+    pub unavailable_reason: Option<AgentCallerPolicyUnavailableReason>,
+}
+
+/// Values are accepted only in a repair request and are never returned. The
+/// custom Debug implementation prevents credentials from entering diagnostics.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyRepairValues {
+    #[ts(optional = nullable)]
+    pub interpreter_cli_path: Option<String>,
+    #[ts(optional = nullable)]
+    pub interpreter_cli_server_connection: Option<String>,
+    #[ts(optional = nullable)]
+    pub interpreter_caller_token: Option<String>,
+    #[ts(optional = nullable)]
+    pub path: Option<String>,
+}
+
+impl fmt::Debug for AgentCallerPolicyRepairValues {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentCallerPolicyRepairValues")
+            .field(
+                "interpreter_cli_path",
+                &self.interpreter_cli_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "interpreter_cli_server_connection",
+                &self
+                    .interpreter_cli_server_connection
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field(
+                "interpreter_caller_token",
+                &self.interpreter_caller_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("path", &self.path.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyRepairParams {
+    pub thread_id: String,
+    pub expected_policy_generation: String,
+    pub expected_owner_identity: String,
+    pub values: AgentCallerPolicyRepairValues,
+}
+
+impl fmt::Debug for AgentCallerPolicyRepairParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentCallerPolicyRepairParams")
+            .field("thread_id", &self.thread_id)
+            .field(
+                "expected_policy_generation",
+                &self.expected_policy_generation,
+            )
+            .field("expected_owner_identity", &self.expected_owner_identity)
+            .field("values", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentCallerPolicyRepairResponse {
+    pub contract_version: u32,
+    pub thread_id: String,
+    pub availability: AgentCallerPolicyAvailability,
+    pub repaired: bool,
+    pub key_presence: Option<AgentCallerPolicyKeyPresence>,
+    pub policy_generation: Option<String>,
+    pub owner_identity: Option<String>,
+    pub unavailable_reason: Option<AgentCallerPolicyUnavailableReason>,
+}
+
+#[cfg(test)]
+mod caller_policy_contract_tests {
+    use super::*;
+
+    #[test]
+    fn repair_debug_redacts_values_but_wire_request_can_carry_them() {
+        let params = AgentCallerPolicyRepairParams {
+            thread_id: "thread-1".to_string(),
+            expected_policy_generation: "sha256:old".to_string(),
+            expected_owner_identity: "thread-1".to_string(),
+            values: AgentCallerPolicyRepairValues {
+                interpreter_cli_path: Some("/private/interpreter".to_string()),
+                interpreter_cli_server_connection: Some("private-connection".to_string()),
+                interpreter_caller_token: Some("private-token".to_string()),
+                path: Some("/private/path".to_string()),
+            },
+        };
+
+        let debug = format!("{params:?}");
+        assert!(!debug.contains("/private/interpreter"));
+        assert!(!debug.contains("private-connection"));
+        assert!(!debug.contains("private-token"));
+        assert!(!debug.contains("/private/path"));
+
+        let wire = serde_json::to_value(&params).expect("repair request serializes");
+        assert_eq!(
+            wire["values"]["interpreterCliServerConnection"],
+            "private-connection"
+        );
+        assert_eq!(wire["values"]["interpreterCallerToken"], "private-token");
+
+        let response = AgentCallerPolicyRepairResponse {
+            contract_version: AGENT_CALLER_POLICY_CONTRACT_VERSION,
+            thread_id: "thread-1".to_string(),
+            availability: AgentCallerPolicyAvailability::Available,
+            repaired: true,
+            key_presence: Some(AgentCallerPolicyKeyPresence {
+                interpreter_cli_path: true,
+                interpreter_cli_server_connection: true,
+                interpreter_caller_token: true,
+                path: true,
+            }),
+            policy_generation: Some("sha256:new".to_string()),
+            owner_identity: Some("thread-1".to_string()),
+            unavailable_reason: None,
+        };
+        let response_wire = serde_json::to_string(&response).expect("repair response serializes");
+        assert!(!response_wire.contains("private-connection"));
+        assert!(!response_wire.contains("private-token"));
+        assert!(!response_wire.contains("/private/interpreter"));
+    }
 }

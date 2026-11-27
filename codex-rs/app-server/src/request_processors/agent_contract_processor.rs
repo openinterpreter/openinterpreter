@@ -11,6 +11,15 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::outgoing_message::ConnectionId;
 use crate::thread_state::ThreadStateManager;
+use codex_app_server_protocol::AGENT_CALLER_POLICY_CONTRACT_VERSION;
+use codex_app_server_protocol::AgentCallerPolicyAvailability;
+use codex_app_server_protocol::AgentCallerPolicyKeyPresence;
+use codex_app_server_protocol::AgentCallerPolicyReadParams;
+use codex_app_server_protocol::AgentCallerPolicyReadResponse;
+use codex_app_server_protocol::AgentCallerPolicyRepairParams;
+use codex_app_server_protocol::AgentCallerPolicyRepairResponse;
+use codex_app_server_protocol::AgentCallerPolicyRepairValues;
+use codex_app_server_protocol::AgentCallerPolicyUnavailableReason;
 use codex_app_server_protocol::AgentGoalAvailability;
 use codex_app_server_protocol::AgentGoalReadParams;
 use codex_app_server_protocol::AgentInventoryAvailability;
@@ -39,8 +48,8 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_core::BackgroundTerminalStatusPhase;
 use codex_core::CodexThread;
+use codex_core::ShellEnvironmentPolicyRepairError;
 use codex_core::ThreadManager;
-use codex_core::TurnInput;
 use codex_extension_api::ExtensionFuture;
 use codex_goal_extension::GoalCompletionObserver;
 use codex_protocol::ThreadId;
@@ -52,7 +61,6 @@ use codex_queue_extension::QueueAdmissionState;
 use codex_queue_extension::QueueAdmissionValidation;
 use codex_queue_extension::QueueAdmissionValidator;
 use codex_queue_extension::QueuedAdmission;
-use codex_queue_extension::QueuedItem;
 use codex_queue_extension::QueuedItemService;
 use codex_rollout::RolloutItem;
 use codex_thread_store::ListThreadsParams;
@@ -525,6 +533,108 @@ impl AgentContractRequestProcessor {
         })
     }
 
+    pub(crate) async fn caller_policy_read(
+        &self,
+        connection_id: ConnectionId,
+        params: AgentCallerPolicyReadParams,
+    ) -> Result<AgentCallerPolicyReadResponse, JSONRPCErrorError> {
+        let thread_id = parse_thread_id(&params.thread_id)?;
+        if !self.is_owner(connection_id, thread_id).await {
+            return Ok(caller_policy_read_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::CallerNotOwner,
+            ));
+        }
+        let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+            return Ok(caller_policy_read_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::ThreadNotLoaded,
+            ));
+        };
+        let attestation = thread.shell_environment_policy_attestation().await;
+        Ok(caller_policy_read_available(
+            &params.thread_id,
+            &attestation,
+        ))
+    }
+
+    pub(crate) async fn caller_policy_repair(
+        &self,
+        connection_id: ConnectionId,
+        params: AgentCallerPolicyRepairParams,
+    ) -> Result<AgentCallerPolicyRepairResponse, JSONRPCErrorError> {
+        let thread_id = parse_thread_id(&params.thread_id)?;
+        if !self.is_owner(connection_id, thread_id).await {
+            return Ok(caller_policy_repair_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::CallerNotOwner,
+            ));
+        }
+        let owner_identity = caller_policy_owner_identity(thread_id);
+        if params.expected_owner_identity != owner_identity {
+            return Ok(caller_policy_repair_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::CallerNotOwner,
+            ));
+        }
+        let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+            return Ok(caller_policy_repair_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::ThreadNotLoaded,
+            ));
+        };
+        if matches!(
+            thread.agent_status().await,
+            AgentStatus::Running | AgentStatus::PendingInit
+        ) || thread.active_turn_id().await.is_some()
+        {
+            return Ok(caller_policy_repair_unavailable(
+                params.thread_id,
+                AgentCallerPolicyUnavailableReason::ThreadActive,
+            ));
+        }
+
+        let values = caller_policy_values(params.values);
+        if values.is_empty() {
+            return Err(invalid_request(
+                "caller policy repair requires at least one carrier value",
+            ));
+        }
+        let attestation = match thread
+            .cas_update_shell_environment_policy(&params.expected_policy_generation, values)
+            .await
+        {
+            Ok(attestation) => attestation,
+            Err(ShellEnvironmentPolicyRepairError::Active) => {
+                return Ok(caller_policy_repair_unavailable(
+                    params.thread_id,
+                    AgentCallerPolicyUnavailableReason::PendingIncompatibleWork,
+                ));
+            }
+            Err(ShellEnvironmentPolicyRepairError::StaleGeneration) => {
+                return Ok(caller_policy_repair_unavailable(
+                    params.thread_id,
+                    AgentCallerPolicyUnavailableReason::StaleGeneration,
+                ));
+            }
+            Err(ShellEnvironmentPolicyRepairError::InvalidKey) => {
+                return Err(invalid_request(
+                    "caller policy repair contains an invalid key",
+                ));
+            }
+            Err(ShellEnvironmentPolicyRepairError::Unavailable) => {
+                return Ok(caller_policy_repair_unavailable(
+                    params.thread_id,
+                    AgentCallerPolicyUnavailableReason::StateUnavailable,
+                ));
+            }
+        };
+        Ok(caller_policy_repair_available(
+            &params.thread_id,
+            &attestation,
+        ))
+    }
+
     async fn goal_blocker(
         &self,
         thread_id: ThreadId,
@@ -850,6 +960,102 @@ impl AgentContractRequestProcessor {
             status,
         }
     }
+}
+
+fn caller_policy_owner_identity(thread_id: ThreadId) -> String {
+    thread_id.to_string()
+}
+
+fn caller_policy_key_presence(
+    attestation: &codex_core::ShellEnvironmentPolicyAttestation,
+) -> AgentCallerPolicyKeyPresence {
+    AgentCallerPolicyKeyPresence {
+        interpreter_cli_path: attestation.interpreter_cli_path,
+        interpreter_cli_server_connection: attestation.interpreter_cli_server_connection,
+        interpreter_caller_token: attestation.interpreter_caller_token,
+        path: attestation.path,
+    }
+}
+
+fn caller_policy_read_available(
+    thread_id: &str,
+    attestation: &codex_core::ShellEnvironmentPolicyAttestation,
+) -> AgentCallerPolicyReadResponse {
+    AgentCallerPolicyReadResponse {
+        contract_version: AGENT_CALLER_POLICY_CONTRACT_VERSION,
+        thread_id: thread_id.to_string(),
+        availability: AgentCallerPolicyAvailability::Available,
+        key_presence: Some(caller_policy_key_presence(attestation)),
+        policy_generation: Some(attestation.generation.clone()),
+        owner_identity: Some(thread_id.to_string()),
+        unavailable_reason: None,
+    }
+}
+
+fn caller_policy_read_unavailable(
+    thread_id: String,
+    reason: AgentCallerPolicyUnavailableReason,
+) -> AgentCallerPolicyReadResponse {
+    AgentCallerPolicyReadResponse {
+        contract_version: AGENT_CALLER_POLICY_CONTRACT_VERSION,
+        thread_id,
+        availability: AgentCallerPolicyAvailability::Unavailable,
+        key_presence: None,
+        policy_generation: None,
+        owner_identity: None,
+        unavailable_reason: Some(reason),
+    }
+}
+
+fn caller_policy_repair_available(
+    thread_id: &str,
+    attestation: &codex_core::ShellEnvironmentPolicyAttestation,
+) -> AgentCallerPolicyRepairResponse {
+    AgentCallerPolicyRepairResponse {
+        contract_version: AGENT_CALLER_POLICY_CONTRACT_VERSION,
+        thread_id: thread_id.to_string(),
+        availability: AgentCallerPolicyAvailability::Available,
+        repaired: true,
+        key_presence: Some(caller_policy_key_presence(attestation)),
+        policy_generation: Some(attestation.generation.clone()),
+        owner_identity: Some(thread_id.to_string()),
+        unavailable_reason: None,
+    }
+}
+
+fn caller_policy_repair_unavailable(
+    thread_id: String,
+    reason: AgentCallerPolicyUnavailableReason,
+) -> AgentCallerPolicyRepairResponse {
+    AgentCallerPolicyRepairResponse {
+        contract_version: AGENT_CALLER_POLICY_CONTRACT_VERSION,
+        thread_id,
+        availability: AgentCallerPolicyAvailability::Unavailable,
+        repaired: false,
+        key_presence: None,
+        policy_generation: None,
+        owner_identity: None,
+        unavailable_reason: Some(reason),
+    }
+}
+
+fn caller_policy_values(
+    values: AgentCallerPolicyRepairValues,
+) -> std::collections::BTreeMap<String, String> {
+    let mut result = std::collections::BTreeMap::new();
+    if let Some(value) = values.interpreter_cli_path {
+        result.insert("INTERPRETER_CLI_PATH".to_string(), value);
+    }
+    if let Some(value) = values.interpreter_cli_server_connection {
+        result.insert("INTERPRETER_CLI_SERVER_CONNECTION".to_string(), value);
+    }
+    if let Some(value) = values.interpreter_caller_token {
+        result.insert("INTERPRETER_CALLER_TOKEN".to_string(), value);
+    }
+    if let Some(value) = values.path {
+        result.insert("PATH".to_string(), value);
+    }
+    result
 }
 
 fn goal_binding_blocker(
@@ -1278,6 +1484,8 @@ mod tests {
     use codex_app_server_protocol::AgentGoalUnavailableReason;
     use codex_app_server_protocol::ThreadGoal;
     use codex_app_server_protocol::ThreadGoalStatus;
+    use codex_core::TurnInput;
+    use codex_queue_extension::QueuedItem;
 
     fn goal(status: ThreadGoalStatus, objective: &str, updated_at: i64) -> ThreadGoal {
         ThreadGoal {

@@ -555,6 +555,18 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::AgentSessionStatusResponse,
     },
+    #[experimental("agent/callerPolicy/read")]
+    AgentCallerPolicyRead => "agent/callerPolicy/read" {
+        params: v2::AgentCallerPolicyReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentCallerPolicyReadResponse,
+    },
+    #[experimental("agent/callerPolicy/repair")]
+    AgentCallerPolicyRepair => "agent/callerPolicy/repair" {
+        params: v2::AgentCallerPolicyRepairParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AgentCallerPolicyRepairResponse,
+    },
 
     #[experimental("userVerification/enroll")]
     UserVerificationEnroll => "userVerification/enroll" {
