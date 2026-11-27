@@ -78,6 +78,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use codex_rollout::state_db::StateDbHandle;
+use sha2::Digest;
+use sha2::Sha256;
 
 static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
 
@@ -227,6 +229,64 @@ pub struct BackgroundTerminalStatus {
     pub exit_code: Option<i32>,
     pub terminal_generation: Option<u64>,
     pub observation_timed_out: bool,
+}
+
+/// Content-free attestation of the shell policy used by future turns.
+///
+/// The generation is an opaque digest of the complete policy, including values.
+/// It is intentionally returned instead of any value so an owner can perform a
+/// compare-and-swap without learning or logging credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShellEnvironmentPolicyAttestation {
+    pub generation: String,
+    pub interpreter_cli_path: bool,
+    pub interpreter_cli_server_connection: bool,
+    pub interpreter_caller_token: bool,
+    pub path: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellEnvironmentPolicyRepairError {
+    Active,
+    StaleGeneration,
+    InvalidKey,
+    Unavailable,
+}
+
+pub(crate) fn shell_environment_policy_attestation(
+    policy: &ShellEnvironmentPolicy,
+) -> ShellEnvironmentPolicyAttestation {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codex.shell-environment-policy.v1\0");
+    hasher.update(format!("inherit={:?}\0", policy.inherit).as_bytes());
+    hasher.update(
+        format!(
+            "ignore_default_excludes={}\0",
+            policy.ignore_default_excludes
+        )
+        .as_bytes(),
+    );
+    hasher.update(format!("exclude={:?}\0", policy.exclude).as_bytes());
+    hasher.update(format!("include_only={:?}\0", policy.include_only).as_bytes());
+    hasher.update(format!("use_profile={}\0", policy.use_profile).as_bytes());
+    let mut values = policy.r#set.iter().collect::<Vec<_>>();
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in values {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    let generation = format!("sha256:{:x}", hasher.finalize());
+    ShellEnvironmentPolicyAttestation {
+        generation,
+        interpreter_cli_path: policy.r#set.contains_key("INTERPRETER_CLI_PATH"),
+        interpreter_cli_server_connection: policy
+            .r#set
+            .contains_key("INTERPRETER_CLI_SERVER_CONNECTION"),
+        interpreter_caller_token: policy.r#set.contains_key("INTERPRETER_CALLER_TOKEN"),
+        path: policy.r#set.contains_key("PATH"),
+    }
 }
 
 impl BackgroundTerminalStatus {
@@ -894,6 +954,24 @@ impl CodexThread {
         self.session.rotate_shell_environment_values(policy).await
     }
 
+    /// Read the owner-bound shell-policy attestation without exposing values.
+    pub async fn shell_environment_policy_attestation(&self) -> ShellEnvironmentPolicyAttestation {
+        self.session.shell_environment_policy_attestation().await
+    }
+
+    /// Compare-and-swap only the caller-carrier variables on an idle thread.
+    /// The update is performed in place, so listeners, queued inputs, Goal state,
+    /// and background terminals retain their existing ownership and history.
+    pub async fn cas_update_shell_environment_policy(
+        &self,
+        expected_generation: &str,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<ShellEnvironmentPolicyAttestation, ShellEnvironmentPolicyRepairError> {
+        self.session
+            .cas_update_shell_environment_policy(expected_generation, values)
+            .await
+    }
+
     /// Returns the active turn's reviewer, including live updates, or the thread default.
     pub async fn approvals_reviewer_for_turn(&self, turn_id: &str) -> ApprovalsReviewer {
         if let Some((turn, inputs, _)) = self
@@ -1143,5 +1221,57 @@ impl CodexThread {
             elicitations.registration = None;
         }
         Ok(elicitations.count)
+    }
+}
+
+#[cfg(test)]
+mod caller_policy_tests {
+    use super::shell_environment_policy_attestation;
+    use codex_protocol::config_types::ShellEnvironmentPolicy;
+
+    #[test]
+    fn caller_policy_attestation_reports_only_presence_and_opaque_generation() {
+        let mut policy = ShellEnvironmentPolicy::default();
+        policy.r#set.insert(
+            "INTERPRETER_CLI_PATH".to_string(),
+            "/private/bin/interpreter".to_string(),
+        );
+        policy.r#set.insert(
+            "INTERPRETER_CLI_SERVER_CONNECTION".to_string(),
+            "private-connection".to_string(),
+        );
+        policy.r#set.insert(
+            "INTERPRETER_CALLER_TOKEN".to_string(),
+            "private-token".to_string(),
+        );
+        policy
+            .r#set
+            .insert("PATH".to_string(), "/private/path".to_string());
+        policy.r#set.insert(
+            "UNRELATED_PRIVATE_KEY".to_string(),
+            "private-value".to_string(),
+        );
+
+        let attestation = shell_environment_policy_attestation(&policy);
+        assert!(attestation.interpreter_cli_path);
+        assert!(attestation.interpreter_cli_server_connection);
+        assert!(attestation.interpreter_caller_token);
+        assert!(attestation.path);
+        assert!(attestation.generation.starts_with("sha256:"));
+
+        let debug = format!("{attestation:?}");
+        assert!(!debug.contains("private-connection"));
+        assert!(!debug.contains("private-token"));
+        assert!(!debug.contains("/private/bin/interpreter"));
+        assert!(!debug.contains("/private/path"));
+
+        let mut changed = policy;
+        changed
+            .r#set
+            .insert("PATH".to_string(), "/private/other-path".to_string());
+        assert_ne!(
+            attestation.generation,
+            shell_environment_policy_attestation(&changed).generation
+        );
     }
 }

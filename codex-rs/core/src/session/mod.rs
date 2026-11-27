@@ -201,7 +201,10 @@ use uuid::Uuid;
 
 use crate::client::ModelClient;
 use crate::codex_thread::CodexThreadSettingsOverrides;
+use crate::codex_thread::ShellEnvironmentPolicyAttestation;
+use crate::codex_thread::ShellEnvironmentPolicyRepairError;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::codex_thread::shell_environment_policy_attestation;
 #[cfg(test)]
 use crate::compact::collect_user_messages;
 use crate::config::Config;
@@ -1983,6 +1986,74 @@ impl Session {
         )
         .await
         .map(|commit| commit.is_some())
+    }
+
+    pub(crate) async fn shell_environment_policy_attestation(
+        &self,
+    ) -> ShellEnvironmentPolicyAttestation {
+        let state = self.state.lock().await;
+        shell_environment_policy_attestation(&state.session_configuration.shell_environment_policy)
+    }
+
+    /// Atomically updates only the four native caller-carrier keys while no
+    /// turn is active or waiting to consume input. The active-turn guard is
+    /// held across the compare-and-swap and the settings publication so a
+    /// concurrent start cannot slip between the idle check and the update.
+    pub(crate) async fn cas_update_shell_environment_policy(
+        &self,
+        expected_generation: &str,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<ShellEnvironmentPolicyAttestation, ShellEnvironmentPolicyRepairError> {
+        let _active_turn = self.active_turn.lock().await;
+        if self.input_queue.has_pending_mailbox_items().await {
+            return Err(ShellEnvironmentPolicyRepairError::Active);
+        }
+
+        let current_policy = {
+            let state = self.state.lock().await;
+            state.session_configuration.shell_environment_policy.clone()
+        };
+        let current_attestation = shell_environment_policy_attestation(&current_policy);
+        if current_attestation.generation != expected_generation {
+            return Err(ShellEnvironmentPolicyRepairError::StaleGeneration);
+        }
+
+        let mut next_policy = current_policy;
+        for (key, value) in values {
+            if !matches!(
+                key.as_str(),
+                "INTERPRETER_CLI_PATH"
+                    | "INTERPRETER_CLI_SERVER_CONNECTION"
+                    | "INTERPRETER_CALLER_TOKEN"
+                    | "PATH"
+            ) {
+                return Err(ShellEnvironmentPolicyRepairError::InvalidKey);
+            }
+            next_policy.r#set.insert(key, value);
+        }
+        let expected_generation = expected_generation.to_string();
+        let committed = self
+            .update_settings_if(
+                SessionSettingsUpdate {
+                    shell_environment_policy: Some(next_policy.clone()),
+                    ..Default::default()
+                },
+                move |current, candidate| {
+                    shell_environment_policy_attestation(&current.shell_environment_policy)
+                        .generation
+                        == expected_generation
+                        && candidate.shell_environment_policy == next_policy
+                },
+            )
+            .await
+            .map_err(|_| ShellEnvironmentPolicyRepairError::Unavailable)?;
+
+        let Some(committed) = committed else {
+            return Err(ShellEnvironmentPolicyRepairError::StaleGeneration);
+        };
+        Ok(shell_environment_policy_attestation(
+            &committed.configuration.shell_environment_policy,
+        ))
     }
 
     pub(crate) async fn configured_environment_selections(&self) -> Vec<TurnEnvironmentSelection> {

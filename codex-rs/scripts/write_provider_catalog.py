@@ -32,7 +32,7 @@ def load_models_dev_catalog() -> dict[str, dict]:
 
 
 def load_overrides() -> dict[str, object]:
-    return json.loads(OVERRIDES_PATH.read_text())
+    return json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
 
 
 def supported_provider_npm_packages(overrides: dict[str, object]) -> set[str]:
@@ -132,7 +132,7 @@ def build_provider_entry(
     api_overrides = overrides.get("api_base_url_overrides", {})
     if not isinstance(api_overrides, dict):
         api_overrides = {}
-    base_url = provider.get("api") or api_overrides.get(provider_id)
+    base_url = api_overrides.get(provider_id) or provider.get("api")
     if not isinstance(base_url, str) or not base_url:
         raise SystemExit(f"missing api/base_url for provider {provider_id}")
 
@@ -477,7 +477,7 @@ def should_include_provider(
     api_overrides = overrides.get("api_base_url_overrides", {})
     if not isinstance(api_overrides, dict):
         api_overrides = {}
-    base_url = provider.get("api") or api_overrides.get(provider_id)
+    base_url = api_overrides.get(provider_id) or provider.get("api")
     if not isinstance(base_url, str) or not base_url:
         return False
     if "${" in base_url:
@@ -565,7 +565,7 @@ def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
             raise SystemExit(
                 "selected providers were not generated: " + ", ".join(sorted(missing))
             )
-        existing_payload = json.loads(OUTPUT_PATH.read_text())
+        existing_payload = json.loads(OUTPUT_PATH.read_text(encoding="utf-8"))
         providers = [
             provider
             for provider in existing_payload.get("providers", [])
@@ -586,7 +586,7 @@ def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
         "generated_from": generated_from(overrides),
         "providers": providers,
     }
-    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    OUTPUT_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {len(providers)} provider entries to {OUTPUT_PATH}")
     return 0
 
