@@ -66,6 +66,7 @@ pub(crate) enum ThreadListenerCommand {
     // EmitThreadGoalUpdated is used to order goal updates with running-thread resume responses and goal clears.
     EmitThreadGoalUpdated {
         turn_id: Option<String>,
+        goal_id: Option<String>,
         goal: ThreadGoal,
     },
     // EmitThreadQueueChanged orders durable queue updates with thread notifications.

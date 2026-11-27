@@ -9954,6 +9954,13 @@ class ThreadGoalUpdatedNotification(BaseModel):
         populate_by_name=True,
     )
     goal: ThreadGoal
+    goal_id: Annotated[
+        str | None,
+        Field(
+            alias="goalId",
+            description="Immutable ID captured with the Goal transition, not from a later read.",
+        ),
+    ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
 

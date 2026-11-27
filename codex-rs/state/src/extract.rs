@@ -348,6 +348,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
                 thread_id: metadata.id,
                 turn_id: None,
+                goal_id: None,
                 goal: ThreadGoal {
                     thread_id: metadata.id,
                     objective: "optimize the benchmark".to_string(),

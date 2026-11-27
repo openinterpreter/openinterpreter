@@ -1222,6 +1222,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             let notification = ThreadGoalUpdatedNotification {
                 thread_id: thread_goal_event.thread_id.to_string(),
                 turn_id: thread_goal_event.turn_id,
+                goal_id: thread_goal_event.goal_id,
                 goal: thread_goal_event.goal.clone().into(),
             };
             outgoing

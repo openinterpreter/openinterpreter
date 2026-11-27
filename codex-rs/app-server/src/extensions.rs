@@ -204,6 +204,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
             EventMsg::ThreadGoalUpdated(thread_goal_event) => {
                 let thread_id = thread_goal_event.thread_id;
                 let turn_id = thread_goal_event.turn_id;
+                let goal_id = thread_goal_event.goal_id;
                 let goal: ThreadGoal = thread_goal_event.goal.into();
                 if let Some(listener_command_tx) = self
                     .thread_state_manager
@@ -211,6 +212,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
                 {
                     let command = ThreadListenerCommand::EmitThreadGoalUpdated {
                         turn_id: turn_id.clone(),
+                        goal_id: goal_id.clone(),
                         goal: goal.clone(),
                     };
                     if listener_command_tx.send(command).is_ok() {
@@ -227,6 +229,7 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
                             ThreadGoalUpdatedNotification {
                                 thread_id: thread_id.to_string(),
                                 turn_id,
+                                goal_id,
                                 goal,
                             },
                         ))
@@ -343,7 +346,13 @@ mod tests {
                 .expect("timed out waiting for listener command")
                 .expect("listener command channel closed unexpectedly");
             match command {
-                ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, .. } => {
+                ThreadListenerCommand::EmitThreadGoalUpdated {
+                    turn_id, goal_id, ..
+                } => {
+                    assert_eq!(
+                        goal_id.as_deref(),
+                        Some("01234567-89ab-4cde-8f01-23456789abcd")
+                    );
                     observed.push(turn_id.expect("extension goal updates should include turn ids"));
                 }
                 ThreadListenerCommand::EmitWarning { message } => observed.push(message),
@@ -363,6 +372,97 @@ mod tests {
             ],
             observed
         );
+    }
+
+    #[tokio::test]
+    async fn app_server_event_sink_preserves_goal_id_without_listener() {
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            outgoing_tx,
+            AnalyticsEventsClient::disabled(),
+        ));
+        let thread_id = ThreadId::new();
+        let connection_id = ConnectionId(1);
+        let thread_state_manager = ThreadStateManager::new();
+        thread_state_manager
+            .connection_initialized(connection_id, ConnectionCapabilities::default())
+            .await;
+        thread_state_manager
+            .try_ensure_connection_subscribed(thread_id, connection_id, false)
+            .await
+            .expect("connection should be subscribed");
+        let sink = app_server_extension_event_sink(outgoing, thread_state_manager);
+
+        sink.emit(thread_goal_updated_event(thread_id, "turn-1"));
+
+        let envelope = timeout(Duration::from_secs(1), outgoing_rx.recv())
+            .await
+            .expect("timed out waiting for Goal notification")
+            .expect("outgoing channel closed unexpectedly");
+        let OutgoingEnvelope::ToConnection { message, .. } = envelope else {
+            panic!("expected connection-targeted Goal notification");
+        };
+        let OutgoingMessage::AppServerNotification(envelope) = message else {
+            panic!("expected app-server Goal notification");
+        };
+        let ServerNotification::ThreadGoalUpdated(notification) = envelope.notification else {
+            panic!("expected thread/goal/updated notification");
+        };
+        assert_eq!(notification.thread_id, thread_id.to_string());
+        assert_eq!(notification.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            notification.goal_id.as_deref(),
+            Some("01234567-89ab-4cde-8f01-23456789abcd")
+        );
+    }
+
+    #[tokio::test]
+    async fn app_server_event_sink_keeps_same_second_replacement_goal_ids() {
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(4);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            outgoing_tx,
+            AnalyticsEventsClient::disabled(),
+        ));
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let (commands_tx, mut commands_rx) = mpsc::unbounded_channel();
+        manager.register_listener_command_tx(thread_id, commands_tx);
+        let sink = app_server_extension_event_sink(outgoing, manager);
+        let first_id = "01234567-89ab-4cde-8f01-23456789abcd";
+        let replacement_id = "abcdef01-2345-4678-9abc-def012345678";
+
+        // Both Goals share the same thread, failed turn and second-resolution
+        // created_at. The event's captured ID, not a later current-Goal read,
+        // must identify each notification.
+        sink.emit(thread_goal_updated_event_with_id(
+            thread_id,
+            "turn-failed",
+            first_id,
+        ));
+        sink.emit(thread_goal_updated_event_with_id(
+            thread_id,
+            "turn-failed",
+            replacement_id,
+        ));
+
+        for expected_id in [first_id, replacement_id] {
+            let command = timeout(Duration::from_secs(1), commands_rx.recv())
+                .await
+                .expect("timed out waiting for Goal update")
+                .expect("listener command channel closed");
+            let ThreadListenerCommand::EmitThreadGoalUpdated {
+                turn_id,
+                goal_id,
+                goal,
+                ..
+            } = command
+            else {
+                panic!("expected Goal update");
+            };
+            assert_eq!(turn_id.as_deref(), Some("turn-failed"));
+            assert_eq!(goal.created_at, 7);
+            assert_eq!(goal_id.as_deref(), Some(expected_id));
+        }
     }
 
     #[tokio::test]
@@ -593,15 +693,28 @@ mod tests {
     }
 
     fn thread_goal_updated_event(thread_id: ThreadId, turn_id: &str) -> Event {
+        thread_goal_updated_event_with_id(
+            thread_id,
+            turn_id,
+            "01234567-89ab-4cde-8f01-23456789abcd",
+        )
+    }
+
+    fn thread_goal_updated_event_with_id(
+        thread_id: ThreadId,
+        turn_id: &str,
+        goal_id: &str,
+    ) -> Event {
         Event {
             id: turn_id.to_string(),
             msg: EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
                 thread_id,
                 turn_id: Some(turn_id.to_string()),
+                goal_id: Some(goal_id.to_string()),
                 goal: CoreThreadGoal {
                     thread_id,
                     objective: "wire extension events".to_string(),
-                    status: ThreadGoalStatus::Active,
+                    status: ThreadGoalStatus::Blocked,
                     token_budget: Some(123),
                     tokens_used: 45,
                     time_used_seconds: 6,
