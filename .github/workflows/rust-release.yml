@@ -2001,10 +2001,19 @@ jobs:
           set -euo pipefail
           commit="$(git rev-parse HEAD)"
           workflow_commit="$commit"
+          provenance_script=".github/scripts/oix-release-provenance.py"
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             workflow_commit="$GITHUB_SHA"
+            # The workflow is selected from main, but the release checkout is
+            # the immutable tag. Use the helper from the workflow commit so its
+            # accepted arguments match this workflow without moving the tag.
+            git fetch --no-tags --depth=1 origin "$workflow_commit"
+            [[ "$(git cat-file -t "$workflow_commit")" == commit ]]
+            provenance_script="${RUNNER_TEMP}/oix-release-provenance.py"
+            git show "$workflow_commit:.github/scripts/oix-release-provenance.py" > "$provenance_script"
+            [[ -s "$provenance_script" ]]
           fi
-          python3 .github/scripts/oix-release-provenance.py prepare \
+          python3 "$provenance_script" prepare \
             --dist dist --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_REF" \
             --workflow-ref "$GITHUB_REF" --workflow-commit "$workflow_commit" \
             --commit "$commit" --run-id "$GITHUB_RUN_ID"

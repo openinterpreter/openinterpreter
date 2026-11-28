@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,14 @@ class ReleaseProvenanceTest(unittest.TestCase):
                                             "--workflow-commit", "b" * 40).returncode, 0)
         self.assertNotEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/main").returncode, 0)
         self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
+
+    def test_dispatch_prepares_with_helper_from_workflow_commit(self):
+        workflow = (SCRIPT.parent.parent / "workflows" / "rust-release.yml").read_text()
+        step = workflow.split("- name: Verify original Linux package provenance and prepare checksum manifest", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        self.assertIn('git fetch --no-tags --depth=1 origin "$workflow_commit"', step)
+        self.assertIn('git show "$workflow_commit:.github/scripts/oix-release-provenance.py"', step)
+        self.assertRegex(step, re.compile(r'python3 "\$provenance_script" prepare'))
 
 
 if __name__ == "__main__":
