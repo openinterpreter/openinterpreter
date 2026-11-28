@@ -1,11 +1,11 @@
-<!-- README translation source: README.md sha256=8f6c33487eca77769798677d32bce15335d0439f129c9a0413e12e0d9e70ab7a -->
+<!-- README translation source: README.md sha256=890ad2844696117f8baf7b853fa308a1a56812104ccc7d72678531680114b546 -->
 
 <h1 align="center">Open Interpreter</h1>
 
 <p align="center">一款针对低成本模型优化的编程智能体。<a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_text"><strong>博客文章 ↗</strong></a></p>
 
 <p align="center">
-  <a href="README.md">English</a> • <a href="README_ES.md">Español</a> • <b>简体中文</b> • <a href="README_JA.md">日本語</a>
+  <a href="README.md">English</a> • <a href="README_ES.md">Español</a> • <b>简体中文</b> • <a href="README_JA.md">日本語</a> • <a href="README_AR.md">العربية</a>
 </p>
 
 <p align="center">
