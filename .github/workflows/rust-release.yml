@@ -17,8 +17,16 @@ on:
   push:
     tags:
       - "rust-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag (rust-vX.Y.Z)
+        required: true
+        type: string
 
 env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
   CODEX_REPO_ROOT: ${{ github.workspace }}
   CODEX_ZSH_REPOSITORY: openai/codex
   CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
@@ -31,10 +39,36 @@ concurrency:
 jobs:
   tag-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ env.RELEASE_REF }}
           persist-credentials: false
+      - name: Verify existing annotated tag and pinned checkout
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]]
+          [[ "$RELEASE_REF" == "refs/tags/$RELEASE_TAG" ]]
+          [[ "$(git cat-file -t "$RELEASE_REF")" == tag ]]
+          commit="$(git rev-parse "$RELEASE_REF^{commit}")"
+          [[ "$(git rev-parse HEAD)" == "$commit" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$RELEASE_TAG" != rust-v0.0.65 || "$commit" == c09a7e4c4d2ead8eb08c7d5351ada51312e870ad ]]
+          fi
+          release_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          [[ "$release_status" == 404 ]] || { echo "Release already exists or status is unavailable ($release_status)"; exit 1; }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Validate tag matches Cargo.toml version
         shell: bash
@@ -43,15 +77,15 @@ jobs:
           echo "::group::Tag validation"
 
           # Release runs must come from a tag.
-          [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
+          [[ "${GITHUB_REF_TYPE}" == "tag" || "${GITHUB_EVENT_NAME}" == workflow_dispatch ]] \
             || { echo "❌  Not a tag ref"; exit 1; }
 
           # Release tags must match the version in Cargo.toml.
           # Release tags may be stable or prerelease versions.
-          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]] \
-            || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
+          [[ "${RELEASE_TAG}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$ ]] \
+            || { echo "❌  Tag '${RELEASE_TAG}' doesn't match expected format"; exit 1; }
 
-          tag_ver="${GITHUB_REF_NAME#rust-v}"
+          tag_ver="${RELEASE_TAG#rust-v}"
           cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
                         | sed -E 's/version *= *"([^"]+)".*/\1/')"
 
@@ -80,6 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
       - name: Detect complete macOS signing configuration
         id: resolve
@@ -111,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
       - name: Detect complete Windows signing configuration
         id: resolve
@@ -132,7 +168,7 @@ jobs:
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     # Linux releases also build the native voice runtime in this job.
-    timeout-minutes: 180
+    timeout-minutes: 300
     permissions:
       contents: read
       id-token: write
@@ -207,6 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
       - name: Print runner specs (Linux)
         if: ${{ runner.os == 'Linux' }}
@@ -481,7 +518,7 @@ jobs:
           voice_args=()
           if [[ "$BUNDLE" == "primary" && "$TARGET" == *-unknown-linux-musl ]]; then
             voice_args+=(--voice-release-dir "${RUNNER_TEMP}/signed-voice/${TARGET}")
-            voice_args+=(--release-version "${GITHUB_REF_NAME#rust-v}")
+            voice_args+=(--release-version "${RELEASE_TAG#rust-v}")
           fi
           bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
             --target "$TARGET" \
@@ -576,7 +613,7 @@ jobs:
             stage-runtime
             "$stage_dir"
             "$wheel_archive"
-            --codex-version "${GITHUB_REF_NAME}"
+            --codex-version "${RELEASE_TAG}"
             --platform-tag "$platform_tag"
           )
           python3 "${stage_runtime_args[@]}"
@@ -656,6 +693,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -695,6 +733,7 @@ jobs:
 
   sign-macos-binaries:
     needs:
+      - tag-check
       - build
       - build-macos-voice
       - resolve_macos_signing_mode
@@ -732,6 +771,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Download unsigned macOS binaries
@@ -946,6 +986,7 @@ jobs:
 
   prepare-unsigned-macos:
     needs:
+      - tag-check
       - build
       - resolve_macos_signing_mode
     if: ${{ needs.resolve_macos_signing_mode.outputs.signing_mode == 'unsigned' }}
@@ -979,6 +1020,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Download unsigned macOS binaries
@@ -1065,6 +1107,7 @@ jobs:
 
   package-macos:
     needs:
+      - tag-check
       - build
       - build-macos-voice
       - resolve_macos_signing_mode
@@ -1117,6 +1160,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Download mode-selected macOS binaries
@@ -1250,7 +1294,7 @@ jobs:
           voice_args=()
           if [[ "$BUNDLE" == "primary" ]]; then
             voice_args+=(--voice-release-dir "${RUNNER_TEMP}/release-voice/${TARGET}")
-            voice_args+=(--release-version "${GITHUB_REF_NAME#rust-v}")
+            voice_args+=(--release-version "${RELEASE_TAG#rust-v}")
           fi
           bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
             --target "$TARGET" \
@@ -1379,7 +1423,7 @@ jobs:
             stage-runtime \
             "$stage_dir" \
             "$wheel_archive" \
-            --codex-version "${GITHUB_REF_NAME}" \
+            --codex-version "${RELEASE_TAG}" \
             --platform-tag "$platform_tag"
           "${RUNNER_TEMP}/python-runtime-build-venv/bin/python" -m build --wheel --outdir "$wheel_dir" "$stage_dir"
 
@@ -1415,6 +1459,7 @@ jobs:
 
   sign-macos-dmg:
     needs:
+      - tag-check
       - package-macos
       - resolve_macos_signing_mode
     if: ${{ needs.resolve_macos_signing_mode.outputs.signing_mode == 'signed' }}
@@ -1439,6 +1484,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Download unsigned macOS DMG
@@ -1512,6 +1558,7 @@ jobs:
 
   finalize-macos:
     needs:
+      - tag-check
       - package-macos
       - sign-macos-dmg
       - resolve_macos_signing_mode
@@ -1561,6 +1608,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Download packaged macOS artifacts
@@ -1816,6 +1864,8 @@ jobs:
     uses: ./.github/workflows/rust-release-windows.yml
     with:
       signing_mode: ${{ needs.resolve_windows_signing_mode.outputs.signing_mode }}
+      source_commit: ${{ needs.tag-check.outputs.commit }}
+      release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     permissions:
       contents: read
       id-token: write
@@ -1844,7 +1894,7 @@ jobs:
       artifact-metadata: write
     outputs:
       version: ${{ steps.release_name.outputs.name }}
-      tag: ${{ github.ref_name }}
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       make_latest: ${{ steps.release_name.outputs.make_latest }}
       prerelease: ${{ steps.release_name.outputs.prerelease }}
 
@@ -1852,6 +1902,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.tag-check.outputs.commit }}
           persist-credentials: false
 
       - name: Prepare reviewed release notes
@@ -1862,10 +1913,10 @@ jobs:
 
           # On tag pushes, GITHUB_SHA may be a tag object for annotated tags;
           # peel it to the underlying commit.
-          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          commit="$(git rev-parse HEAD)"
           notes_path="${RUNNER_TEMP}/release-notes.md"
 
-          version="${GITHUB_REF_NAME#rust-v}"
+          version="${RELEASE_TAG#rust-v}"
           if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             .github/scripts/copy-release-notes.sh \
               ".github/release-notes/${version}.md" "$notes_path"
@@ -1948,9 +1999,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          python3 .github/scripts/oix-release-provenance.py prepare \
-            --dist dist --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+          commit="$(git rev-parse HEAD)"
+          workflow_commit="$commit"
+          provenance_script=".github/scripts/oix-release-provenance.py"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            workflow_commit="$GITHUB_SHA"
+            # The workflow is selected from main, but the release checkout is
+            # the immutable tag. Use the helper from the workflow commit so its
+            # accepted arguments match this workflow without moving the tag.
+            git fetch --no-tags --depth=1 origin "$workflow_commit"
+            [[ "$(git cat-file -t "$workflow_commit")" == commit ]]
+            provenance_script="${RUNNER_TEMP}/oix-release-provenance.py"
+            git show "$workflow_commit:.github/scripts/oix-release-provenance.py" > "$provenance_script"
+            [[ -s "$provenance_script" ]]
+          fi
+          python3 "$provenance_script" prepare \
+            --dist dist --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_REF" \
+            --workflow-ref "$GITHUB_REF" --workflow-commit "$workflow_commit" \
             --commit "$commit" --run-id "$GITHUB_RUN_ID"
 
       - name: Attest Open Interpreter package checksum manifest
@@ -1975,7 +2040,7 @@ jobs:
         run: |
           # Extract the version from the tag name, which is in the format
           # "rust-v0.1.0".
-          version="${GITHUB_REF_NAME#rust-v}"
+          version="${RELEASE_TAG#rust-v}"
           echo "name=${version}" >> $GITHUB_OUTPUT
           if [[ "${version}" == *-* ]]; then
             echo "make_latest=false" >> $GITHUB_OUTPUT
@@ -1990,11 +2055,23 @@ jobs:
           cp scripts/install/install.sh dist/install.sh
           cp scripts/install/install.ps1 dist/install.ps1
 
+      - name: Refuse an existing release before publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          [[ "$release_status" == 404 ]] || { echo "Release already exists or status is unavailable ($release_status)"; exit 1; }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: Open Interpreter ${{ steps.release_name.outputs.name }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           body_path: ${{ steps.release_notes.outputs.path }}
           files: dist/**
           overwrite_files: true

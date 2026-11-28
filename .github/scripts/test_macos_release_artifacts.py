@@ -29,6 +29,9 @@ def step(source: str, name: str) -> str:
 
 
 class MacosReleaseArtifactsTest(unittest.TestCase):
+    def test_build_matrix_allows_intel_app_server_to_finish(self) -> None:
+        self.assertIn("timeout-minutes: 300", job("build"))
+
     def test_both_modes_select_existing_helper_artifact_for_every_bundle(self) -> None:
         packaging = job("package-macos")
         download = step(packaging, "Download mode-selected macOS helpers")
