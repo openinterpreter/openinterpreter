@@ -168,7 +168,7 @@ jobs:
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     # Linux releases also build the native voice runtime in this job.
-    timeout-minutes: 180
+    timeout-minutes: 300
     permissions:
       contents: read
       id-token: write
