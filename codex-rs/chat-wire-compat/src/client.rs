@@ -316,6 +316,15 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
 /// for upstreams that don't support them keeps every harness working without
 /// changing behavior on the providers that rely on them.
 fn sanitize_chat_body_for_provider(body: &mut Value, base_url: &str) {
+    // Gemini's OpenAI-compatible endpoint rejects `store`, including `false`.
+    if base_url.parse::<http::Uri>().ok().is_some_and(|uri| {
+        uri.host()
+            .is_some_and(|host| host.eq_ignore_ascii_case("generativelanguage.googleapis.com"))
+    }) && let Some(obj) = body.as_object_mut()
+    {
+        obj.remove("store");
+    }
+
     let host = base_url.to_ascii_lowercase();
     let is_deepseek = host.contains("api.deepseek.com");
     let is_openrouter = is_openrouter_base_url(&host);
@@ -473,7 +482,27 @@ fn synthetic_sse_from_chat_completion_response(body: &[u8]) -> Result<String, Ap
             delta.insert("reasoning".to_string(), reasoning.clone());
         }
         if let Some(tool_calls) = message.get("tool_calls") {
-            delta.insert("tool_calls".to_string(), tool_calls.clone());
+            // Non-streaming tool calls have no index; assign each call its own
+            // position before handing these synthetic chunks to the stream parser.
+            let indexed_calls = match tool_calls {
+                Value::Array(calls) => Value::Array(
+                    calls
+                        .iter()
+                        .enumerate()
+                        .map(|(position, call)| {
+                            let mut call = call.clone();
+                            if let Some(object) = call.as_object_mut() {
+                                object
+                                    .entry("index")
+                                    .or_insert_with(|| Value::Number(position.into()));
+                            }
+                            call
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            };
+            delta.insert("tool_calls".to_string(), indexed_calls);
         }
         chunks.push(serde_json::json!({
             "id": id,
@@ -551,6 +580,7 @@ fn subagent_header(source: &Option<codex_protocol::protocol::SessionSource>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::ToolOutputKind;
     use codex_api::Compression;
     use codex_api::OpenAiVerbosity;
     use codex_api::ResponsesApiRequest;
@@ -564,6 +594,7 @@ mod tests {
     use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -641,6 +672,27 @@ mod tests {
 
     struct StaticAuth;
 
+    struct NonStreamingTransport {
+        body: Value,
+    }
+
+    impl HttpTransport for NonStreamingTransport {
+        async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
+            Ok(Response {
+                status: http::StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::from(self.body.to_string()),
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: Request,
+        ) -> Result<codex_client::StreamResponse, TransportError> {
+            unreachable!("non-streaming test only uses execute")
+        }
+    }
+
     impl AuthProvider for StaticAuth {
         fn add_auth_headers(&self, headers: &mut HeaderMap) {
             headers.insert(
@@ -699,6 +751,56 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn gemini_sanitizer_removes_only_store_for_exact_host() {
+        let expected = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "parallel_tool_calls": true,
+            "response_format": {"type": "json_object"}
+        });
+        for base_url in [
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM/v1beta/openai",
+            "https://generativelanguage.googleapis.com:443/v1beta/openai/",
+        ] {
+            for store in [None, Some(false), Some(true)] {
+                let mut body = expected.clone();
+                if let Some(store) = store {
+                    body["store"] = Value::Bool(store);
+                }
+                sanitize_chat_body_for_provider(&mut body, base_url);
+                assert_eq!(body, expected, "base URL: {base_url}, store: {store:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_sanitizer_preserves_other_hosts_and_invalid_urls() {
+        let expected = serde_json::json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+            "store": false,
+            "stream": true
+        });
+        for base_url in [
+            "https://api.openai.com/v1",
+            "https://aiplatform.googleapis.com/v1",
+            "https://generativelanguage.googleapis.com.example.com/v1",
+            "https://example.com/generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com@example.com/v1",
+            "https://generativelanguage.googleapis.com\n/v1",
+            "https://[generativelanguage.googleapis.com/v1",
+            "/generativelanguage.googleapis.com/v1",
+            "",
+        ] {
+            let mut body = expected.clone();
+            sanitize_chat_body_for_provider(&mut body, base_url);
+            assert_eq!(body, expected, "base URL: {base_url:?}");
+        }
     }
 
     #[test]
@@ -893,6 +995,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_request_omits_store_for_effective_gemini_upstream() {
+        let gemini_url = "https://generativelanguage.googleapis.com/v1beta/openai";
+        let other_url = "https://example.com/v1";
+        for (base_url, upstream_url, expected_store) in [
+            (gemini_url, None, None),
+            (other_url, None, Some(false)),
+            (other_url, Some(gemini_url), None),
+            (gemini_url, Some(other_url), Some(false)),
+        ] {
+            let client = ChatCompletionsCompatClient::new(
+                RecordingTransport::default(),
+                Provider {
+                    base_url: base_url.to_string(),
+                    ..test_provider()
+                },
+                Arc::new(StaticAuth),
+            );
+            let mut options = ResponsesOptions::default();
+            if let Some(upstream_url) = upstream_url {
+                options.extra_headers.insert(
+                    CHAT_WIRE_UPSTREAM_URL_HEADER,
+                    upstream_url.parse().expect("valid upstream header"),
+                );
+            }
+            let request = ResponsesApiRequest {
+                model: "gemini-2.5-pro".to_string(),
+                ..test_request()
+            };
+            let _stream = client
+                .stream_request(request, options)
+                .await
+                .expect("chat request should stream");
+            let recorded = client
+                .transport
+                .last_request
+                .lock()
+                .expect("recorded request");
+            let body = recorded
+                .as_ref()
+                .and_then(|request| request.body.as_ref())
+                .and_then(RequestBody::json)
+                .expect("chat request JSON body");
+            let mut expected = serde_json::json!({
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {"role": "system", "content": "be terse"},
+                    {"role": "user", "content": "hello"}
+                ],
+                "stream": true,
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "verbosity": "low"
+            });
+            if let Some(store) = expected_store {
+                expected["store"] = Value::Bool(store);
+            }
+            assert_eq!(
+                body, &expected,
+                "base URL: {base_url}, upstream: {upstream_url:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn stream_request_marks_thread_spawn_subagents_on_chat_requests() {
         let transport = RecordingTransport::default();
         let client =
@@ -1008,5 +1174,68 @@ mod tests {
             .expect("second json body");
         assert_eq!(first_body["max_tokens"], serde_json::json!(1024));
         assert_eq!(second_body["max_tokens"], serde_json::json!(140));
+    }
+
+    #[tokio::test]
+    async fn non_streaming_response_keeps_parallel_tool_calls_separate() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-parallel",
+            "model": "gpt-4.1",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant", "content": null,
+                    "tool_calls": [
+                        {"id": "call_ls", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}},
+                        {"id": "call_pwd", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}}
+                    ]
+                }
+            }]
+        });
+        let client = ChatCompletionsCompatClient::new(
+            NonStreamingTransport { body: response },
+            test_provider(),
+            Arc::new(StaticAuth),
+        );
+        let body = serde_json::json!({
+            "model": "gpt-4.1",
+            "messages": [{"role": "user", "content": "list and print cwd"}],
+        });
+        let stream = client
+            .stream_chat_request_value(
+                body,
+                HashMap::from([("bash".to_string(), ToolOutputKind::Function)]),
+                ResponsesOptions {
+                    session_id: None,
+                    thread_id: None,
+                    session_source: None,
+                    extra_headers: HeaderMap::new(),
+                    compression: Compression::None,
+                    turn_state: Some(Arc::new(OnceLock::new())),
+                },
+            )
+            .await
+            .expect("non-streaming request should succeed");
+        let calls = stream
+            .filter_map(|event| async move {
+                match event.expect("chat stream event") {
+                    codex_api::ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                        call_id,
+                        arguments,
+                        ..
+                    }) => Some((call_id, arguments)),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            calls,
+            vec![
+                ("call_ls".to_string(), r#"{"command":"ls"}"#.to_string()),
+                ("call_pwd".to_string(), r#"{"command":"pwd"}"#.to_string()),
+            ]
+        );
     }
 }
