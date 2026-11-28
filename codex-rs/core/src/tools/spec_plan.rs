@@ -1046,6 +1046,17 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
         return;
     }
 
+    if Harness::from_config_name(context.turn_context.config.harness.as_deref()).is_local() {
+        registry.add(HarnessAliasHandler::BashLower);
+        registry.add(HarnessAliasHandler::ReadLower);
+        registry.add(HarnessAliasHandler::WriteLower);
+        registry.add(HarnessAliasHandler::EditLower);
+        registry.add(HarnessAliasHandler::GlobLower);
+        registry.add(HarnessAliasHandler::GrepLower);
+        add_collaboration_tools(context, registry);
+        return;
+    }
+
     add_shell_tools(context, registry);
     add_harness_alias_tools(context, registry);
     add_mcp_resource_tools(context, registry);

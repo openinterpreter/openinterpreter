@@ -5,6 +5,7 @@ pub(crate) mod guidance;
 pub(crate) mod kimi_cli;
 pub(crate) mod kimi_code;
 pub(crate) mod little_coder;
+pub(crate) mod local;
 pub(crate) mod mini_swe_agent;
 pub(crate) mod minimal;
 pub(crate) mod opencode;

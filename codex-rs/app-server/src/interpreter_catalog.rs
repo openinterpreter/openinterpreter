@@ -104,6 +104,12 @@ const HARNESS_DEFINITIONS: &[HarnessDefinition] = &[
         wire_apis: CHAT_WIRE_APIS,
     },
     HarnessDefinition {
+        id: "local",
+        label: "Local",
+        description: "Use the local llama.cpp tool harness.",
+        wire_apis: CHAT_WIRE_APIS,
+    },
+    HarnessDefinition {
         id: "swe-agent",
         label: "SWE-agent",
         description: "Use the SWE-agent-style tool harness.",
@@ -187,7 +193,9 @@ fn provider_sort_priority(provider_id: &str) -> u16 {
 }
 
 fn provider_description(provider_id: &str, provider: &ModelProviderInfo) -> String {
-    let description = if provider.requires_openai_auth {
+    let description = if provider_id == codex_model_provider_info::LOCAL_OSS_PROVIDER_ID {
+        "Bundled llama.cpp • GGUF model download required on first use".to_string()
+    } else if provider.requires_openai_auth {
         "ChatGPT login".to_string()
     } else if let Some(env_key) = provider.env_key.as_deref() {
         format!("Environment: {env_key}")

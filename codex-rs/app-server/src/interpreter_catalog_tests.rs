@@ -17,6 +17,7 @@ fn app_server_lists_all_known_product_harnesses() {
         "kimi-cli",
         "kimi-code",
         "little-coder",
+        "local",
         "mini-swe-agent",
         "minimal",
         "opencode",

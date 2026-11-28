@@ -22,6 +22,8 @@ use crate::harness::guidance::guidance_for_harness;
 use crate::harness::kimi_cli::build_request as build_kimi_cli_request;
 use crate::harness::kimi_code::build_request as build_kimi_code_request;
 use crate::harness::little_coder::build_request as build_little_coder_request;
+use crate::harness::local::build_request as build_local_request;
+use crate::harness::local::repair_text_tool_calls as repair_local_text_tool_calls;
 use crate::harness::mini_swe_agent::build_request as build_mini_swe_agent_request;
 use crate::harness::mini_swe_agent::inject_no_tool_call_format_error as inject_mini_swe_agent_no_tool_call_format_error;
 use crate::harness::minimal::build_request as build_minimal_request;
@@ -62,6 +64,7 @@ pub(crate) struct ChatHarnessRequest {
 /// Harness-specific shaping applied to the provider response stream.
 pub(crate) enum ChatHarnessPostprocess {
     None,
+    LocalTextToolCalls,
     MiniSweAgentNoToolCallFormatError,
     SweAgentActionCalls {
         has_submit_review: bool,
@@ -123,6 +126,18 @@ pub(crate) fn build_chat_harness_request(
                     CodexErr::InvalidRequest(format!("invalid little-coder request: {err}"))
                 })?;
             (request_body, tool_kinds, None, ChatHarnessPostprocess::None)
+        }
+        ChatHarnessRoute::Local => {
+            let (request_body, tool_kinds) =
+                build_local_request(&guided_prompt, model_info, effort).map_err(|err| {
+                    CodexErr::InvalidRequest(format!("invalid local request: {err}"))
+                })?;
+            (
+                request_body,
+                tool_kinds,
+                None,
+                ChatHarnessPostprocess::LocalTextToolCalls,
+            )
         }
         ChatHarnessRoute::MiniSweAgent => {
             let (request_body, tool_kinds) =
@@ -217,6 +232,7 @@ pub(crate) fn apply_chat_harness_postprocess(
 ) -> ResponseStream {
     match postprocess {
         ChatHarnessPostprocess::None => stream,
+        ChatHarnessPostprocess::LocalTextToolCalls => repair_local_text_tool_calls(stream),
         ChatHarnessPostprocess::MiniSweAgentNoToolCallFormatError => {
             inject_mini_swe_agent_no_tool_call_format_error(stream)
         }

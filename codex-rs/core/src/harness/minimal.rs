@@ -25,9 +25,18 @@ pub(crate) fn build_request(
     model_info: &ModelInfo,
     effort: Option<ReasoningEffortConfig>,
 ) -> Result<(Value, ToolKinds), serde_json::Error> {
+    build_request_with_system_prompt(MINIMAL_SYSTEM_PROMPT, prompt, model_info, effort)
+}
+
+pub(crate) fn build_request_with_system_prompt(
+    system_prompt: &str,
+    prompt: &Prompt,
+    model_info: &ModelInfo,
+    effort: Option<ReasoningEffortConfig>,
+) -> Result<(Value, ToolKinds), serde_json::Error> {
     let mut messages = vec![json!({
         "role": "system",
-        "content": MINIMAL_SYSTEM_PROMPT,
+        "content": system_prompt,
     })];
     messages.extend(build_messages(prompt.get_formatted_input())?);
     let tools = build_tools(&prompt.tools)?;
