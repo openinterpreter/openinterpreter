@@ -92,6 +92,14 @@ jobs:
         run: cargo build --workspace --tests --exclude codex-linux-sandbox --exclude codex-voice-host --exclude codex-guardian-v2 --profile ci-test --locked
       - name: sccache stats (cache hit/miss proof)
         run: sccache --show-stats
+      # Hard gate: the scoped onboarding tests must RUN, not only compile. The
+      # build above proves they compile; on its own a green run says nothing
+      # about whether they pass, and the full nextest run stays disabled (see
+      # below). Scoped to the module onboarding changes, which has no
+      # pre-existing failures, and reusing the build's ci-test artifacts means
+      # this only executes.
+      - name: cargo test (codex-tui onboarding)
+        run: cargo test --locked -p codex-tui --lib --profile ci-test onboarding::local_provider::tests
       - name: Enable unprivileged user namespaces
         run: |
           # Required for bubblewrap-based sandbox tests on Linux CI runners.

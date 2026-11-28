@@ -177,6 +177,20 @@ pub(crate) async fn write_config_batch(
     request_handle: AppServerRequestHandle,
     edits: Vec<ConfigEdit>,
 ) -> Result<ConfigWriteResponse> {
+    write_config_batch_checked(request_handle, edits, /*expected_version*/ None).await
+}
+
+/// Write config edits against the user-config version they were derived from.
+///
+/// `config/batchWrite` rejects the write with a version conflict when the user
+/// config changed after `expected_version` was read, so edits computed from an
+/// older read can never replace another writer's changes. Pass `None` only when
+/// the caller does not depend on the state it read.
+pub(crate) async fn write_config_batch_checked(
+    request_handle: AppServerRequestHandle,
+    edits: Vec<ConfigEdit>,
+    expected_version: Option<String>,
+) -> Result<ConfigWriteResponse> {
     let request_id = RequestId::String(format!("tui-config-write-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::ConfigBatchWrite {
@@ -184,7 +198,7 @@ pub(crate) async fn write_config_batch(
             params: ConfigBatchWriteParams {
                 edits,
                 file_path: None,
-                expected_version: None,
+                expected_version,
                 reload_user_config: true,
             },
         })
@@ -214,6 +228,44 @@ pub(crate) async fn read_effective_config(
         })
         .await
         .wrap_err("config/read failed in TUI")
+}
+
+/// Read the effective config together with the version of the user layer the
+/// read was based on.
+///
+/// The version is what [`write_config_batch_checked`] hands back to the server:
+/// a caller that computes edits from this response can only apply them while the
+/// user config still matches the version it read, which keeps a stale read — for
+/// example a provider id allocated in an onboarding step — from overwriting a
+/// concurrent write. `None` when no user layer is loaded yet.
+pub(crate) async fn read_effective_config_with_user_version(
+    request_handle: AppServerRequestHandle,
+    cwd: String,
+) -> Result<(ConfigReadResponse, Option<String>)> {
+    let request_id = RequestId::String(format!("tui-config-read-{}", Uuid::new_v4()));
+    let response: ConfigReadResponse = request_handle
+        .request_typed(ClientRequest::ConfigRead {
+            request_id,
+            params: ConfigReadParams {
+                include_layers: true,
+                cwd: Some(cwd),
+            },
+        })
+        .await
+        .wrap_err("config/read failed in TUI")?;
+    let user_version = response
+        .layers
+        .as_ref()
+        .and_then(|layers| {
+            layers.iter().find(|layer| {
+                matches!(
+                    layer.name,
+                    codex_app_server_protocol::ConfigLayerSource::User { profile: None, .. }
+                )
+            })
+        })
+        .map(|layer| layer.version.clone());
+    Ok((response, user_version))
 }
 
 pub(crate) async fn read_remote_project_trust(
