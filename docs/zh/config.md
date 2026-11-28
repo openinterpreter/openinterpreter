@@ -144,6 +144,27 @@ wire_api = "chat"
 
 将 `APPNZ_API_KEY` 设置为你的 app.nz API 密钥。
 
+### AI Stupid Level
+
+[AI Stupid Level](https://aistupidlevel.info/router) 是一个托管的 OpenAI 兼容路由器。
+每个请求都会发送到在其持续运行的编码、推理和工具使用基准测试中当前得分最高的模型，
+并使用你自己的提供商密钥调用。可以将它添加为自定义 chat-completions 提供商，
+并将路由模式用作 `model`：
+
+```toml
+model_provider = "aistupidlevel"
+model = "auto-coding"
+
+[model_providers.aistupidlevel]
+name = "AI Stupid Level"
+base_url = "https://aistupidlevel.info/v1"
+env_key = "ASL_ROUTER_KEY"
+wire_api = "chat"
+```
+
+将 `ASL_ROUTER_KEY` 设置为你的 AI Stupid Level 路由器密钥。`auto-coding` 选择最佳编码模型，
+`auto-tooling` 适合包含大量工具调用的长时间代理会话，`auto-best` 使用综合得分最高的模型。
+
 ## Harness
 
 Open Interpreter 增加了 `harness` 设置，用于兼容模式，使代理的交互界面类似其他编码 harness，同时仍在原生 Open Interpreter 运行时中运行。
