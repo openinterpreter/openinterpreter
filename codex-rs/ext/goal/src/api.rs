@@ -249,6 +249,7 @@ impl GoalSetOutcome {
         RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
             thread_id: self.goal.thread_id,
             turn_id: None,
+            goal_id: Some(self.state_goal.goal_id.clone()),
             goal: self.goal.clone(),
         }))
     }

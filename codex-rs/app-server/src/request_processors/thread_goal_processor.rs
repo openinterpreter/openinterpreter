@@ -183,12 +183,17 @@ impl ThreadGoalRequestProcessor {
                 ThreadGoalDocumentSetResponse {
                     goal: goal.clone(),
                     document,
-                    revision,
+                    revision: revision.clone(),
                 },
             )
             .await;
-        self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
-            .await;
+        self.emit_thread_goal_updated_ordered(
+            thread_id,
+            goal,
+            revision.goal_id.clone(),
+            listener_command_tx,
+        )
+        .await;
         outcome.apply_runtime_effects(&self.goal_service).await;
         Ok(None)
     }
@@ -335,14 +340,19 @@ impl ThreadGoalRequestProcessor {
                     goal: goal.clone(),
                     document,
                     previous_revision,
-                    revision,
+                    revision: revision.clone(),
                     replayed,
                 },
             )
             .await;
         if !replayed {
-            self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
-                .await;
+            self.emit_thread_goal_updated_ordered(
+                thread_id,
+                goal,
+                revision.goal_id.clone(),
+                listener_command_tx,
+            )
+            .await;
             outcome.apply_runtime_effects(&self.goal_service).await;
         }
         Ok(None)
@@ -691,12 +701,17 @@ impl ThreadGoalRequestProcessor {
                 request_id.clone(),
                 ThreadGoalSetResponse {
                     goal: goal.clone(),
-                    revision,
+                    revision: revision.clone(),
                 },
             )
             .await;
-        self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
-            .await;
+        self.emit_thread_goal_updated_ordered(
+            thread_id,
+            goal,
+            revision.goal_id.clone(),
+            listener_command_tx,
+        )
+        .await;
         outcome.apply_runtime_effects(&self.goal_service).await;
         Ok(())
     }
@@ -944,11 +959,13 @@ impl ThreadGoalRequestProcessor {
         &self,
         thread_id: ThreadId,
         goal: ThreadGoal,
+        goal_id: String,
         listener_command_tx: Option<tokio::sync::mpsc::UnboundedSender<ThreadListenerCommand>>,
     ) {
         if let Some(listener_command_tx) = listener_command_tx {
             let command = crate::thread_state::ThreadListenerCommand::EmitThreadGoalUpdated {
                 turn_id: None,
+                goal_id: Some(goal_id.clone()),
                 goal: goal.clone(),
             };
             if listener_command_tx.send(command).is_ok() {
@@ -963,6 +980,7 @@ impl ThreadGoalRequestProcessor {
                 ThreadGoalUpdatedNotification {
                     thread_id: thread_id.to_string(),
                     turn_id: None,
+                    goal_id: Some(goal_id),
                     goal,
                 },
             ))

@@ -7,8 +7,17 @@ on:
         description: Whether to sign or package verified unsigned Windows artifacts.
         required: true
         type: string
+      source_commit:
+        description: Verified release tag commit from the parent workflow.
+        required: true
+        type: string
+      release_tag:
+        description: Verified release tag name from the parent workflow.
+        required: true
+        type: string
 
 env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
   WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
 
 jobs:
@@ -61,6 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - name: Print runner specs (Windows)
@@ -162,6 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -235,7 +246,7 @@ jobs:
             --host_action_env="PROCESSOR_ARCHITECTURE=$VOICE_WINDOWS_HOST_ARCH" \
             --output_groups=default,receipt,sdk \
             --workspace_status_command=./scripts/workspace-status.cmd \
-            --build_metadata=COMMIT_SHA="$GITHUB_SHA" \
+            --build_metadata=COMMIT_SHA="${{ inputs.source_commit }}" \
             -- \
             "//third_party/voice:native_runtime_windows_$ARCH" \
             @rules_rust//cargo/private/cargo_build_script_runner:test \
@@ -286,6 +297,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - name: Download prebuilt Windows binaries
@@ -340,6 +352,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.source_commit }}
           persist-credentials: false
 
       - uses: ./.github/actions/setup-ci
@@ -476,7 +489,7 @@ jobs:
           target="${{ matrix.target }}"
           archive_script="${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh"
           voice_args=(--voice-release-dir "$VOICE_RELEASE_DIR")
-          voice_args+=(--release-version "${GITHUB_REF_NAME#rust-v}")
+          voice_args+=(--release-version "${RELEASE_TAG#rust-v}")
           bash "$archive_script" \
             --target "$target" --bundle primary \
             --entrypoint-dir "$CARGO_TARGET_DIR/$target/release" \
@@ -550,7 +563,7 @@ jobs:
             stage-runtime \
             "$stage_dir" \
             "$wheel_package" \
-            --codex-version "${GITHUB_REF_NAME}" \
+            --codex-version "${RELEASE_TAG}" \
             --platform-tag "$platform_tag"
           "${RUNNER_TEMP}/python-runtime-build-venv/Scripts/python.exe" -m build --wheel --outdir "$wheel_dir" "$stage_dir"
 

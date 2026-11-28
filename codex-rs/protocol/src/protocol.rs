@@ -4129,6 +4129,10 @@ pub struct ThreadGoalUpdatedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub turn_id: Option<String>,
+    /// The immutable identity of the Goal that produced this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub goal_id: Option<String>,
     pub goal: ThreadGoal,
 }
 

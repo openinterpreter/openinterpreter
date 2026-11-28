@@ -841,6 +841,7 @@ mod tests {
         ThreadGoalUpdatedEvent {
             thread_id,
             turn_id: None,
+            goal_id: None,
             goal: ThreadGoal {
                 thread_id,
                 objective: objective.to_string(),

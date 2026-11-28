@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,11 +38,11 @@ class ReleaseProvenanceTest(unittest.TestCase):
                     "GH_CALLS": str(self.calls),
                     "GH_RUN_URI": "https://github.com/openinterpreter/openinterpreter/actions/runs/123/attempts/1"}
 
-    def run_script(self, mode):
+    def run_script(self, mode, *extra):
         return subprocess.run(
             [sys.executable, str(SCRIPT), mode, "--dist", str(self.dist),
              "--repo", "openinterpreter/openinterpreter", "--ref", REF,
-             "--commit", COMMIT, "--run-id", "123"],
+             "--commit", COMMIT, "--run-id", "123", *extra],
             env=self.env, capture_output=True, text=True,
         )
 
@@ -78,6 +79,31 @@ class ReleaseProvenanceTest(unittest.TestCase):
         self.env["GH_RUN_URI"] = "https://github.com/openinterpreter/openinterpreter/actions/runs/124/attempts/1"
         self.assertNotEqual(self.run_script("prepare").returncode, 0)
         self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
+
+    def test_manual_existing_tag_uses_actual_workflow_identity(self):
+        source_sha = "b" * 40
+        self.assertEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/main",
+                                        "--workflow-commit", source_sha).returncode, 0)
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all("--source-ref refs/heads/main" in c and
+                            "--source-digest " + source_sha in c and
+                            "--cert-identity https://github.com/openinterpreter/openinterpreter/.github/workflows/rust-release.yml@refs/heads/main" in c
+                            for c in calls))
+
+    def test_manual_attestation_identity_cannot_be_arbitrary(self):
+        self.assertNotEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/other",
+                                            "--workflow-commit", "b" * 40).returncode, 0)
+        self.assertNotEqual(self.run_script("prepare", "--workflow-ref", "refs/heads/main").returncode, 0)
+        self.assertFalse((self.dist / "open-interpreter-package_SHA256SUMS").exists())
+
+    def test_dispatch_prepares_with_helper_from_workflow_commit(self):
+        workflow = (SCRIPT.parent.parent / "workflows" / "rust-release.yml").read_text()
+        step = workflow.split("- name: Verify original Linux package provenance and prepare checksum manifest", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        self.assertIn('git fetch --no-tags --depth=1 origin "$workflow_commit"', step)
+        self.assertIn('git show "$workflow_commit:.github/scripts/oix-release-provenance.py"', step)
+        self.assertRegex(step, re.compile(r'python3 "\$provenance_script" prepare'))
 
 
 if __name__ == "__main__":

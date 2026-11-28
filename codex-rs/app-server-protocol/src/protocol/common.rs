@@ -4598,8 +4598,22 @@ mod tests {
         let updated = ServerNotification::ThreadGoalUpdated(v2::ThreadGoalUpdatedNotification {
             thread_id: "thr_123".to_string(),
             turn_id: None,
+            goal_id: Some("01234567-89ab-4cde-8f01-23456789abcd".to_string()),
             goal,
         });
+        let encoded = serde_json::to_value(&updated).expect("serialize Goal update");
+        assert_eq!(
+            encoded["params"]["goalId"],
+            "01234567-89ab-4cde-8f01-23456789abcd"
+        );
+        let mut legacy = encoded.clone();
+        legacy["params"]
+            .as_object_mut()
+            .expect("Goal update params")
+            .remove("goalId");
+        let decoded: ServerNotification =
+            serde_json::from_value(legacy).expect("older Goal update without ID");
+        assert!(matches!(decoded, ServerNotification::ThreadGoalUpdated(v) if v.goal_id.is_none()));
         let cleared = ServerNotification::ThreadGoalCleared(v2::ThreadGoalClearedNotification {
             thread_id: "thr_123".to_string(),
         });

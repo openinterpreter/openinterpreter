@@ -410,10 +410,12 @@ impl GoalRuntimeHandle {
             GoalEventAttribution::Turn(turn_id),
         );
         self.inner.accounting_state.clear_active_goal();
+        let goal_id = goal.goal_id.clone();
         let goal = protocol_goal_from_state(goal);
         self.inner.event_emitter.thread_goal_updated(
             format!("{turn_id}:{event_name}"),
             Some(turn_id.to_string()),
+            goal_id,
             goal,
         );
         Ok(())
@@ -675,6 +677,7 @@ impl GoalRuntimeHandle {
                 self.inner.event_emitter.thread_goal_updated(
                     event_id.to_string(),
                     Some(turn_id.to_string()),
+                    goal_id.clone(),
                     goal.clone(),
                 );
                 Some(AccountedGoalProgress { goal, goal_id })
@@ -736,6 +739,7 @@ impl GoalRuntimeHandle {
                 self.inner.event_emitter.thread_goal_updated(
                     event_id.to_string(),
                     /*turn_id*/ None,
+                    goal_id.clone(),
                     goal.clone(),
                 );
                 Some(AccountedGoalProgress { goal, goal_id })
